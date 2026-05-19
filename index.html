@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashy OS Core</title>
+    <title>Dashy OS Core - Secure Node</title>
     <style>
         :root {
             --bg-main: #090b11;
@@ -36,49 +36,92 @@
             overflow: hidden;
         }
 
-        /* PREMIUM WELCOME LAYER */
-        .start-overlay {
+        /* PREMIUM SECURE LOGIN PORTAL */
+        .login-overlay {
             position: fixed;
             top: 0;
             left: 0;
             width: 100vw;
             height: 100vh;
             background: radial-gradient(circle at center, #111424 0%, #06070c 100%);
-            z-index: 1000;
+            z-index: 2000;
             display: flex;
             justify-content: center;
             align-items: center;
-            transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s ease;
         }
 
-        .start-card {
-            text-align: center;
+        .login-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
             padding: 40px;
-            max-width: 440px;
+            border-radius: 24px;
+            max-width: 400px;
             width: 90%;
+            text-align: center;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
         }
 
-        .start-card h1 {
-            font-size: 2.5rem;
+        .login-card h1 {
+            font-size: 2.2rem;
             font-weight: 700;
             letter-spacing: -0.05em;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
             background: var(--accent-gradient);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
 
-        .start-card p {
+        .login-card p {
             color: var(--text-muted);
-            font-size: 1rem;
-            margin-bottom: 32px;
+            font-size: 0.9rem;
+            margin-bottom: 28px;
         }
 
-        #startBtn {
+        .input-group {
+            text-align: left;
+            margin-bottom: 18px;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .login-input {
+            width: 100%;
+            padding: 12px 16px;
+            background-color: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            color: var(--text-main);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .login-input:focus {
+            border-color: var(--accent-solid);
+        }
+
+        #loginError {
+            color: #ef4444;
+            font-size: 0.8rem;
+            margin-bottom: 16px;
+            display: none;
+            font-weight: 500;
+        }
+
+        #authSubmitBtn {
             background: var(--accent-gradient);
             color: white;
             border: none;
-            padding: 14px 28px;
+            padding: 14px;
             font-size: 0.95rem;
             font-weight: 600;
             border-radius: 12px;
@@ -86,9 +129,10 @@
             width: 100%;
             box-shadow: 0 4px 20px rgba(59, 130, 246, 0.25);
             transition: all 0.2s ease;
+            margin-top: 10px;
         }
 
-        #startBtn:hover {
+        #authSubmitBtn:hover {
             transform: translateY(-1px);
             box-shadow: 0 6px 24px rgba(59, 130, 246, 0.35);
         }
@@ -369,7 +413,6 @@
             padding-left: 4px;
         }
 
-        /* Markdown Parsing Styles */
         .ai-message strong {
             font-weight: 600;
             color: #fff;
@@ -456,7 +499,6 @@
             to { opacity: 1; transform: scale(1.02); }
         }
 
-        /* PLATFORM RESPONSIVENESS */
         @media (max-width: 768px) {
             .sidebar {
                 position: absolute;
@@ -474,11 +516,24 @@
 </head>
 <body>
 
-    <div class="start-overlay" id="startOverlay">
-        <div class="start-card">
-            <h1>Dashy Core</h1>
-            <p>Enterprise Language Pipeline Interface</p>
-            <button id="startBtn">Connect Core</button> 
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-card">
+            <h1>Dashy OS</h1>
+            <p>Enter node credentials to link interface</p>
+            
+            <div class="input-group">
+                <label for="usernameInput">Node Identity</label>
+                <input type="text" id="usernameInput" class="login-input" placeholder="Username" autocomplete="off">
+            </div>
+
+            <div class="input-group">
+                <label for="passwordInput">Security Passkey</label>
+                <input type="password" id="passwordInput" class="login-input" placeholder="••••••••">
+            </div>
+
+            <div id="loginError">Invalid Gateway Credentials</div>
+
+            <button id="authSubmitBtn">Initialize Connection</button> 
         </div>
     </div>
 
@@ -501,7 +556,7 @@
                     <h2>Dashy Intelligence</h2>
                     <div class="status-container">
                         <div class="status-tag"><span class="pulse-dot"></span> NODE ACTIVE</div>
-                        <div class="creator-tag">PRATHAM OS</div>
+                        <div class="creator-tag" id="userBadge">SECURE SESSION</div>
                     </div>
                 </div>
             </div>
@@ -525,17 +580,28 @@
     <script>
         // BACKEND CONTROL PROTOCOLS
         const KEYS = [
-            'AIzaSyBwubU7kUX9F2pS-if7_xHUp7nsqxIG4WI',
+            'AIzaSyBwubu7kUX9F2pS-if7_xHUp7nsqxIG4WI',
             'AIzaSyBwubU7kUX9F2pS-if7_xHUp7nsqxIG4WI'
         ];
 
-        let activeChatId = 'chat_1';
-        let chatsMemory = JSON.parse(localStorage.getItem('dashy_enterprise_v1')) || {
-            'chat_1': { title: 'Core Interface Initialize', logs: [{ text: "Secure pipeline initialized. Speak your instructions, Pratham.", sender: "ai" }] }
+        // SETUP CUSTOM PASSWORDS HERE
+        const CREDENTIALS = {
+            username: "admin",
+            password: "password123" 
         };
 
-        const startOverlay = document.getElementById('startOverlay');
-        const startBtn = document.getElementById('startBtn');
+        let activeChatId = 'chat_1';
+        let chatsMemory = JSON.parse(localStorage.getItem('dashy_enterprise_v1')) || {
+            'chat_1': { title: 'Core Interface Initialize', logs: [{ text: "Secure pipeline initialized. Speak your instructions.", sender: "ai" }] }
+        };
+
+        const loginOverlay = document.getElementById('loginOverlay');
+        const usernameInput = document.getElementById('usernameInput');
+        const passwordInput = document.getElementById('passwordInput');
+        const loginError = document.getElementById('loginError');
+        const authSubmitBtn = document.getElementById('authSubmitBtn');
+        const userBadge = document.getElementById('userBadge');
+        
         const sidebar = document.getElementById('sidebar');
         const menuToggleBtn = document.getElementById('menuToggleBtn');
         const chatBox = document.getElementById('chatBox');
@@ -545,6 +611,37 @@
         const chatList = document.getElementById('chatList');
         const searchChats = document.getElementById('searchChats');
         const newChatBtn = document.getElementById('newChatBtn');
+
+        // Handle Secure Login Authorization
+        function checkAuth() {
+            const userVal = usernameInput.value.trim();
+            const passVal = passwordInput.value;
+
+            if (userVal === CREDENTIALS.username && passVal === CREDENTIALS.password) {
+                sessionStorage.setItem('dashy_authenticated', 'true');
+                revealDashboard();
+            } else {
+                loginError.style.display = 'block';
+                passwordInput.value = '';
+            }
+        }
+
+        function revealDashboard() {
+            loginOverlay.style.opacity = '0';
+            loginOverlay.style.transform = 'scale(0.95)';
+            userBadge.innerText = CREDENTIALS.username.toUpperCase() + " ACTIVE";
+            setTimeout(() => loginOverlay.remove(), 500);
+            renderSidebar();
+            loadActiveChat();
+        }
+
+        authSubmitBtn.addEventListener('click', checkAuth);
+        passwordInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') checkAuth(); });
+
+        // Auto-login pass if already verified this browser session
+        if (sessionStorage.getItem('dashy_authenticated') === 'true') {
+            revealDashboard();
+        }
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         let recognition = null;
@@ -574,12 +671,10 @@
             window.speechSynthesis.speak(utterance);
         }
 
-        // Markdown Engine Wrapper
         function formatMarkdown(text) {
             return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         }
 
-        startBtn.addEventListener('click', () => { startOverlay.style.opacity = '0'; setTimeout(() => startOverlay.remove(), 400); renderSidebar(); loadActiveChat(); });
         menuToggleBtn.addEventListener('click', () => sidebar.classList.toggle('closed'));
 
         function renderSidebar(filterText = '') {
@@ -615,7 +710,7 @@
 
             const label = document.createElement('span');
             label.classList.add('sender-label');
-            label.innerText = sender === 'ai' ? 'Dashy' : 'Pratham';
+            label.innerText = sender === 'ai' ? 'Dashy' : CREDENTIALS.username;
 
             const messageDiv = document.createElement('div');
             messageDiv.classList.add('message', `${sender}-message`);
