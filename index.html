@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashy OS Core - Secure Node</title>
+    <title>Dashy OS Core - Public Node</title>
     <style>
         :root {
             --bg-main: #090b11;
@@ -519,11 +519,11 @@
     <div class="login-overlay" id="loginOverlay">
         <div class="login-card">
             <h1>Dashy OS</h1>
-            <p>Enter workspace credentials to link node</p>
+            <p>Initialize your custom environment session</p>
             
             <div class="input-group">
-                <label for="usernameInput">Identity Username</label>
-                <input type="text" id="usernameInput" class="login-input" placeholder="e.g., admin" autocomplete="off">
+                <label for="usernameInput">Display Username</label>
+                <input type="text" id="usernameInput" class="login-input" placeholder="Enter your name" autocomplete="off">
             </div>
 
             <div class="input-group">
@@ -531,7 +531,7 @@
                 <input type="email" id="emailInput" class="login-input" placeholder="name@domain.com" autocomplete="off">
             </div>
 
-            <div id="loginError">Invalid Identity Parameters</div>
+            <div id="loginError">Please enter a valid username and email format.</div>
 
             <button id="authSubmitBtn">Initialize Session</button> 
         </div>
@@ -556,7 +556,7 @@
                     <h2>Dashy Intelligence</h2>
                     <div class="status-container">
                         <div class="status-tag"><span class="pulse-dot"></span> NODE ACTIVE</div>
-                        <div class="creator-tag" id="userBadge">SECURE NODE</div>
+                        <div class="creator-tag" id="userBadge">PUBLIC SESSION</div>
                     </div>
                 </div>
             </div>
@@ -584,18 +584,12 @@
             'AIzaSyBwubU7kUX9F2pS-if7_xHUp7nsqxIG4WI'
         ];
 
-        // SETUP CHOSEN GATEWAY PARAMETERS HERE
-        const ALLOWED_CREDENTIALS = {
-            username: "Pratham",
-            email: "owner@dashy.com"
-        };
-
         let activeChatId = 'chat_1';
         let chatsMemory = JSON.parse(localStorage.getItem('dashy_enterprise_v1')) || {
             'chat_1': { title: 'Core Interface Initialize', logs: [{ text: "Secure pipeline initialized. Speak your instructions.", sender: "ai" }] }
         };
 
-        let currentActiveUser = "User";
+        let currentActiveUser = localStorage.getItem('dashy_saved_username') || "User";
 
         const loginOverlay = document.getElementById('loginOverlay');
         const usernameInput = document.getElementById('usernameInput');
@@ -614,21 +608,27 @@
         const searchChats = document.getElementById('searchChats');
         const newChatBtn = document.getElementById('newChatBtn');
 
-        // SINGLE SIGN-ON MULTI-TAB CONTROLLER
-        // Automatically checks if another tab or login is already running on this device
+        // SINGLE SIGN-ON DEVICE LOCK (Per-Browser Session Protection)
         if (localStorage.getItem('dashy_device_session_active') === 'true' && sessionStorage.getItem('dashy_tab_authenticated') !== 'true') {
             alert("Security Alert: An active session is already broadcasting on this device. Multiple parallel logins are blocked.");
             document.body.innerHTML = `<div style="color:#ef4444; font-family:sans-serif; text-align:center; margin-top:20vh; font-weight:600;">ACCESS DENIED: Multiple concurrent device logs detected.</div>`;
             throw new Error("SSO Lock Active");
         }
 
+        // Simple Email Format Validator Rule
+        function validateEmail(email) {
+            const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            return re.test(email);
+        }
+
         function checkAuth() {
             const userVal = usernameInput.value.trim();
             const emailVal = emailInput.value.trim().toLowerCase();
 
-            if (userVal.toLowerCase() === ALLOWED_CREDENTIALS.username.toLowerCase() && emailVal === ALLOWED_CREDENTIALS.email.toLowerCase()) {
-                // Set device session flags
+            if (userVal.length >= 2 && validateEmail(emailVal)) {
+                // Set lock and register user data dynamically
                 localStorage.setItem('dashy_device_session_active', 'true');
+                localStorage.setItem('dashy_saved_username', userVal);
                 sessionStorage.setItem('dashy_tab_authenticated', 'true');
                 currentActiveUser = userVal;
                 revealDashboard();
@@ -649,13 +649,12 @@
         authSubmitBtn.addEventListener('click', checkAuth);
         emailInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') checkAuth(); });
 
-        // Auto-bypass if this specific tab was already cleared
+        // Auto-bypass if user is already checked-in during this tab session
         if (sessionStorage.getItem('dashy_tab_authenticated') === 'true') {
-            currentActiveUser = ALLOWED_CREDENTIALS.username;
-            setTimeout(revealDashboard, 50);
+            revealDashboard();
         }
 
-        // Release lock on explicit window close to allow subsequent clear entries
+        // Release the device lock when the user closes out the browser session cleanly
         window.addEventListener('beforeunload', () => {
             if (sessionStorage.getItem('dashy_tab_authenticated') === 'true') {
                 localStorage.removeItem('dashy_device_session_active');
