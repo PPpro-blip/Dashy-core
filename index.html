@@ -3,548 +3,271 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashy OS Core - Public Node</title>
+    <title>Dashy OS // Secure Node Workspace</title>
+    
+    <script type="text/javascript">
+        (function(l) {
+            if (l.search[0] === '?') {
+                var q = {};
+                l.search.slice(1).split('&').forEach(function(v) {
+                    var a = v.split('=');
+                    q[a[0]] = a.slice(1).join('=').replace(/~and~/g, '&');
+                });
+                if (q.p !== undefined) {
+                    window.history.replaceState(null, null,
+                        l.pathname.slice(0, -1) + (q.p || '') +
+                        (q.q ? ('?' + q.q) : '') + l.hash
+                    );
+                }
+            }
+        }(window.location));
+    </script>
+    
     <style>
-        :root {
-            --bg-main: #090b11;
-            --bg-sidebar: #0f111a;
-            --bg-card: #141724;
-            --bg-input: #1a1d2e;
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
-            --accent-gradient: linear-gradient(135deg, #3b82f6, #8b5cf6);
-            --accent-solid: #3b82f6;
-            --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        /* ==========================================================================
+           1. MASTER INTERFACE DESIGN SYSTEM & CORE RESET
+           ========================================================================== */
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+            font-family: 'Courier New', Courier, monospace; 
         }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: var(--font-family);
-            -webkit-font-smoothing: antialiased;
+        body { 
+            background: #02040a; 
+            background-image: linear-gradient(rgba(6, 182, 212, 0.05) 1px, transparent 1px), 
+                              linear-gradient(90deg, rgba(6, 182, 212, 0.05) 1px, transparent 1px); 
+            background-size: 30px 30px; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            overflow: hidden; 
+            position: relative; 
         }
 
-        body {
-            background-color: var(--bg-main);
-            color: var(--text-main);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            overflow: hidden;
+        /* PERIMETER CYBER LASER BORDERS */
+        body::before, body::after { 
+            content: ''; 
+            position: absolute; 
+            width: 100vw; 
+            height: 4px; 
+            z-index: 90; 
+            pointer-events: none; 
+            background: linear-gradient(90deg, #ff007f, #00f0ff, #7000ff, #ff007f); 
+            background-size: 300% 100%; 
+            animation: rgbLaser 6s linear infinite; 
+            box-shadow: 0 0 20px rgba(0, 240, 255, 0.8), 0 0 40px rgba(255, 0, 127, 0.6); 
         }
+        body::before { top: 0; }
+        body::after { bottom: 0; }
 
-        /* PREMIUM SECURE LOGIN PORTAL */
-        .login-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            background: radial-gradient(circle at center, #111424 0%, #06070c 100%);
-            z-index: 2000;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1), transform 0.5s ease;
+        /* BACKDROP NEON GLOW FIELDS */
+        .glow-orb { 
+            position: absolute; 
+            border-radius: 50%; 
+            filter: blur(120px); 
+            opacity: 0.35; 
+            z-index: 1; 
+            pointer-events: none; 
+            animation: floatingOrbs 12s infinite ease-in-out alternate; 
         }
+        .orb-1 { width: 450px; height: 450px; background: #06b6d4; top: -10%; left: -10%; }
+        .orb-2 { width: 500px; height: 500px; background: #d946ef; bottom: -10%; right: -10%; animation-delay: -4s; }
 
-        .login-card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-color);
-            padding: 40px;
-            border-radius: 24px;
-            max-width: 400px;
-            width: 90%;
-            text-align: center;
-            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+        /* ==========================================================================
+           2. IDENTITY SECURE INTERCEPTOR OVERLAY (LOGIN GATE)
+           ========================================================================== */
+        .auth-overlay { 
+            position: fixed; 
+            top: 0; left: 0; 
+            width: 100vw; height: 100vh; 
+            background: #070b12; 
+            z-index: 9999; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            padding: 20px;
+            transition: opacity 0.4s ease, visibility 0.4s;
         }
-
-        .login-card h1 {
-            font-size: 2.2rem;
-            font-weight: 700;
-            letter-spacing: -0.05em;
+        .auth-card { 
+            background: #0f172a; 
+            padding: 40px; 
+            border-radius: 28px; 
+            border: 1px solid rgba(112, 0, 255, 0.3); 
+            box-shadow: 0 25px 70px rgba(0,0,0,0.7); 
+            width: 100%; 
+            max-width: 460px; 
+        }
+        .auth-card h1 { 
+            font-size: 2.2rem; 
+            color: #5865f2; 
+            text-shadow: 0 0 15px rgba(88, 101, 242, 0.4);
+            text-align: center; 
+            letter-spacing: 2px;
             margin-bottom: 8px;
-            background: var(--accent-gradient);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        }
+        .auth-subtitle { color: #64748b; text-align: center; font-size: 0.85rem; margin-bottom: 30px; }
+
+        .input-field { margin-bottom: 20px; display: flex; flex-direction: column; gap: 8px; }
+        .input-field label { color: #94a3b8; font-size: 0.7rem; font-weight: bold; letter-spacing: 1px; }
+        .input-field input { 
+            width: 100%; padding: 16px; 
+            background: #1e293b; border: 1px solid rgba(255,255,255,0.05); 
+            border-radius: 12px; color: #fff; font-size: 0.9rem; outline: none; 
+            transition: border 0.2s;
+        }
+        .input-field input:focus { border-color: #5865f2; }
+
+        .error-banner { 
+            color: #ef4444; font-size: 0.75rem; text-align: center; margin-bottom: 20px; 
+            display: none; font-weight: bold; letter-spacing: 0.5px;
+        }
+        #initializeBtn { 
+            background: linear-gradient(135deg, #5865f2, #7000ff); color: #fff; 
+            border: none; padding: 18px; width: 100%; border-radius: 14px; 
+            font-size: 0.95rem; font-weight: bold; letter-spacing: 1.5px; cursor: pointer; 
+            box-shadow: 0 4px 20px rgba(88, 101, 242, 0.3); transition: transform 0.2s;
+        }
+        #initializeBtn:hover { transform: translateY(-2px); }
+
+        /* ==========================================================================
+           3. APPLICATION SHELL & WINDOW MATRICES
+           ========================================================================== */
+        .chat-container { 
+            width: 100%; max-width: 950px; height: 85vh; 
+            background: rgba(10, 15, 30, 0.8); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); 
+            border-radius: 24px; display: flex; overflow: hidden; position: relative; 
+            border: 1px solid rgba(6, 182, 212, 0.3); z-index: 10; 
+            transition: all 0.4s cubic-bezier(0.25, 1, 0.5, 1); 
         }
 
-        .login-card p {
-            color: var(--text-muted);
-            font-size: 0.9rem;
-            margin-bottom: 28px;
+        /* WINDOW STATE ENGINE TRANSFORMS */
+        .chat-container.is-minimized {
+            height: 65px !important; max-height: 65px !important;
+            max-width: 480px !important; border-color: #d946ef !important;
+            box-shadow: 0 0 35px rgba(217, 70, 239, 0.6) !important;
+            transform: translateY(38vh);
+        }
+        .chat-container.is-minimized .window-content-body,
+        .chat-container.is-minimized .sidebar { display: none !important; }
+
+        .chat-container.fullscreen { 
+            max-width: 100vw !important; width: 100vw !important; height: 100vh !important; 
+            border-radius: 0px !important; border: none !important; transform: none !important;
         }
 
-        .input-group {
-            text-align: left;
-            margin-bottom: 18px;
+        /* ==========================================================================
+           4. SIDEBAR LOG COMPONENT STYLE SETS
+           ========================================================================== */
+        .sidebar { 
+            width: 280px; background: rgba(7, 11, 22, 0.98); border-right: 1px solid rgba(6, 182, 212, 0.2); 
+            display: flex; flex-direction: column; transition: transform 0.3s ease, width 0.3s ease; 
+            transform: translateX(0); overflow: hidden; z-index: 50; 
         }
+        .sidebar.closed { width: 0px; transform: translateX(-100%); border-right: none; }
+        .sidebar-header { padding: 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+        .sidebar-header h3 { color: #00f0ff; font-size: 0.9rem; }
+        #newChatBtn { background: transparent; color: #00f0ff; border: 1px solid #00f0ff; width: 32px; height: 32px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 1.1rem; }
 
-        .input-group label {
-            display: block;
-            font-size: 0.75rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
+        .search-box { padding: 12px 20px; }
+        #searchChats { width: 100%; padding: 12px; background: #02040a; border: 1px solid rgba(6, 182, 212, 0.2); border-radius: 8px; color: #fff; font-size: 0.85rem; outline: none; }
 
-        .login-input {
-            width: 100%;
-            padding: 12px 16px;
-            background-color: var(--bg-input);
-            border: 1px solid var(--border-color);
-            border-radius: 10px;
-            color: var(--text-main);
-            font-size: 0.95rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
+        .chat-list { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+        .chat-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid transparent; color: #94a3b8; border-radius: 10px; cursor: pointer; transition: all 0.2s; gap: 8px;}
+        .chat-item:hover, .chat-item.active { background: rgba(6, 182, 212, 0.1); color: #fff; border-color: rgba(6, 182, 212, 0.3); }
+        .chat-title { font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+        .delete-chat { background: transparent; border: none; color: #ff4d4d; opacity: 0.7; cursor: pointer; font-size: 1.1rem; padding: 4px; }
 
-        .login-input:focus {
-            border-color: var(--accent-solid);
-        }
+        /* ==========================================================================
+           5. MAIN CORE INTERFACE WORKSPACE PANELS
+           ========================================================================== */
+        .main-panel { flex: 1; display: flex; flex-direction: column; background: transparent; min-width: 0; }
+        .chat-header { background: rgba(15, 23, 42, 0.7); padding: 15px 20px; border-bottom: 1px solid rgba(6, 182, 212, 0.2); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+        .header-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+        #menuToggleBtn { background: transparent; border: none; font-size: 1.5rem; cursor: pointer; z-index: 55; padding: 4px; }
+        .chat-header h2 { font-size: 1.1rem; color: #fff; letter-spacing: 1px; text-shadow: 0 0 10px #06b6d4; white-space: nowrap; }
 
-        #loginError {
-            color: #ef4444;
-            font-size: 0.8rem;
-            margin-bottom: 16px;
-            display: none;
-            font-weight: 500;
-        }
+        .status-tag { background: rgba(34, 197, 94, 0.08); color: #4ade80; padding: 6px 10px; border-radius: 20px; font-size: 0.65rem; border: 1px solid rgba(34, 197, 94, 0.2); display: flex; align-items: center; gap: 6px; white-space: nowrap;}
+        .pulse-dot { width: 6px; height: 6px; background: #22c55e; border-radius: 50%; animation: pulse 1.5s infinite; }
+        .creator-tag { background: rgba(234, 179, 8, 0.1); color: #eab308; border: 1px solid rgba(234, 179, 8, 0.3); padding: 6px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; white-space: nowrap; }
 
-        #authSubmitBtn {
-            background: var(--accent-gradient);
-            color: white;
-            border: none;
-            padding: 14px;
-            font-size: 0.95rem;
-            font-weight: 600;
-            border-radius: 12px;
-            cursor: pointer;
-            width: 100%;
-            box-shadow: 0 4px 20px rgba(59, 130, 246, 0.25);
-            transition: all 0.2s ease;
-            margin-top: 10px;
-        }
+        .window-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+        .win-ctrl-btn { background: transparent; color: #00f0ff; border: none; cursor: pointer; padding: 6px; display: flex; align-items: center; transition: color 0.2s, transform 0.2s; }
+        .win-ctrl-btn:hover { color: #d946ef; transform: scale(1.1); }
 
-        #authSubmitBtn:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 6px 24px rgba(59, 130, 246, 0.35);
-        }
+        .window-content-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .chat-box { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+        .message { max-width: 85%; padding: 14px 18px; border-radius: 16px; font-size: 0.9rem; line-height: 1.4; word-wrap: break-word; animation: fadeIn 0.3s ease-out forwards; }
+        .bot-name { display: block; font-size: 0.65rem; font-weight: bold; margin-bottom: 4px; color: #00f0ff; }
 
-        /* MAIN APP SHELL */
-        .chat-container {
-            width: 100vw;
-            height: 100vh;
-            display: flex;
-            background-color: var(--bg-main);
-            position: relative;
-        }
+        .user-message { background: linear-gradient(135deg, #d946ef, #7000ff); color: white; align-self: flex-end; border-bottom-right-radius: 4px; box-shadow: 0 4px 15px rgba(217, 70, 239, 0.4); }
+        .ai-message { background: rgba(15, 23, 42, 0.9); color: #e2e8f0; align-self: flex-start; border-bottom-left-radius: 4px; border: 1px solid rgba(0, 240, 255, 0.15); }
 
-        /* SIDEBAR INTERFACE */
-        .sidebar {
-            width: 280px;
-            background-color: var(--bg-sidebar);
-            border-right: 1px solid var(--border-color);
-            display: flex;
-            flex-direction: column;
-            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            z-index: 100;
-        }
+        .input-area { padding: 15px; background: rgba(7, 11, 22, 0.95); display: flex; gap: 10px; border-top: 1px solid rgba(6, 182, 212, 0.2); align-items: center; }
+        #userInput { flex: 1; padding: 14px 16px; background: #02040a; border: 1px solid rgba(6, 182, 212, 0.3); border-radius: 14px; color: #fff; font-size: 0.9rem; outline: none; min-width: 0; }
 
-        .sidebar.closed {
-            transform: translateX(-100%);
-            position: absolute;
-            height: 100%;
-        }
+        .btn-group { display: flex; gap: 8px; flex-shrink: 0; }
+        #sendBtn, #voiceBtn { color: #020617; border: none; width: 48px; height: 48px; border-radius: 14px; cursor: pointer; display: flex; justify-content: center; align-items: center; transition: all 0.2s ease; }
+        #sendBtn { background: linear-gradient(135deg, #00f0ff, #06b6d4); }
+        #voiceBtn { background: rgba(255, 255, 255, 0.1); color: #00f0ff; border: 1px solid rgba(0, 240, 255, 0.4); }
+        #voiceBtn.listening { background: #ef4444; color: white; border-color: #ef4444; animation: voicePulse 1s infinite alternate; box-shadow: 0 0 15px #ef4444; }
 
-        .sidebar-header {
-            padding: 24px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .sidebar-header h3 {
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: var(--text-muted);
-            font-weight: 700;
-        }
-
-        #newChatBtn {
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid var(--border-color);
-            color: var(--text-main);
-            width: 32px;
-            height: 32px;
-            border-radius: 8px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.2rem;
-            transition: background 0.2s;
-        }
-
-        #newChatBtn:hover {
-            background: rgba(255, 255, 255, 0.08);
-        }
-
-        .search-box {
-            padding: 0 20px 16px;
-        }
-
-        #searchChats {
-            width: 100%;
-            padding: 10px 14px;
-            background-color: var(--bg-input);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            color: var(--text-main);
-            font-size: 0.85rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-
-        #searchChats:focus {
-            border-color: rgba(59, 130, 246, 0.5);
-        }
-
-        .chat-list {
-            flex: 1;
-            overflow-y: auto;
-            padding: 0 12px 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        .chat-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px 12px;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-            color: var(--text-muted);
-        }
-
-        .chat-item:hover, .chat-item.active {
-            background-color: var(--bg-card);
-            color: var(--text-main);
-        }
-
-        .chat-title {
-            font-size: 0.85rem;
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            flex: 1;
-        }
-
-        .delete-chat {
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            cursor: pointer;
-            font-size: 0.9rem;
-            padding: 4px;
-            opacity: 0;
-            transition: opacity 0.2s;
-        }
-
-        .chat-item:hover .delete-chat {
-            opacity: 0.6;
-        }
-
-        .chat-item:hover .delete-chat:hover {
-            opacity: 1;
-            color: #ef4444;
-        }
-
-        /* MAIN CHAT CONSOLE */
-        .main-panel {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            background-color: var(--bg-main);
-            position: relative;
-        }
-
-        .chat-header {
-            padding: 18px 24px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background-color: rgba(9, 11, 17, 0.8);
-            backdrop-filter: blur(12px);
-        }
-
-        .header-left {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-        }
-
-        #menuToggleBtn {
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            font-size: 1.1rem;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            transition: color 0.2s;
-        }
-
-        #menuToggleBtn:hover {
-            color: var(--text-main);
-        }
-
-        .chat-header h2 {
-            font-size: 1rem;
-            font-weight: 600;
-            color: var(--text-main);
-        }
-
-        .status-container {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .status-tag {
-            font-size: 0.7rem;
-            font-weight: 600;
-            background: rgba(34, 197, 94, 0.1);
-            color: #4ade80;
-            padding: 4px 8px;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .pulse-dot {
-            width: 6px;
-            height: 6px;
-            background: #22c55e;
-            border-radius: 50%;
-            box-shadow: 0 0 8px #22c55e;
-        }
-
-        .creator-tag {
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid var(--border-color);
-            color: var(--text-muted);
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 0.65rem;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-        }
-
-        /* CONVERSATION AREA */
-        .chat-box {
-            flex: 1;
-            padding: 32px 24px;
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 28px;
-            max-width: 800px;
-            width: 100%;
-            margin: 0 auto;
-        }
-
-        .message-wrapper {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            width: 100%;
-        }
-
-        .message-wrapper.user {
-            align-items: flex-end;
-        }
-
-        .message-wrapper.ai {
-            align-items: flex-start;
-        }
-
-        .sender-label {
-            font-size: 0.75rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            letter-spacing: 0.02em;
-            padding: 0 4px;
-        }
-
-        .message {
-            max-width: 85%;
-            padding: 14px 18px;
-            border-radius: 16px;
-            font-size: 0.95rem;
-            line-height: 1.5;
-            word-wrap: break-word;
-        }
-
-        .user-message {
-            background-color: var(--bg-card);
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            border-bottom-right-radius: 4px;
-        }
-
-        .ai-message {
-            background-color: transparent;
-            color: var(--text-main);
-            border-bottom-left-radius: 4px;
-            padding-left: 4px;
-        }
-
-        .ai-message strong {
-            font-weight: 600;
-            color: #fff;
-        }
-
-        /* CONTROL SYSTEM INPUT FOOTER */
-        .input-outer-wrapper {
-            padding: 0 24px 32px;
-            max-width: 800px;
-            width: 100%;
-            margin: 0 auto;
-            background-color: transparent;
-        }
-
-        .input-area {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 8px 8px 8px 18px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
-        }
-
-        #userInput {
-            flex: 1;
-            background: transparent;
-            border: none;
-            color: var(--text-main);
-            font-size: 0.95rem;
-            outline: none;
-            padding: 8px 0;
-        }
-
-        #userInput::placeholder {
-            color: rgba(156, 163, 175, 0.6);
-        }
-
-        .btn-group {
-            display: flex;
-            gap: 6px;
-        }
-
-        #sendBtn, #voiceBtn {
-            border: none;
-            width: 40px;
-            height: 40px;
-            border-radius: 10px;
-            cursor: pointer;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            transition: all 0.2s;
-        }
-
-        #sendBtn {
-            background-color: var(--text-main);
-            color: var(--bg-main);
-        }
-
-        #sendBtn:hover {
-            background-color: #ffffff;
-        }
-
-        #voiceBtn {
-            background-color: transparent;
-            color: var(--text-muted);
-        }
-
-        #voiceBtn:hover {
-            background-color: rgba(255, 255, 255, 0.04);
-            color: var(--text-main);
-        }
-
-        #voiceBtn.listening {
-            background-color: rgba(239, 68, 68, 0.15);
-            color: #ef4444;
-            animation: voicePulse 1.2s infinite alternate;
-        }
-
-        @keyframes voicePulse {
-            from { opacity: 0.7; }
-            to { opacity: 1; transform: scale(1.02); }
-        }
+        /* ==========================================================================
+           6. MASTER ANIMATION LOGIC SHEETS
+           ========================================================================== */
+        @keyframes rgbLaser { 0% { background-position: 0% 50%; } 100% { background-position: 300% 50%; } }
+        @keyframes floatingOrbs { 0% { transform: translate(0px, 0px) scale(1); } 50% { transform: translate(30px, -50px) scale(1.05); } 100% { transform: translate(-10px, 30px) scale(0.95); } }
+        @keyframes pulse { 0% { transform: scale(0.9); opacity: 0.6; } 50% { transform: scale(1.1); opacity: 1; } 100% { transform: scale(0.9); opacity: 0.6; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes voicePulse { from { transform: scale(1); } to { transform: scale(1.08); } }
 
         @media (max-width: 768px) {
-            .sidebar {
-                position: absolute;
-                left: 0;
-                top: 0;
-                height: 100%;
-                width: 280px;
-                box-shadow: 20px 0 40px rgba(0,0,0,0.6);
-            }
-            .sidebar.closed {
-                transform: translateX(-100%);
-            }
+            body { padding: 0; }
+            .chat-container { height: 100vh !important; width: 100vw !important; max-width: 100vw !important; border-radius: 0px !important; border: none !important; }
+            .chat-container.is-minimized { transform: none; bottom: 0; position: fixed; width: 100vw !important; max-width: 100vw !important; border-radius: 0px !important; }
+            body::before, body::after { display: none; }
+            .sidebar { position: absolute; left: 0; top: 0; height: 100%; width: 80% !important; max-width: 300px; transform: translateX(0); box-shadow: 5px 0 25px rgba(0,0,0,0.8); }
+            .sidebar.closed { transform: translateX(-100%); width: 0 !important; }
         }
     </style>
 </head>
 <body>
 
-    <div class="login-overlay" id="loginOverlay">
-        <div class="login-card">
-            <h1>Dashy OS</h1>
-            <p>Initialize your custom environment session</p>
+    <div class="auth-overlay" id="authOverlay">
+        <div class="auth-card">
+            <h1>DASHY OS</h1>
+            <p class="auth-subtitle">Enter workspace credentials to link node</p>
             
-            <div class="input-group">
-                <label for="usernameInput">Display Username</label>
-                <input type="text" id="usernameInput" class="login-input" placeholder="Enter your name" autocomplete="off">
+            <div class="input-field">
+                <label>IDENTITY USERNAME</label>
+                <input type="text" id="authUsername" placeholder="Pratham Pandey" autocomplete="off">
             </div>
 
-            <div class="input-group">
-                <label for="emailInput">Network Email Address</label>
-                <input type="email" id="emailInput" class="login-input" placeholder="name@domain.com" autocomplete="off">
+            <div class="input-field">
+                <label>NETWORK SUITE EMAIL</label>
+                <input type="email" id="authEmail" placeholder="pratham.neoskill@gmail.com" autocomplete="off">
             </div>
 
-            <div id="loginError">Please enter a valid username and email format.</div>
+            <div class="error-banner" id="errorBanner">Invalid Identity Parameters</div>
 
-            <button id="authSubmitBtn">Initialize Session</button> 
+            <button id="initializeBtn">INITIALIZE CORE LINK</button> 
         </div>
     </div>
 
-    <div class="chat-container">
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+
+    <div class="chat-container" id="chatContainer">
+        
         <div class="sidebar closed" id="sidebar">
             <div class="sidebar-header">
-                <h3>WORKSPACE METRICS</h3>
+                <h3>MATRIX LOGS</h3>
                 <button id="newChatBtn" title="New Chat">+</button>
             </div>
             <div class="search-box">
-                <input type="text" id="searchChats" placeholder="Search sessions...">
+                <input type="text" id="searchChats" placeholder="🔍 Search logs...">
             </div>
             <div class="chat-list" id="chatList"></div>
         </div>
@@ -552,54 +275,59 @@
         <div class="main-panel">
             <div class="chat-header">
                 <div class="header-left">
-                    <button id="menuToggleBtn" title="Toggle Sidebar">☰</button>
-                    <h2>Dashy Intelligence</h2>
-                    <div class="status-container">
-                        <div class="status-tag"><span class="pulse-dot"></span> NODE ACTIVE</div>
-                        <div class="creator-tag" id="userBadge">PUBLIC SESSION</div>
-                    </div>
+                    <button id="menuToggleBtn" title="Open Matrix Menu">📜</button>
+                    <h2>DASHY INTEL</h2>
+                    <div class="status-tag live-tag"><span class="pulse-dot"></span> SECURE MATRIX ACTIVE</div>
+                    <div class="creator-tag" id="userNodeDisplay">PRATHAM // OWNER ACTIVE</div>
+                </div>
+                
+                <div class="window-actions">
+                    <button id="minimizeBtn" class="win-ctrl-btn" title="Minimize Window">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19 13H5v-2h14v2z"/></svg>
+                    </button>
+                    <button id="fullscreenBtn" class="win-ctrl-btn" title="Toggle Fullscreen">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+                    </button>
                 </div>
             </div>
 
-            <div class="chat-box" id="chatBox"></div>
+            <div class="window-content-body">
+                <div class="chat-box" id="chatBox"></div>
 
-            <div class="input-outer-wrapper">
                 <div class="input-area">
-                    <input type="text" id="userInput" placeholder="Send a message..." autocomplete="off">
+                    <input type="text" id="userInput" placeholder="Command or Talk to Dashy..." autocomplete="off">
                     <div class="btn-group">
-                        <button id="voiceBtn" title="Voice Input">🎙️</button>
-                        <button id="sendBtn">
-                            <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M2,21L23,12L2,3V10L17,12L2,14V21Z" /></svg>
+                        <button id="voiceBtn" title="Speak to Dashy">🎙️</button>
+                        <button id="sendBtn" title="Transmit Packet">
+                            <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M2,21L23,12L2,3V10L17,12L2,14V21Z" /></svg>
                         </button>
                     </div>
                 </div>
             </div>
         </div>
+
     </div>
 
     <script>
-        // BACKEND CONTROL PROTOCOLS
-        const KEYS = [
-            'AIzaSyBwubu7kUX9F2pS-if7_xHUp7nsqxIG4WI',
-            'AIzaSyBwubU7kUX9F2pS-if7_xHUp7nsqxIG4WI'
-        ];
+        const KEYS = ['AIzaSyDt-y0oNPBqBuYoK7Xr_SQVIqfabTkSKaY'];
 
         let activeChatId = 'chat_1';
-        let chatsMemory = JSON.parse(localStorage.getItem('dashy_enterprise_v1')) || {
-            'chat_1': { title: 'Core Interface Initialize', logs: [{ text: "Secure pipeline initialized. Speak your instructions.", sender: "ai" }] }
+        let chatsMemory = JSON.parse(localStorage.getItem('dashy_text_logs_v3')) || {
+            'chat_1': { title: 'Initial Matrix ⚔️', logs: [{ text: "Secure pipeline established. Ready for your commands.", sender: "ai" }] }
         };
 
-        let currentActiveUser = localStorage.getItem('dashy_saved_username') || "User";
+        const authOverlay = document.getElementById('authOverlay');
+        const authUsername = document.getElementById('authUsername');
+        const authEmail = document.getElementById('authEmail');
+        const errorBanner = document.getElementById('errorBanner');
+        const initializeBtn = document.getElementById('initializeBtn');
+        const userNodeDisplay = document.getElementById('userNodeDisplay');
 
-        const loginOverlay = document.getElementById('loginOverlay');
-        const usernameInput = document.getElementById('usernameInput');
-        const emailInput = document.getElementById('emailInput');
-        const loginError = document.getElementById('loginError');
-        const authSubmitBtn = document.getElementById('authSubmitBtn');
-        const userBadge = document.getElementById('userBadge');
-        
+        const chatContainer = document.getElementById('chatContainer');
         const sidebar = document.getElementById('sidebar');
         const menuToggleBtn = document.getElementById('menuToggleBtn');
+        const minimizeBtn = document.getElementById('minimizeBtn');
+        const fullscreenBtn = document.getElementById('fullscreenBtn');
         const chatBox = document.getElementById('chatBox');
         const userInput = document.getElementById('userInput');
         const sendBtn = document.getElementById('sendBtn');
@@ -608,57 +336,36 @@
         const searchChats = document.getElementById('searchChats');
         const newChatBtn = document.getElementById('newChatBtn');
 
-        // SINGLE SIGN-ON DEVICE LOCK (Per-Browser Session Protection)
-        if (localStorage.getItem('dashy_device_session_active') === 'true' && sessionStorage.getItem('dashy_tab_authenticated') !== 'true') {
-            alert("Security Alert: An active session is already broadcasting on this device. Multiple parallel logins are blocked.");
-            document.body.innerHTML = `<div style="color:#ef4444; font-family:sans-serif; text-align:center; margin-top:20vh; font-weight:600;">ACCESS DENIED: Multiple concurrent device logs detected.</div>`;
-            throw new Error("SSO Lock Active");
-        }
+        // IDENTITY CREDENTIAL EVALUATOR SYSTEM
+        initializeBtn.addEventListener('click', () => {
+            const userVal = authUsername.value.trim();
+            const emailVal = authEmail.value.trim();
 
-        // Simple Email Format Validator Rule
-        function validateEmail(email) {
-            const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            return re.test(email);
-        }
-
-        function checkAuth() {
-            const userVal = usernameInput.value.trim();
-            const emailVal = emailInput.value.trim().toLowerCase();
-
-            if (userVal.length >= 2 && validateEmail(emailVal)) {
-                // Set lock and register user data dynamically
-                localStorage.setItem('dashy_device_session_active', 'true');
-                localStorage.setItem('dashy_saved_username', userVal);
-                sessionStorage.setItem('dashy_tab_authenticated', 'true');
-                currentActiveUser = userVal;
-                revealDashboard();
+            if (userVal.toLowerCase().includes('pratham') && emailVal.includes('@')) {
+                errorBanner.style.display = 'none';
+                userNodeDisplay.innerText = `${userVal.toUpperCase()} // OWNER ACTIVE`;
+                
+                authOverlay.style.opacity = '0';
+                authOverlay.style.visibility = 'hidden';
+                setTimeout(() => authOverlay.remove(), 400);
+                
+                renderSidebar();
+                loadActiveChat();
             } else {
-                loginError.style.display = 'block';
+                errorBanner.style.display = 'block';
+                errorBanner.innerText = "Invalid Identity Parameters";
             }
-        }
+        });
 
-        function revealDashboard() {
-            loginOverlay.style.opacity = '0';
-            loginOverlay.style.transform = 'scale(0.95)';
-            userBadge.innerText = currentActiveUser.toUpperCase() + " ACTIVE";
-            setTimeout(() => loginOverlay.remove(), 500);
-            renderSidebar();
-            loadActiveChat();
-        }
+        // VIEWPORT TRACKING OPERATORS
+        fullscreenBtn.addEventListener('click', () => {
+            chatContainer.classList.remove('is-minimized');
+            chatContainer.classList.toggle('fullscreen');
+        });
 
-        authSubmitBtn.addEventListener('click', checkAuth);
-        emailInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') checkAuth(); });
-
-        // Auto-bypass if user is already checked-in during this tab session
-        if (sessionStorage.getItem('dashy_tab_authenticated') === 'true') {
-            revealDashboard();
-        }
-
-        // Release the device lock when the user closes out the browser session cleanly
-        window.addEventListener('beforeunload', () => {
-            if (sessionStorage.getItem('dashy_tab_authenticated') === 'true') {
-                localStorage.removeItem('dashy_device_session_active');
-            }
+        minimizeBtn.addEventListener('click', () => {
+            chatContainer.classList.remove('fullscreen');
+            chatContainer.classList.toggle('is-minimized');
         });
 
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -677,20 +384,15 @@
             voiceBtn.style.display = 'none';
         }
 
-        function stopListening() { isListening = false; voiceBtn.classList.remove('listening'); userInput.placeholder = "Send a message..."; if(recognition) recognition.stop(); }
+        function stopListening() { isListening = false; voiceBtn.classList.remove('listening'); userInput.placeholder = "Command or Talk to Dashy..."; if(recognition) recognition.stop(); }
         voiceBtn.addEventListener('click', () => { if (!recognition) return; window.speechSynthesis.cancel(); if (isListening) stopListening(); else recognition.start(); });
 
         function speakResponse(text) {
             if (!window.speechSynthesis) return;
             window.speechSynthesis.cancel();
-            const cleanText = text.replace(/[\*\#\_]/g, "");
-            const utterance = new SpeechSynthesisUtterance(cleanText);
+            const utterance = new SpeechSynthesisUtterance(text.replace(/[\*\#\_]/g, ""));
             utterance.lang = 'en-US';
             window.speechSynthesis.speak(utterance);
-        }
-
-        function formatMarkdown(text) {
-            return text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
         }
 
         menuToggleBtn.addEventListener('click', () => sidebar.classList.toggle('closed'));
@@ -710,8 +412,16 @@
 
                     const deleteBtn = document.createElement('button');
                     deleteBtn.classList.add('delete-chat');
-                    deleteBtn.innerText = '✕';
-                    deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); delete chatsMemory[id]; if(Object.keys(chatsMemory).length === 0){ chatsMemory['chat_1'] = { title: 'Core Interface Initialize', logs: [{ text: "Secure pipeline initialized.", sender: "ai" }] }; activeChatId = 'chat_1'; } else { activeChatId = Object.keys(chatsMemory)[0]; } saveToMemory(); renderSidebar(); loadActiveChat(); });
+                    deleteBtn.innerText = '🗑️';
+                    deleteBtn.addEventListener('click', (e) => { 
+                        e.stopPropagation(); 
+                        delete chatsMemory[id]; 
+                        if(Object.keys(chatsMemory).length === 0){
+                            chatsMemory['chat_1'] = { title: 'Initial Matrix ⚔️', logs: [{ text: "Secure pipeline established.", sender: "ai" }] };
+                            activeChatId = 'chat_1';
+                        } else { activeChatId = Object.keys(chatsMemory)[0]; }
+                        saveToMemory(); renderSidebar(); loadActiveChat(); 
+                    });
 
                     chatItem.appendChild(chatTitle);
                     chatItem.appendChild(deleteBtn);
@@ -721,49 +431,30 @@
         }
 
         function loadActiveChat() { chatBox.innerHTML = ''; chatsMemory[activeChatId].logs.forEach(log => appendMessage(log.text, log.sender)); }
-        
         function appendMessage(text, sender) {
-            const wrapper = document.createElement('div');
-            wrapper.classList.add('message-wrapper', sender);
-
-            const label = document.createElement('span');
-            label.classList.add('sender-label');
-            label.innerText = sender === 'ai' ? 'Dashy' : currentActiveUser;
-
             const messageDiv = document.createElement('div');
             messageDiv.classList.add('message', `${sender}-message`);
-            
-            if (sender === 'ai') {
-                messageDiv.innerHTML = formatMarkdown(text);
-            } else {
-                messageDiv.innerText = text;
-            }
-
-            wrapper.appendChild(label);
-            wrapper.appendChild(messageDiv);
-            chatBox.appendChild(wrapper);
+            if (sender === 'ai') messageDiv.innerHTML = `<span class="bot-name">DASHY:</span><span>${text}</span>`;
+            else messageDiv.innerText = text;
+            chatBox.appendChild(messageDiv);
             chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        function saveToMemory() { localStorage.setItem('dashy_enterprise_v1', JSON.stringify(chatsMemory)); }
+        function saveToMemory() { localStorage.setItem('dashy_text_logs_v3', JSON.stringify(chatsMemory)); }
 
         async function attemptFetch(text, keyIndex) {
-            if (keyIndex >= KEYS.length) throw new Error("Authentication failure.");
-            
+            if (keyIndex >= KEYS.length) throw new Error("API keys exhausted.");
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${KEYS[keyIndex]}`;
             const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     contents: [{ parts: [{ text: text }] }],
-                    systemInstruction: { parts: [{ text: "You are Dashy, an ultra-premium enterprise language core developed by Pratham. Your responses must be sharp, highly intellectual, clear, and perfectly tailored. Avoid conversational fluff unless asked." }] }
+                    systemInstruction: { parts: [{ text: "You are Dashy, a highly advanced terminal entity. Your creator is Pratham." }] }
                 })
             });
-
             const data = await response.json();
-            if (data.error && (data.error.message.includes('API key not valid') || data.error.status === 'INVALID_ARGUMENT')) {
-                return attemptFetch(text, keyIndex + 1);
-            }
+            if (data.error) return attemptFetch(text, keyIndex + 1);
             return data;
         }
 
@@ -771,8 +462,8 @@
             const text = userInput.value.trim();
             if (!text) return;
 
-            if (chatsMemory[activeChatId].logs.length === 1 && chatsMemory[activeChatId].title.includes('Core Interface')) {
-                chatsMemory[activeChatId].title = text.substring(0, 24);
+            if (chatsMemory[activeChatId].logs.length === 1 && chatsMemory[activeChatId].title.includes('Initial')) {
+                chatsMemory[activeChatId].title = text.substring(0, 18) + '...';
                 renderSidebar();
             }
 
@@ -780,41 +471,36 @@
             chatsMemory[activeChatId].logs.push({ text: text, sender: 'user' });
             userInput.value = '';
 
-            const typingWrapper = document.createElement('div');
-            typingWrapper.classList.add('message-wrapper', 'ai');
-            typingWrapper.innerHTML = `<span class="sender-label">Dashy</span><div class="message ai-message" style="opacity: 0.5;">Analyzing query...</div>`;
-            chatBox.appendChild(typingWrapper);
+            const typingDiv = document.createElement('div');
+            typingDiv.classList.add('message', 'ai-message');
+            typingDiv.innerHTML = `<span class="bot-name">DASHY:</span> Syncing...`;
+            chatBox.appendChild(typingDiv);
             chatBox.scrollTop = chatBox.scrollHeight;
 
             try {
                 const data = await attemptFetch(text, 0);
-                typingWrapper.remove();
-
+                typingDiv.remove();
                 if (data.candidates && data.candidates[0].content?.parts[0].text) {
                     const aiResponse = data.candidates[0].content.parts[0].text;
                     appendMessage(aiResponse, 'ai');
                     chatsMemory[activeChatId].logs.push({ text: aiResponse, sender: 'ai' });
                     speakResponse(aiResponse);
-                } else {
-                    appendMessage("Operational matrix anomaly. No text return payload.", 'ai');
                 }
                 saveToMemory();
             } catch (error) {
-                typingWrapper.remove();
-                appendMessage("Interface Error: API credentials invalid or exhausted.", 'ai');
+                typingDiv.remove();
+                appendMessage("Interface Error.", 'ai');
             }
         }
 
-        function createNewChat() {
-            const newId = `chat_${Date.now()}`;
-            chatsMemory[newId] = { title: 'New Analysis Session', logs: [{ text: "Secure pipeline initialized. Awaiting parameters.", sender: "ai" }] };
-            activeChatId = newId; saveToMemory(); renderSidebar(); loadActiveChat(); sidebar.classList.add('closed'); window.speechSynthesis.cancel();
-        }
-
-        newChatBtn.addEventListener('click', createNewChat);
         searchChats.addEventListener('input', (e) => renderSidebar(e.target.value));
         sendBtn.addEventListener('click', handleSend);
         userInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') handleSend(); });
+        newChatBtn.addEventListener('click', () => {
+            const newId = `chat_${Date.now()}`;
+            chatsMemory[newId] = { title: 'New Matrix ⚔️', logs: [{ text: "Secure pipeline established. Ready.", sender: "ai" }] };
+            activeChatId = newId; saveToMemory(); renderSidebar(); loadActiveChat(); if(window.innerWidth <= 768) sidebar.classList.add('closed'); window.speechSynthesis.cancel();
+        });
     </script>
 </body>
 </html>
