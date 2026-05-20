@@ -139,7 +139,7 @@
             width: 100%; 
             max-width: 950px; 
             height: 85vh; 
-            min-height: 550px; /* FIXED: Keeps interface from shrinking to 0 in iframe views */
+            min-height: 550px; 
             background: rgba(10, 15, 30, 0.8); 
             backdrop-filter: blur(25px); 
             -webkit-backdrop-filter: blur(25px); 
@@ -200,7 +200,7 @@
 
         .status-tag { background: rgba(34, 197, 94, 0.08); color: #4ade80; padding: 6px 10px; border-radius: 20px; font-size: 0.65rem; border: 1px solid rgba(34, 197, 94, 0.2); display: flex; align-items: center; gap: 6px; white-space: nowrap;}
         .pulse-dot { width: 6px; height: 6px; background: #22c55e; border-radius: 50%; animation: pulse 1.5s infinite; }
-        .creator-tag { background: rgba(234, 179, 8, 0.1); color: #eab308; border: 1px solid rgba(234, 179, 8, 0.3); padding: 6px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; white-space: nowrap; }
+        .creator-tag { background: rgba(6, 182, 212, 0.1); color: #00f0ff; border: 1px solid rgba(6, 182, 212, 0.3); padding: 6px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; white-space: nowrap; }
 
         .window-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
         .win-ctrl-btn { background: transparent; color: #00f0ff; border: none; cursor: pointer; padding: 6px; display: flex; align-items: center; transition: color 0.2s, transform 0.2s; }
@@ -251,15 +251,15 @@
             
             <div class="input-field">
                 <label>IDENTITY USERNAME</label>
-                <input type="text" id="authUsername" placeholder="Pratham Pandey" autocomplete="off">
+                <input type="text" id="authUsername" placeholder="Enter username..." autocomplete="off">
             </div>
 
             <div class="input-field">
                 <label>NETWORK SUITE EMAIL</label>
-                <input type="email" id="authEmail" placeholder="pratham.neoskill@gmail.com" autocomplete="off">
+                <input type="email" id="authEmail" placeholder="Enter email address..." autocomplete="off">
             </div>
 
-            <div class="error-banner" id="errorBanner">Invalid Identity Parameters</div>
+            <div class="error-banner" id="errorBanner">Fields cannot be blank</div>
 
             <button id="initializeBtn">INITIALIZE CORE LINK</button> 
         </div>
@@ -287,7 +287,7 @@
                     <button id="menuToggleBtn" title="Open Matrix Menu">📜</button>
                     <h2>DASHY INTEL</h2>
                     <div class="status-tag live-tag"><span class="pulse-dot"></span> SECURE MATRIX ACTIVE</div>
-                    <div class="creator-tag" id="userNodeDisplay">PRATHAM // OWNER ACTIVE</div>
+                    <div class="creator-tag" id="userNodeDisplay">USER // NODE ACTIVE</div>
                 </div>
                 
                 <div class="window-actions">
@@ -318,7 +318,7 @@
     </div>
 
     <script>
-        // NOTE: Generate a new key from Google AI Studio and put it here if this one flags as leaked.
+        // REMINDER: Make sure your new active API key is set inside the brackets below.
         const KEYS = ['AIzaSyDt-y0oNPBqBuYoK7Xr_SQVIqfabTkSKaY'];
 
         let activeChatId = 'chat_1';
@@ -346,14 +346,14 @@
         const searchChats = document.getElementById('searchChats');
         const newChatBtn = document.getElementById('newChatBtn');
 
-        // IDENTITY CREDENTIAL EVALUATOR SYSTEM
+        // OPEN IDENTIFICATION EVALUATOR SYSTEM (ALLOWS ANY VISITOR IN)
         initializeBtn.addEventListener('click', () => {
             const userVal = authUsername.value.trim();
             const emailVal = authEmail.value.trim();
 
-            if (userVal.toLowerCase().includes('pratham') && emailVal.includes('@')) {
+            if (userVal !== "" && emailVal.includes('@')) {
                 errorBanner.style.display = 'none';
-                userNodeDisplay.innerText = `${userVal.toUpperCase()} // OWNER ACTIVE`;
+                userNodeDisplay.innerText = `${userVal.toUpperCase()} // NODE ACTIVE`;
                 
                 authOverlay.style.opacity = '0';
                 authOverlay.style.visibility = 'hidden';
@@ -363,7 +363,7 @@
                 loadActiveChat();
             } else {
                 errorBanner.style.display = 'block';
-                errorBanner.innerText = "Invalid Identity Parameters";
+                errorBanner.innerText = "Provide a username and valid email layout.";
             }
         });
 
@@ -514,5 +514,3 @@
     </script>
 </body>
 </html>
-
-```
