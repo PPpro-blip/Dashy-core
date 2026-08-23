@@ -1,0 +1,14 @@
+# Cloudflare Worker configuration for DashyCore RAG ingestion
+
+name = "dashycore-ingest"
+main = "worker/ingest.ts"
+compatibility_date = "2026-08-08"
+compatibility_flags = ["nodejs_compat"]
+
+# Local development environment variables are loaded from .dev.vars
+# Production secrets should be set via: wrangler secret put <NAME>
+
+# Routes configuration (uncomment and adjust for production)
+# routes = [
+#   { pattern = "dashycore.com/api/ingest", zone_name = "dashycore.com" }
+# ]
