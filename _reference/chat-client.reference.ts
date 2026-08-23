@@ -1,3 +1,8 @@
+// ⚠️ REFERENCE ONLY — DO NOT IMPORT
+// Preserved from the deleted trash UI as documentation of the live
+// dashy-flow-state Chat Worker wire contract. Use as a spec when
+// rebuilding the real chat client in a later prompt.
+
 /**
  * DashyCore v7 — Chat client.
  *
