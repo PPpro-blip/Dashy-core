@@ -5,8 +5,15 @@ import { createClient } from "@/lib/supabase/client";
 
 /**
  * DashyCore — Authentication
- * Stark, executive, editorial dark mode. Google OAuth only.
+ * Atmospheric dark mode (Linear / Vercel inspired). Google OAuth only.
  */
+
+const MODELS = [
+  { id: "dashy-superfast", meta: "Groq · GPT-OSS 120B" },
+  { id: "dashy-allround", meta: "Groq · GPT-OSS 20B" },
+  { id: "dashy-complexity", meta: "Qwen 3.6 27B" },
+];
+
 export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,43 +38,100 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-neutral-950 px-6 py-16">
-      {/* Central card */}
-      <section className="w-full max-w-md border border-neutral-800 bg-[#0C0C0E] shadow-2xl shadow-black/80">
-        {/* Card top label */}
-        <div className="border-b border-neutral-800/70 px-8 py-4 sm:px-10">
-          <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-neutral-600">
-            00 — Workspace Initialization
+    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#09090b] px-6 py-16">
+      {/* Subtle background grid */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 opacity-[0.4]"
+        style={{
+          backgroundImage:
+            "linear-gradient(to right, rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.025) 1px, transparent 1px)",
+          backgroundSize: "64px 64px",
+          maskImage:
+            "radial-gradient(ellipse 75% 65% at 50% 45%, black 25%, transparent 78%)",
+          WebkitMaskImage:
+            "radial-gradient(ellipse 75% 65% at 50% 45%, black 25%, transparent 78%)",
+        }}
+      />
+
+      {/* Ambient radial glow behind the card */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute left-1/2 top-1/2 h-[560px] w-[820px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-gradient-to-tr from-indigo-500/10 via-sky-500/5 to-transparent blur-3xl"
+      />
+
+      {/* Content column */}
+      <div className="relative z-10 w-full max-w-md">
+        {/* Brand + status header */}
+        <div className="mb-8 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {/* Geometric logo mark — glowing core diamond */}
+            <svg viewBox="0 0 36 36" className="h-9 w-9" aria-hidden="true">
+              <defs>
+                <linearGradient id="dc-edge" x1="0" y1="0" x2="36" y2="36">
+                  <stop stopColor="#818cf8" />
+                  <stop offset="1" stopColor="#38bdf8" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M18 2 34 18 18 34 2 18Z"
+                fill="none"
+                stroke="url(#dc-edge)"
+                strokeWidth="1.5"
+              />
+              <path d="M18 9 27 18 18 27 9 18Z" fill="#18181b" />
+              <circle cx="18" cy="18" r="3.5" fill="#a5b4fc" />
+              <circle cx="18" cy="18" r="6" fill="#818cf8" opacity="0.35" />
+            </svg>
+            <span className="text-sm font-semibold tracking-tight text-neutral-100">
+              DashyCore
+            </span>
+          </div>
+
+          {/* Live status pill */}
+          <span className="flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/80 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.15em] text-neutral-400">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            </span>
+            System Online
           </span>
         </div>
-
-        <div className="px-8 py-12 sm:px-10 sm:py-14">
-          {/* Brand mark */}
-          <p className="font-mono text-xs uppercase tracking-[0.2em] text-neutral-400">
-            Dashycore
-          </p>
-
-          {/* Editorial headline */}
-          <h1 className="mt-10 font-serif text-4xl leading-[1.1] tracking-tight text-neutral-100 sm:text-[2.75rem]">
-            Make room
-            <br />
-            for intelligence.
+        {/* Centerpiece glass card */}
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-8 shadow-2xl shadow-black/80 backdrop-blur-xl transition-colors hover:border-neutral-700/80 md:p-10">
+          {/* Headline */}
+          <h1 className="text-3xl font-semibold tracking-tight text-white md:text-4xl">
+            Enter the Intelligence Layer.
           </h1>
 
-          {/* Subhead */}
-          <p className="mt-6 max-w-xs text-sm leading-relaxed text-neutral-500">
-            One identity. Every model. RAG memory intact.
+          {/* Subtitle */}
+          <p className="mt-3 text-sm leading-relaxed text-neutral-400">
+            Unified AI workspace with persistent RAG memory and real-time model
+            routing.
           </p>
 
+          {/* Model pills */}
+          <div className="mt-7 flex flex-wrap gap-2">
+            {MODELS.map((m) => (
+              <span
+                key={m.id}
+                title={m.meta}
+                className="rounded-full border border-neutral-700/50 bg-neutral-800/80 px-2.5 py-1 font-mono text-[11px] text-neutral-300"
+              >
+                {m.id}
+              </span>
+            ))}
+          </div>
+
           {/* Divider */}
-          <div className="mt-12 h-px w-full bg-neutral-800" />
+          <div className="my-8 h-px w-full bg-gradient-to-r from-transparent via-neutral-800 to-transparent" />
 
           {/* Google OAuth */}
           <button
             type="button"
             onClick={handleGoogleSignIn}
             disabled={loading}
-            className="group mt-8 flex w-full items-center justify-center gap-3 bg-white px-5 py-3.5 text-sm font-medium text-neutral-900 transition-all hover:bg-neutral-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-300 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex w-full items-center justify-center gap-3 rounded-xl bg-white px-5 py-3.5 text-sm font-medium text-neutral-950 shadow-md shadow-white/5 transition-all hover:bg-neutral-100 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {loading ? (
               <>
@@ -98,34 +162,43 @@ export default function LoginPage() {
                   />
                 </svg>
                 <span>Continue with Google</span>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="h-4 w-4 text-neutral-500"
+                  aria-hidden="true"
+                >
+                  <path d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
               </>
             )}
           </button>
 
+          {/* Security footnote */}
+          <p className="mt-6 flex items-center justify-center gap-2 text-center font-mono text-xs text-neutral-500">
+            <span aria-hidden="true">🔒</span>
+            Supabase OAuth 2.0 · Encrypted Session · RAG Vector Isolation
+          </p>
+
           {error && (
             <p
               role="alert"
-              className="mt-6 border-l-2 border-red-500/60 pl-3 font-mono text-xs leading-relaxed text-red-400"
+              className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-xs leading-relaxed text-red-300"
             >
               {error}
             </p>
           )}
-        </div>
+        </section>
 
-        {/* Card bottom rule */}
-        <div className="border-t border-neutral-800/70 px-8 py-4 sm:px-10">
-          <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-neutral-600">
-            Secure · OAuth 2.0
-          </span>
-        </div>
-      </section>
-
-      {/* Footer line */}
-      <footer className="mt-10">
-        <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-neutral-700">
-          DashyCore v7
-        </span>
-      </footer>
+        {/* Pipeline footnote under card */}
+        <p className="mt-6 text-center font-mono text-[10px] uppercase tracking-[0.25em] text-neutral-600">
+          Dash Pipeline v7.0
+        </p>
+      </div>
     </main>
   );
 }
