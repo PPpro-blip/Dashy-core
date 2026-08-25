@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 
 /**
  * DashyCore — Authentication
@@ -110,24 +111,15 @@ export default function LoginPage() {
       <div className="relative z-10 w-full max-w-md">
         {/* Brand header */}
         <div className="mb-8 flex items-center justify-center gap-3">
-          {/* Geometric logo mark — glowing core diamond */}
-          <svg viewBox="0 0 36 36" className="h-9 w-9" aria-hidden="true">
-            <defs>
-              <linearGradient id="dc-edge" x1="0" y1="0" x2="36" y2="36">
-                <stop stopColor="#818cf8" />
-                <stop offset="1" stopColor="#38bdf8" />
-              </linearGradient>
-            </defs>
-            <path
-              d="M18 2 34 18 18 34 2 18Z"
-              fill="none"
-              stroke="url(#dc-edge)"
-              strokeWidth="1.5"
-            />
-            <path d="M18 9 27 18 18 27 9 18Z" fill="#18181b" />
-            <circle cx="18" cy="18" r="3.5" fill="#a5b4fc" />
-            <circle cx="18" cy="18" r="6" fill="#818cf8" opacity="0.35" />
-          </svg>
+          {/* Brand icon */}
+          <Image
+            src="/icon-512.png"
+            alt="DashyCore Logo"
+            width={36}
+            height={36}
+            className="h-9 w-9"
+            priority
+          />
           <span className="text-lg font-semibold tracking-tight text-neutral-100">
             DashyCore
           </span>

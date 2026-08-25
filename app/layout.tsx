@@ -14,6 +14,10 @@ export const metadata: Metadata = {
     template: "%s · DashyCore AI",
   },
   description: "Next-gen AI Ecosystem & Model Routing",
+  icons: {
+    icon: "/icon-512.png",
+    apple: "/icon-512.png",
+  },
 };
 
 export const viewport: Viewport = {
