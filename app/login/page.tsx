@@ -5,14 +5,8 @@ import { createClient } from "@/lib/supabase/client";
 
 /**
  * DashyCore — Authentication
- * Atmospheric dark mode (Linear / Vercel inspired). Google OAuth only.
+ * Executive dark mode sign-in screen. Google OAuth only.
  */
-
-const MODELS = [
-  { id: "dashy-superfast", meta: "Groq · GPT-OSS 120B" },
-  { id: "dashy-allround", meta: "Groq · GPT-OSS 20B" },
-  { id: "dashy-complexity", meta: "Qwen 3.6 27B" },
-];
 
 export default function LoginPage() {
   const [loading, setLoading] = useState(false);
@@ -62,66 +56,42 @@ export default function LoginPage() {
 
       {/* Content column */}
       <div className="relative z-10 w-full max-w-md">
-        {/* Brand + status header */}
-        <div className="mb-8 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {/* Geometric logo mark — glowing core diamond */}
-            <svg viewBox="0 0 36 36" className="h-9 w-9" aria-hidden="true">
-              <defs>
-                <linearGradient id="dc-edge" x1="0" y1="0" x2="36" y2="36">
-                  <stop stopColor="#818cf8" />
-                  <stop offset="1" stopColor="#38bdf8" />
-                </linearGradient>
-              </defs>
-              <path
-                d="M18 2 34 18 18 34 2 18Z"
-                fill="none"
-                stroke="url(#dc-edge)"
-                strokeWidth="1.5"
-              />
-              <path d="M18 9 27 18 18 27 9 18Z" fill="#18181b" />
-              <circle cx="18" cy="18" r="3.5" fill="#a5b4fc" />
-              <circle cx="18" cy="18" r="6" fill="#818cf8" opacity="0.35" />
-            </svg>
-            <span className="text-sm font-semibold tracking-tight text-neutral-100">
-              DashyCore
-            </span>
-          </div>
-
-          {/* Live status pill */}
-          <span className="flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/80 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.15em] text-neutral-400">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            </span>
-            System Online
+        {/* Brand header */}
+        <div className="mb-8 flex items-center justify-center gap-3">
+          {/* Geometric logo mark — glowing core diamond */}
+          <svg viewBox="0 0 36 36" className="h-9 w-9" aria-hidden="true">
+            <defs>
+              <linearGradient id="dc-edge" x1="0" y1="0" x2="36" y2="36">
+                <stop stopColor="#818cf8" />
+                <stop offset="1" stopColor="#38bdf8" />
+              </linearGradient>
+            </defs>
+            <path
+              d="M18 2 34 18 18 34 2 18Z"
+              fill="none"
+              stroke="url(#dc-edge)"
+              strokeWidth="1.5"
+            />
+            <path d="M18 9 27 18 18 27 9 18Z" fill="#18181b" />
+            <circle cx="18" cy="18" r="3.5" fill="#a5b4fc" />
+            <circle cx="18" cy="18" r="6" fill="#818cf8" opacity="0.35" />
+          </svg>
+          <span className="text-lg font-semibold tracking-tight text-neutral-100">
+            DashyCore
           </span>
         </div>
+
         {/* Centerpiece glass card */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-8 shadow-2xl shadow-black/80 backdrop-blur-xl transition-colors hover:border-neutral-700/80 md:p-10">
           {/* Headline */}
           <h1 className="text-3xl font-semibold tracking-tight text-white md:text-4xl">
-            Enter the Intelligence Layer.
+            Where intelligence comes together.
           </h1>
 
           {/* Subtitle */}
           <p className="mt-3 text-sm leading-relaxed text-neutral-400">
-            Unified AI workspace with persistent RAG memory and real-time model
-            routing.
+            Unified AI workspace with persistent memory and model routing.
           </p>
-
-          {/* Model pills */}
-          <div className="mt-7 flex flex-wrap gap-2">
-            {MODELS.map((m) => (
-              <span
-                key={m.id}
-                title={m.meta}
-                className="rounded-full border border-neutral-700/50 bg-neutral-800/80 px-2.5 py-1 font-mono text-[11px] text-neutral-300"
-              >
-                {m.id}
-              </span>
-            ))}
-          </div>
 
           {/* Divider */}
           <div className="my-8 h-px w-full bg-gradient-to-r from-transparent via-neutral-800 to-transparent" />
@@ -178,12 +148,6 @@ export default function LoginPage() {
             )}
           </button>
 
-          {/* Security footnote */}
-          <p className="mt-6 flex items-center justify-center gap-2 text-center font-mono text-xs text-neutral-500">
-            <span aria-hidden="true">🔒</span>
-            Supabase OAuth 2.0 · Encrypted Session · RAG Vector Isolation
-          </p>
-
           {error && (
             <p
               role="alert"
@@ -193,11 +157,6 @@ export default function LoginPage() {
             </p>
           )}
         </section>
-
-        {/* Pipeline footnote under card */}
-        <p className="mt-6 text-center font-mono text-[10px] uppercase tracking-[0.25em] text-neutral-600">
-          Dash Pipeline v7.0
-        </p>
       </div>
     </main>
   );

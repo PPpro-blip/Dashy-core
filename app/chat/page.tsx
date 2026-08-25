@@ -1,51 +1,34 @@
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
-import { SignOutButton } from "@/components/SignOutButton";
+"use client";
 
 /**
- * Temporary chat placeholder — Phase 1 skeleton.
- * The full Chat UI arrives in a later phase.
+ * Phase 1 chat placeholder canvas
+ * Minimal placeholder with welcome text and quick action pills
  */
-export default async function ChatPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/login");
-  }
-
+export default function ChatPage() {
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-center bg-neutral-950 px-6">
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -top-40 left-1/2 h-[420px] w-[640px] -translate-x-1/2 rounded-full bg-cyan-500/[0.06] blur-[120px]"
-      />
-
-      <section className="relative z-10 w-full max-w-md text-center">
-        <div className="mb-8 flex items-center justify-center gap-3 font-mono text-[11px] tracking-[0.25em] text-neutral-500 uppercase">
-          <span className="text-cyan-400">01</span>
-          <span className="h-px w-16 bg-neutral-800" />
-          <span>Chat · Placeholder</span>
-        </div>
-
-        <h1 className="text-3xl font-semibold tracking-tight text-neutral-50">
-          Chat UI coming soon.
+    <div className="flex h-full flex-col items-center justify-center px-6">
+      {/* Welcome text */}
+      <div className="text-center">
+        <h1 className="text-2xl font-semibold text-white md:text-3xl">
+          What are we building today?
         </h1>
-        <p className="mt-4 text-sm leading-relaxed text-neutral-400">
-          You're signed in as{" "}
-          <span className="font-medium text-neutral-200">
-            {user.email ?? "unknown"}
-          </span>
-          . The full DashyCore conversation interface is being built in the
-          next phase.
+        <p className="mt-2 text-sm text-neutral-400">
+          Start a conversation or choose a quick action below
         </p>
+      </div>
 
-        <div className="mt-10">
-          <SignOutButton />
-        </div>
-      </section>
-    </main>
+      {/* Quick action pills */}
+      <div className="mt-8 flex flex-wrap justify-center gap-3">
+        <button className="rounded-full border border-neutral-700 bg-neutral-900/50 px-4 py-2 text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-white">
+          Analyze architecture
+        </button>
+        <button className="rounded-full border border-neutral-700 bg-neutral-900/50 px-4 py-2 text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-white">
+          Search workspace memory
+        </button>
+        <button className="rounded-full border border-neutral-700 bg-neutral-900/50 px-4 py-2 text-sm text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-white">
+          Draft code
+        </button>
+      </div>
+    </div>
   );
 }
