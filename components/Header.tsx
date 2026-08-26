@@ -1,33 +1,27 @@
 "use client";
 
-interface HeaderProps {
-  sessionTitle?: string;
-}
+import Image from "next/image";
 
-export function Header({ sessionTitle = "New Chat" }: HeaderProps) {
+export function Header() {
   return (
-    <header className="flex items-center justify-between border-b border-neutral-800 bg-[#09090b]/80 px-4 py-3 backdrop-blur-md">
-      {/* Left side */}
+    <header className="h-16 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md px-6 flex items-center justify-between text-zinc-200">
       <div className="flex items-center gap-3">
-        <h1 className="text-sm font-medium text-white">{sessionTitle}</h1>
+        <Image
+          src="/icon-512.png"
+          alt="DashyCore"
+          width={26}
+          height={26}
+          className="rounded-md object-contain md:hidden"
+        />
+        <h2 className="text-sm font-medium text-zinc-300">
+          Intelligence Workspace
+        </h2>
       </div>
 
-      {/* Right side */}
-      <div className="flex items-center gap-4">
-        {/* Active Model Badge */}
-        <div className="flex items-center gap-2 rounded-full border border-neutral-700/50 bg-neutral-900/50 px-3 py-1.5">
-          <span className="text-xs font-medium text-neutral-300">dashy-allround</span>
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-          <span className="text-xs text-neutral-400">Active</span>
-        </div>
-
-        {/* System Status */}
-        <div className="flex items-center gap-2 rounded-full border border-neutral-700/50 bg-neutral-900/50 px-3 py-1.5">
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-          </span>
-          <span className="text-xs text-neutral-400">Online</span>
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-800 text-xs font-mono text-zinc-400">
+          <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span>flow-state online</span>
         </div>
       </div>
     </header>
