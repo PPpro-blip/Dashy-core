@@ -2,7 +2,11 @@
 
 import Image from "next/image";
 
-export function Header() {
+interface HeaderProps {
+  sessionTitle?: string;
+}
+
+export function Header({ sessionTitle }: HeaderProps = {}) {
   return (
     <header className="h-16 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md px-6 flex items-center justify-between text-zinc-200">
       <div className="flex items-center gap-3">
@@ -14,7 +18,7 @@ export function Header() {
           className="rounded-md object-contain md:hidden"
         />
         <h2 className="text-sm font-medium text-zinc-300">
-          Intelligence Workspace
+          {sessionTitle || "Intelligence Workspace"}
         </h2>
       </div>
 
