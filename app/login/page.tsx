@@ -85,15 +85,12 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#09090b] px-6 py-16">
+    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-navy px-6 py-16">
       {/* Subtle background grid */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute inset-0 opacity-[0.4]"
+        className="bg-grid pointer-events-none absolute inset-0 opacity-40"
         style={{
-          backgroundImage:
-            "linear-gradient(to right, rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.025) 1px, transparent 1px)",
-          backgroundSize: "64px 64px",
           maskImage:
             "radial-gradient(ellipse 75% 65% at 50% 45%, black 25%, transparent 78%)",
           WebkitMaskImage:
@@ -104,7 +101,7 @@ export default function LoginPage() {
       {/* Ambient radial glow behind the card */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute left-1/2 top-1/2 h-[560px] w-[820px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-gradient-to-tr from-indigo-500/10 via-sky-500/5 to-transparent blur-3xl"
+        className="pointer-events-none absolute left-1/2 top-1/2 h-[560px] w-[820px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-gradient-to-tr from-cyan-500/10 via-violet-500/5 to-transparent blur-3xl"
       />
 
       {/* Content column */}
@@ -126,19 +123,19 @@ export default function LoginPage() {
         </div>
 
         {/* Centerpiece glass card */}
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-8 shadow-2xl shadow-black/80 backdrop-blur-xl transition-colors hover:border-neutral-700/80 md:p-10">
+        <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-8 shadow-2xl shadow-black/80 backdrop-blur-xl transition-colors hover:border-white/[0.14] md:p-10">
           {/* Headline */}
           <h1 className="text-3xl font-semibold tracking-tight text-white md:text-4xl">
-            Where intelligence comes together.
+            Welcome to <span className="text-gradient">DashyCore</span>
           </h1>
 
           {/* Subtitle */}
-          <p className="mt-3 text-sm leading-relaxed text-neutral-400">
-            Unified AI workspace with persistent memory and model routing.
+          <p className="mt-3 text-sm leading-relaxed text-zinc-400">
+            Your AI Operating System
           </p>
 
           {/* Divider */}
-          <div className="my-8 h-px w-full bg-gradient-to-r from-transparent via-neutral-800 to-transparent" />
+          <div className="my-8 h-px w-full bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
 
           {/* Auth Mode Tabs */}
           <div className="mb-6 flex gap-2">
@@ -150,8 +147,8 @@ export default function LoginPage() {
               }}
               className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
                 authMode === "signin"
-                  ? "bg-neutral-800 text-white"
-                  : "text-neutral-400 hover:bg-neutral-800/50 hover:text-white"
+                  ? "bg-white/[0.08] text-white"
+                  : "text-zinc-400 hover:bg-white/[0.04] hover:text-white"
               }`}
             >
               Sign In
@@ -164,8 +161,8 @@ export default function LoginPage() {
               }}
               className={`flex-1 rounded-lg px-4 py-2.5 text-sm font-medium transition-colors ${
                 authMode === "signup"
-                  ? "bg-neutral-800 text-white"
-                  : "text-neutral-400 hover:bg-neutral-800/50 hover:text-white"
+                  ? "bg-white/[0.08] text-white"
+                  : "text-zinc-400 hover:bg-white/[0.04] hover:text-white"
               }`}
             >
               Sign Up
@@ -185,7 +182,7 @@ export default function LoginPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 disabled={loading}
-                className="w-full rounded-lg border border-neutral-700 bg-neutral-800/50 px-4 py-3 text-sm text-white placeholder-neutral-500 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-3 text-sm text-white placeholder-zinc-500 transition-colors focus:border-cyan-400/60 focus:outline-none focus:ring-1 focus:ring-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-60"
                 placeholder="you@example.com"
               />
             </div>
@@ -202,7 +199,7 @@ export default function LoginPage() {
                 required
                 disabled={loading}
                 minLength={6}
-                className="w-full rounded-lg border border-neutral-700 bg-neutral-800/50 px-4 py-3 text-sm text-white placeholder-neutral-500 transition-colors focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-3 text-sm text-white placeholder-zinc-500 transition-colors focus:border-cyan-400/60 focus:outline-none focus:ring-1 focus:ring-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-60"
                 placeholder="••••••••"
               />
             </div>
@@ -210,13 +207,13 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full rounded-xl bg-indigo-600 px-5 py-3.5 text-sm font-medium text-white shadow-md shadow-indigo-500/20 transition-all hover:bg-indigo-500 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+              className="w-full rounded-xl bg-cyan-500 px-5 py-3.5 text-sm font-semibold text-[#06202a] shadow-md shadow-cyan-500/20 transition-all hover:bg-cyan-400 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
                   <span
                     aria-hidden="true"
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-300 border-t-white"
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
                   />
                   {authMode === "signin" ? "Signing in..." : "Creating account..."}
                 </span>
@@ -228,9 +225,9 @@ export default function LoginPage() {
 
           {/* Divider */}
           <div className="my-6 flex items-center gap-4">
-            <div className="flex-1 h-px bg-gradient-to-r from-transparent via-neutral-800 to-transparent" />
+            <div className="flex-1 h-px bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
             <span className="text-xs text-neutral-500">or</span>
-            <div className="flex-1 h-px bg-gradient-to-r from-transparent via-neutral-800 to-transparent" />
+            <div className="flex-1 h-px bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
           </div>
 
           {/* Google OAuth */}

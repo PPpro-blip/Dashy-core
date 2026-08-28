@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
 
-export default async function ChatLayout({
+export default async function SettingsLayout({
   children,
 }: {
   children: React.ReactNode;
@@ -21,7 +21,7 @@ export default async function ChatLayout({
     <div className="flex min-h-screen bg-navy">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <Header sessionTitle="New Chat" />
+        <Header sessionTitle="Settings" />
         <main className="flex-1 overflow-auto">{children}</main>
       </div>
     </div>

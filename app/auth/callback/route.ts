@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { createRouteHandlerClient } from "@/lib/supabase/server";
 
 /**
  * Supabase OAuth PKCE callback.
@@ -12,7 +12,7 @@ export async function GET(request: Request) {
   const next = searchParams.get("next") ?? "/chat";
 
   if (code) {
-    const supabase = await createClient();
+    const supabase = await createRouteHandlerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
       // Only allow relative paths to prevent open-redirects.

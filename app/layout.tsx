@@ -1,12 +1,7 @@
 import type { Metadata, Viewport } from "next";
-import { Inter } from "next/font/google";
+import "@fontsource-variable/inter";
+import { ToastProvider } from "@/components/Toast";
 import "./globals.css";
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: {
@@ -31,8 +26,8 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} font-sans bg-neutral-950 text-neutral-50 antialiased`}>
-        {children}
+      <body className="font-sans bg-neutral-950 text-neutral-50 antialiased">
+        <ToastProvider>{children}</ToastProvider>
       </body>
     </html>
   );
