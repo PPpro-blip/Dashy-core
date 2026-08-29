@@ -5,9 +5,11 @@
  *
  * - Brand row (logo + DashyCore)
  * - Big cyan "+ New Chat" button
- * - Search chats input (local filter of recent conversations)
+ * - Search chats input (filter of recent conversations)
  * - Nav: Chats · Projects · Knowledge · Memory · Agents · Voice · Settings
- * - Recent chats from localStorage history (click to resume, hover delete)
+ *   (every item navigates to a real route)
+ * - Recent chats cloud-first (Supabase when signed in, localStorage
+ *   otherwise; click to resume, hover delete)
  * - Profile card: avatar initials, name, email, inline sign-out control
  *
  * No version footer badge — matching old peak Dashy.
@@ -20,12 +22,12 @@ import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { SignOutButton } from "@/components/SignOutButton";
 import {
-  deleteConversation,
+  deleteConversationAsync,
   emitDeleteConversation,
   emitNewChat,
   emitOpenConversation,
   EVENTS,
-  listConversations,
+  listConversationsAsync,
   type Conversation,
 } from "@/lib/conversations";
 import {
@@ -75,20 +77,48 @@ export function Sidebar() {
   const [user, setUser] = useState<ProfileUser | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [search, setSearch] = useState("");
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [hash, setHash] = useState("");
 
-  const activeConversationId =
-    typeof window !== "undefined"
-      ? (() => {
-          try {
-            return window.localStorage.getItem("dashycore:active-conversation") ?? null;
-          } catch {
-            return null;
-          }
-        })()
-      : null;
+  /* Track the URL hash (settings#memory vs plain settings) reactively. */
+  useEffect(() => {
+    const sync = () => setHash(window.location.hash);
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
 
+  /* Track which conversation the chat page has open (UI state only). */
+  useEffect(() => {
+    const readActive = () => {
+      try {
+        setActiveConversationId(
+          window.localStorage.getItem("dashycore:active-conversation") ?? null
+        );
+      } catch {
+        setActiveConversationId(null);
+      }
+    };
+    readActive();
+    const onOpen = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      setActiveConversationId(detail?.id ?? null);
+    };
+    window.addEventListener(EVENTS.OPEN_CONVERSATION, onOpen);
+    window.addEventListener(EVENTS.NEW_CHAT, readActive);
+    window.addEventListener(EVENTS.CONVERSATIONS_UPDATED, readActive);
+    return () => {
+      window.removeEventListener(EVENTS.OPEN_CONVERSATION, onOpen);
+      window.removeEventListener(EVENTS.NEW_CHAT, readActive);
+      window.removeEventListener(EVENTS.CONVERSATIONS_UPDATED, readActive);
+    };
+  }, []);
+
+  /* Cloud-first list: Supabase conversations when signed in, else local. */
   const refreshConversations = useCallback(() => {
-    setConversations(listConversations());
+    listConversationsAsync()
+      .then(setConversations)
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -139,8 +169,8 @@ export function Sidebar() {
   };
 
   const handleDeleteConversation = (id: string) => {
-    deleteConversation(id);
-    emitDeleteConversation(id);
+    // Cloud delete (cascades messages) + local mirror cleanup, then notify.
+    void deleteConversationAsync(id).finally(() => emitDeleteConversation(id));
   };
 
   const query = search.trim().toLowerCase();
@@ -148,13 +178,11 @@ export function Sidebar() {
     ? conversations.filter((c) => c.title.toLowerCase().includes(query))
     : conversations;
 
-  const navItemClass = (active: boolean, disabled = false) =>
+  const navItemClass = (active: boolean) =>
     `mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors ${
-      disabled
-        ? "cursor-not-allowed text-zinc-600"
-        : active
-          ? "bg-cyan-500/10 text-cyan-300"
-          : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
+      active
+        ? "bg-cyan-500/10 text-cyan-300"
+        : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
     }`;
 
   return (
@@ -213,59 +241,33 @@ export function Sidebar() {
           <MessageIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Chats</span>
         </Link>
-        <div className="flex items-center">
-          <button
-            type="button"
-            disabled
-            title="Projects are coming soon"
-            className={navItemClass(false, true)}
-          >
-            <FolderIcon className="h-4 w-4 flex-shrink-0" />
-            <span className="flex-1 text-left">Projects</span>
-            <ComingSoonBadge />
-          </button>
-        </div>
-        <div className="flex items-center">
-          <button
-            type="button"
-            disabled
-            title="Knowledge is coming soon"
-            className={navItemClass(false, true)}
-          >
-            <BookOpenIcon className="h-4 w-4 flex-shrink-0" />
-            <span className="flex-1 text-left">Knowledge</span>
-            <ComingSoonBadge />
-          </button>
-        </div>
-        <Link href="/settings#memory" className={navItemClass(pathname === "/settings" && typeof window !== "undefined" && window.location.hash.includes("memory"))}>
+        <Link href="/projects" className={navItemClass(pathname === "/projects")}>
+          <FolderIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Projects</span>
+        </Link>
+        <Link href="/knowledge" className={navItemClass(pathname === "/knowledge")}>
+          <BookOpenIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Knowledge</span>
+        </Link>
+        <Link
+          href="/settings#memory"
+          className={navItemClass(pathname === "/settings" && hash.includes("memory"))}
+        >
           <BrainIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Memory</span>
         </Link>
-        <div className="flex items-center">
-          <button
-            type="button"
-            disabled
-            title="Agents are coming soon"
-            className={navItemClass(false, true)}
-          >
-            <BotIcon className="h-4 w-4 flex-shrink-0" />
-            <span className="flex-1 text-left">Agents</span>
-            <ComingSoonBadge />
-          </button>
-        </div>
-        <div className="flex items-center">
-          <button
-            type="button"
-            disabled
-            title="Voice is coming soon"
-            className={navItemClass(false, true)}
-          >
-            <MicIcon className="h-4 w-4 flex-shrink-0" />
-            <span className="flex-1 text-left">Voice</span>
-            <ComingSoonBadge />
-          </button>
-        </div>
-        <Link href="/settings" className={navItemClass(pathname === "/settings" && typeof window !== "undefined" && !window.location.hash.includes("memory"))}>
+        <Link href="/agents" className={navItemClass(pathname === "/agents")}>
+          <BotIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Agents</span>
+        </Link>
+        <Link href="/voice" className={navItemClass(pathname === "/voice")}>
+          <MicIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Voice</span>
+        </Link>
+        <Link
+          href="/settings"
+          className={navItemClass(pathname === "/settings" && !hash.includes("memory"))}
+        >
           <SettingsIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Settings</span>
         </Link>
@@ -340,13 +342,5 @@ export function Sidebar() {
         </div>
       </div>
     </aside>
-  );
-}
-
-function ComingSoonBadge() {
-  return (
-    <span className="flex-shrink-0 rounded border border-white/[0.08] bg-white/[0.03] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-zinc-500">
-      Soon
-    </span>
   );
 }

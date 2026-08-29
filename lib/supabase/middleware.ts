@@ -12,7 +12,14 @@ import { NextResponse, type NextRequest } from "next/server";
  *  - Unauthenticated users are redirected from protected routes to /login.
  *  - Authenticated users hitting /login are sent to /chat.
  */
-const PROTECTED_ROUTES = ["/chat", "/settings"];
+const PROTECTED_ROUTES = [
+  "/chat",
+  "/settings",
+  "/projects",
+  "/knowledge",
+  "/agents",
+  "/voice",
+];
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });

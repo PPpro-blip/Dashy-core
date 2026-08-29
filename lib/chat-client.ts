@@ -29,6 +29,11 @@ export const DASHY_DIGEST_URL =
   process.env.NEXT_PUBLIC_DASHY_DIGEST_URL ??
   "https://dashy-digest.kamleshprathampandey.workers.dev";
 
+export interface ChatHistoryEntry {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 export interface ChatRequest {
   message: string;
   model: string;
@@ -37,6 +42,13 @@ export interface ChatRequest {
   conversationId?: string;
   authToken?: string;
   signal?: AbortSignal;
+  /**
+   * FULL prior turn history for the active conversation, in send order,
+   * ending with the latest user message. Sent alongside `message` (which
+   * stays the latest user turn for backward compatibility) so the worker
+   * can reconstruct the whole thread — no earlier turns are dropped.
+   */
+  history?: ChatHistoryEntry[];
 }
 
 export interface ChatMemory {
@@ -364,6 +376,12 @@ export async function sendChatMessage(
           : {}),
         ...(request.conversationId
           ? { conversation_id: request.conversationId }
+          : {}),
+        // Additive field: full conversation history (all user+assistant
+        // turns in order). The core contract fields above are unchanged,
+        // and the SSE response handling is untouched.
+        ...(request.history
+          ? { messages: request.history.map(({ role, content }) => ({ role, content })) }
           : {}),
       }),
       signal: request.signal,
