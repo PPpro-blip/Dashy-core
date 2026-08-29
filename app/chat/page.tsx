@@ -6,24 +6,30 @@
  * - Hero: logo mark, "How can I help you today?", 2×2 action cards
  * - Bottom-anchored input bar: attach (dashy-digest) + textarea + cyan send
  * - Real streaming from the dashy-flow-state worker via lib/chat-client
- *   (POST /chat · { message, model, userId, agentMode, conversation_id })
+ *   (POST /chat · { message, model, userId, agentMode, conversation_id,
+ *   messages } — `messages` carries the FULL prior turn history)
  * - Model is a workspace-wide preference owned by the header selector
- * - Conversations persist locally and sync with the sidebar via events
+ * - Conversations persist cloud-first (Supabase when signed in, else
+ *   localStorage) and sync with the sidebar via events
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, isValidElement, useRef, useState, type ReactNode } from "react";
 import Image from "next/image";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { createClient } from "@/lib/supabase/client";
-import { ChatClientError, sendChatMessage } from "@/lib/chat-client";
+import {
+  ChatClientError,
+  sendChatMessage,
+  type ChatHistoryEntry,
+} from "@/lib/chat-client";
 import {
   EVENTS,
   emitChatTitle,
-  getConversation,
+  getConversationAsync,
   newConversationId,
-  saveConversation,
+  saveConversationAsync,
   titleFromContent,
   type Conversation,
   type HistoryMessage,
@@ -48,9 +54,11 @@ import {
 
 const ACTIONS = [
   {
-    title: "Create AI art",
+    // Creative-prompt helper: this sends a text prompt to the chat model —
+    // it is NOT an image generator (no image endpoint exists yet).
+    title: "Get creative",
     desc: "A cyberpunk cat in neon rain",
-    prompt: "Generate an image of a cyberpunk cat in neon rain",
+    prompt: "Write a vivid description of a cyberpunk cat in neon rain",
     Icon: SparklesIcon,
   },
   {
@@ -100,6 +108,9 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HistoryMessage[]>([]);
+  /** Title / creation time of the active conversation (cloud-agnostic). */
+  const activeTitleRef = useRef<string>("New Chat");
+  const activeCreatedAtRef = useRef<number>(Date.now());
   const toast = useToast();
 
   useEffect(() => {
@@ -164,14 +175,17 @@ export default function ChatPage() {
     setInput("");
     setActiveConversationId(null);
     markActiveConversation(null);
+    activeTitleRef.current = "New Chat";
+    activeCreatedAtRef.current = Date.now();
     emitChatTitle("DashyCore");
     if (focus) {
       window.setTimeout(() => textareaRef.current?.focus(), 0);
     }
   }, []);
 
-  const openConversation = useCallback((id: string) => {
-    const conversation = getConversation(id);
+  const openConversation = useCallback(async (id: string) => {
+    // Cloud-first load (Supabase when signed in, localStorage otherwise).
+    const conversation = await getConversationAsync(id);
     if (!conversation) return;
     abortControllerRef.current?.abort();
     setIsStreaming(false);
@@ -179,6 +193,8 @@ export default function ChatPage() {
     setMessages(conversation.messages);
     setActiveConversationId(conversation.id);
     markActiveConversation(conversation.id);
+    activeTitleRef.current = conversation.title;
+    activeCreatedAtRef.current = conversation.createdAt || Date.now();
     emitChatTitle(conversation.title);
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }, []);
@@ -187,7 +203,7 @@ export default function ChatPage() {
     const onNewChat = () => startNewChat(true);
     const onOpen = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string }>).detail;
-      if (detail?.id) openConversation(detail.id);
+      if (detail?.id) void openConversation(detail.id);
     };
     const onDelete = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string }>).detail;
@@ -228,16 +244,17 @@ export default function ChatPage() {
 
   const persistConversation = useCallback(
     (conversationId: string, msgs: HistoryMessage[], model: string, title?: string) => {
-      const existing = getConversation(conversationId);
+      if (title) activeTitleRef.current = title;
       const conversation: Conversation = {
         id: conversationId,
-        title: title ?? existing?.title ?? "New Chat",
+        title: activeTitleRef.current,
         model,
         messages: msgs,
-        createdAt: existing?.createdAt ?? Date.now(),
+        createdAt: activeCreatedAtRef.current,
         updatedAt: Date.now(),
       };
-      saveConversation(conversation);
+      // Cloud-first: Supabase when signed in, localStorage when signed out.
+      void saveConversationAsync(conversation);
       return conversation;
     },
     []
@@ -246,6 +263,11 @@ export default function ChatPage() {
   /**
    * Streams an assistant reply from the real dashy-flow-state worker into
    * the given assistant message bubble, token by token.
+   *
+   * `history` is the FULL conversation thread (all prior user+assistant
+   * turns in order, ending with the current user message) and is sent on
+   * every request so the worker sees the entire conversation — no earlier
+   * turns are dropped.
    */
   const streamAssistantReply = useCallback(
     async (
@@ -253,6 +275,7 @@ export default function ChatPage() {
       assistantMessageId: string,
       conversationId: string,
       model: string,
+      history: ChatHistoryEntry[],
       authToken?: string
     ): Promise<void> => {
       const controller = new AbortController();
@@ -267,6 +290,7 @@ export default function ChatPage() {
             userId: userId ?? undefined,
             agentMode: false,
             conversationId,
+            history,
             authToken,
             signal: controller.signal,
           },
@@ -350,10 +374,19 @@ export default function ChatPage() {
       const withUserMessage = [...messages, userMessage, assistantMessage];
       setMessages(withUserMessage);
 
-      // Title the conversation after the first user message.
-      const existing = getConversation(conversationId);
-      const title = existing?.messages.length
-        ? existing.title
+      // FULL-HISTORY payload: every prior turn of this conversation
+      // (user + assistant, in send order) plus the message being sent
+      // right now. Nothing is truncated and no earlier turns are dropped.
+      const history: ChatHistoryEntry[] = [
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user", content: promptText },
+      ];
+
+      // Title the conversation from its first user message (stable across
+      // turns, independent of which backend stores the thread).
+      const firstUserMessage = messages.find((m) => m.role === "user");
+      const title = firstUserMessage
+        ? titleFromContent(firstUserMessage.content)
         : titleFromContent(promptText);
       emitChatTitle(title);
       persistConversation(conversationId, withUserMessage, selectedModel, title);
@@ -375,6 +408,7 @@ export default function ChatPage() {
         assistantMessage.id,
         conversationId,
         selectedModel,
+        history,
         authToken
       );
     },
@@ -416,12 +450,20 @@ export default function ChatPage() {
       }
       persistConversation(conversationId, withoutOld, selectedModel);
 
+      // FULL-HISTORY payload for regeneration: every turn before the one
+      // being regenerated, ending with its user message — identical to
+      // what a fresh send of that message would carry.
+      const history: ChatHistoryEntry[] = messages
+        .slice(0, index)
+        .map((m) => ({ role: m.role, content: m.content }));
+
       setIsStreaming(true);
       void streamAssistantReply(
         userMessage.content,
         freshAssistant.id,
         conversationId,
-        selectedModel
+        selectedModel,
+        history
       );
     },
     [
@@ -477,7 +519,7 @@ export default function ChatPage() {
             How can I help you <span className="text-gradient">today?</span>
           </h1>
           <p className="mt-2 text-sm text-zinc-500">
-            Ask me anything, generate images, write code, or explore ideas
+            Ask me anything, get creative, write code, or explore ideas
           </p>
 
           {/* 2x2 action cards */}
@@ -657,7 +699,7 @@ function MessageRow({
                   a: (props) => (
                     <a {...props} target="_blank" rel="noopener noreferrer" />
                   ),
-                  code: (props) => <InlineCode {...props} />,
+                  code: (props) => <CodeSpan {...props} />,
                   pre: (props) => <PreBlock {...props} />,
                 }}
               >
@@ -713,8 +755,47 @@ function MessageRow({
 /* Markdown helpers                                                           */
 /* ========================================================================== */
 
-function InlineCode(props: React.HTMLAttributes<HTMLElement>) {
+/** Recovers the raw text of a code element (works mid-stream). */
+function textFromChildren(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(textFromChildren).join("");
+  if (isValidElement(children)) {
+    return textFromChildren(
+      (children.props as { children?: ReactNode }).children
+    );
+  }
+  return "";
+}
+
+/** Extracts the fenced-block language (e.g. "language-ts" → "ts"). */
+function languageFromNode(children: ReactNode): string {
+  if (isValidElement(children)) {
+    const className =
+      (children.props as { className?: string }).className ?? "";
+    const match = /language-([\w+#.-]+)/.exec(className);
+    if (match) return match[1];
+  }
+  return "";
+}
+
+/**
+ * `code` renderer — styled chip for inline code, plain element for fenced
+ * blocks (the surrounding PreBlock provides the block chrome).
+ */
+function CodeSpan(props: React.HTMLAttributes<HTMLElement>) {
   const { className, children, ...rest } = props;
+  const raw = typeof children === "string" ? children : "";
+  const isBlock =
+    (typeof className === "string" && className.includes("language-")) ||
+    raw.includes("\n");
+  if (isBlock) {
+    return (
+      <code {...rest} className={className}>
+        {children}
+      </code>
+    );
+  }
   return (
     <code
       {...rest}
@@ -725,14 +806,59 @@ function InlineCode(props: React.HTMLAttributes<HTMLElement>) {
   );
 }
 
+/**
+ * Fenced code block: header bar with the language label (left) and a copy
+ * button (right). The copy snapshot is taken from the currently rendered
+ * children, so it works while the block is still streaming in.
+ */
 function PreBlock(props: React.HTMLAttributes<HTMLElement>) {
-  const { className, children, ...rest } = props;
+  const { children, ...rest } = props;
+  const [copied, setCopied] = useState(false);
+
+  const language = languageFromNode(children);
+  const code = textFromChildren(children);
+
+  const handleCopyClick = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard denied — leave the button in its default state.
+    }
+  };
+
   return (
-    <pre
-      {...rest}
-      className="my-2 overflow-x-auto rounded-xl border border-white/[0.06] bg-black/30 p-3 font-mono text-[12.5px] leading-relaxed text-zinc-200"
-    >
-      {children}
-    </pre>
+    <div className="my-2 overflow-hidden rounded-xl border border-white/[0.06] bg-black/30">
+      <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-3 py-1.5">
+        <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">
+          {language || "code"}
+        </span>
+        <button
+          type="button"
+          onClick={() => void handleCopyClick()}
+          title={copied ? "Copied!" : "Copy code"}
+          aria-label={copied ? "Copied" : "Copy code to clipboard"}
+          className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 font-sans text-[10px] font-medium transition-colors ${
+            copied
+              ? "text-emerald-400"
+              : "text-zinc-500 hover:bg-white/[0.06] hover:text-cyan-300"
+          }`}
+        >
+          {copied ? (
+            <CheckIcon className="h-3 w-3" />
+          ) : (
+            <CopyIcon className="h-3 w-3" />
+          )}
+          {copied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+      <pre
+        {...rest}
+        className="overflow-x-auto p-3 font-mono text-[12.5px] leading-relaxed text-zinc-200"
+      >
+        {children}
+      </pre>
+    </div>
   );
 }
