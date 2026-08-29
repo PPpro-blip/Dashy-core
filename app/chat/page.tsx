@@ -11,14 +11,18 @@
  * - Model is a workspace-wide preference owned by the header selector
  * - Conversations persist cloud-first (Supabase when signed in, else
  *   localStorage) and sync with the sidebar via events
+ * - Code blocks offer Copy + "Open in D-Code" (hands the snapshot to the
+ *   D-Code editor via sessionStorage; streaming is untouched)
  */
 
 import { useCallback, useEffect, isValidElement, useRef, useState, type ReactNode } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { createClient } from "@/lib/supabase/client";
+import { DCODE_INCOMING_KEY } from "@/lib/dcode";
 import {
   ChatClientError,
   sendChatMessage,
@@ -96,6 +100,7 @@ function markActiveConversation(id: string | null): void {
 }
 
 export default function ChatPage() {
+  const router = useRouter();
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -488,6 +493,26 @@ export default function ChatPage() {
     [toast]
   );
 
+  /**
+   * Hands a fenced code block to D-Code: stashes the snapshot in
+   * sessionStorage and opens a scratch project seeded with it. Purely
+   * client-side — the SSE stream is untouched.
+   */
+  const handleOpenInDcode = useCallback(
+    (code: string, language: string) => {
+      try {
+        window.sessionStorage.setItem(
+          DCODE_INCOMING_KEY,
+          JSON.stringify({ code, language })
+        );
+      } catch {
+        // Storage unavailable — D-Code will open with the starter file.
+      }
+      router.push("/d-code");
+    },
+    [router]
+  );
+
   const handleStop = useCallback(() => {
     abortControllerRef.current?.abort();
   }, []);
@@ -562,6 +587,7 @@ export default function ChatPage() {
               isStreaming={isStreaming}
               statuses={statuses}
               onCopy={() => void handleCopy(message.content)}
+              onOpenInDcode={handleOpenInDcode}
               onRegenerate={() => handleRegenerate(message.id)}
             />
           ))}
@@ -629,12 +655,14 @@ function MessageRow({
   isStreaming,
   statuses,
   onCopy,
+  onOpenInDcode,
   onRegenerate,
 }: {
   message: HistoryMessage;
   isStreaming: boolean;
   statuses: string[];
   onCopy: () => void;
+  onOpenInDcode: (code: string, language: string) => void;
   onRegenerate: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -700,7 +728,7 @@ function MessageRow({
                     <a {...props} target="_blank" rel="noopener noreferrer" />
                   ),
                   code: (props) => <CodeSpan {...props} />,
-                  pre: (props) => <PreBlock {...props} />,
+                  pre: (props) => <PreBlock {...props} onOpenInDcode={onOpenInDcode} />,
                 }}
               >
                 {message.content}
@@ -807,13 +835,20 @@ function CodeSpan(props: React.HTMLAttributes<HTMLElement>) {
 }
 
 /**
- * Fenced code block: header bar with the language label (left) and a copy
- * button (right). The copy snapshot is taken from the currently rendered
- * children, so it works while the block is still streaming in.
+ * Fenced code block: header bar with the language label (left) and Copy +
+ * "Open in D-Code" actions (right). The snapshots are taken from the
+ * currently rendered children, so both work while the block is still
+ * streaming in.
  */
-function PreBlock(props: React.HTMLAttributes<HTMLElement>) {
+function PreBlock({
+  onOpenInDcode,
+  ...props
+}: React.HTMLAttributes<HTMLElement> & {
+  onOpenInDcode: (code: string, language: string) => void;
+}) {
   const { children, ...rest } = props;
   const [copied, setCopied] = useState(false);
+  const [opened, setOpened] = useState(false);
 
   const language = languageFromNode(children);
   const code = textFromChildren(children);
@@ -828,30 +863,54 @@ function PreBlock(props: React.HTMLAttributes<HTMLElement>) {
     }
   };
 
+  const handleOpenInDcode = () => {
+    onOpenInDcode(code, language);
+    setOpened(true);
+    window.setTimeout(() => setOpened(false), 2000);
+  };
+
   return (
     <div className="my-2 overflow-hidden rounded-xl border border-white/[0.06] bg-black/30">
       <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-3 py-1.5">
         <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">
           {language || "code"}
         </span>
-        <button
-          type="button"
-          onClick={() => void handleCopyClick()}
-          title={copied ? "Copied!" : "Copy code"}
-          aria-label={copied ? "Copied" : "Copy code to clipboard"}
-          className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 font-sans text-[10px] font-medium transition-colors ${
-            copied
-              ? "text-emerald-400"
-              : "text-zinc-500 hover:bg-white/[0.06] hover:text-cyan-300"
-          }`}
-        >
-          {copied ? (
-            <CheckIcon className="h-3 w-3" />
-          ) : (
-            <CopyIcon className="h-3 w-3" />
-          )}
-          {copied ? "Copied!" : "Copy"}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleOpenInDcode}
+            title={
+              opened ? "Opening in D-Code…" : "Open this code in the D-Code editor"
+            }
+            aria-label="Open in D-Code editor"
+            className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 font-sans text-[10px] font-medium transition-colors ${
+              opened
+                ? "text-cyan-300"
+                : "text-zinc-500 hover:bg-white/[0.06] hover:text-cyan-300"
+            }`}
+          >
+            <CodeIcon className="h-3 w-3" />
+            {opened ? "Opening…" : "Open in D-Code"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleCopyClick()}
+            title={copied ? "Copied!" : "Copy code"}
+            aria-label={copied ? "Copied" : "Copy code to clipboard"}
+            className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 font-sans text-[10px] font-medium transition-colors ${
+              copied
+                ? "text-emerald-400"
+                : "text-zinc-500 hover:bg-white/[0.06] hover:text-cyan-300"
+            }`}
+          >
+            {copied ? (
+              <CheckIcon className="h-3 w-3" />
+            ) : (
+              <CopyIcon className="h-3 w-3" />
+            )}
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
       </div>
       <pre
         {...rest}

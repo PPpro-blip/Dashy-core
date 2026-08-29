@@ -6,7 +6,8 @@
  * - Brand row (logo + DashyCore)
  * - Big cyan "+ New Chat" button
  * - Search chats input (filter of recent conversations)
- * - Nav: Chats · Projects · Knowledge · Memory · Agents · Voice · Settings
+ * - Nav: Chats · D-Code · Projects · Knowledge · Memory · Agents · Voice ·
+ *   Settings
  *   (every item navigates to a real route)
  * - Recent chats cloud-first (Supabase when signed in, localStorage
  *   otherwise; click to resume, hover delete)
@@ -34,6 +35,7 @@ import {
   BookOpenIcon,
   BotIcon,
   BrainIcon,
+  CodeIcon,
   FolderIcon,
   MessageIcon,
   MicIcon,
@@ -240,6 +242,15 @@ export function Sidebar() {
         <Link href="/chat" className={navItemClass(pathname === "/chat")}>
           <MessageIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Chats</span>
+        </Link>
+        <Link
+          href="/d-code"
+          className={navItemClass(
+            pathname === "/d-code" || pathname.startsWith("/d-code/")
+          )}
+        >
+          <CodeIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">D-Code</span>
         </Link>
         <Link href="/projects" className={navItemClass(pathname === "/projects")}>
           <FolderIcon className="h-4 w-4 flex-shrink-0" />
