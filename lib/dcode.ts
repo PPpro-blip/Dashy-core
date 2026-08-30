@@ -13,6 +13,27 @@
  */
 
 import { createClient } from "@/lib/supabase/client";
+import {
+  cleanTextContent,
+  isBlockedPath,
+  MAX_FILE_CONTENT_CHARS,
+  MAX_PATH_CHARS,
+  sanitizeFiles,
+  toSafeJsonPayload,
+} from "@/lib/dcode-sanitize";
+
+// Re-exported so D-Code UI code has one import site for every ingest guard.
+export {
+  BLOCKED_FILE_MESSAGE,
+  MAX_FILE_CONTENT_CHARS,
+  MAX_PATH_CHARS,
+  MAX_PROJECT_FILES,
+  cleanTextContent,
+  containsBinaryMarkers,
+  isBlockedPath,
+  sanitizeFiles,
+  toSafeJsonPayload,
+} from "@/lib/dcode-sanitize";
 
 /* ---------------------------------------------------------------------- */
 /* Types                                                                   */
@@ -38,6 +59,13 @@ export interface DCodeProject {
   shareSlug: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Names of stored files that were dropped on read because they are
+   * binary/media/lockfiles. Populated so the UI can tell the user why a file
+   * they imported earlier is no longer listed (and why the next save heals
+   * the row). Never persisted.
+   */
+  skippedFiles?: string[];
 }
 
 export interface DCodeProjectDraft {
@@ -258,53 +286,95 @@ export function starterProjectDraft(language = "typescript"): DCodeProjectDraft 
 
 /**
  * Sanitizes a file array before it is persisted into the postgres jsonb
- * column. Strips null bytes (\u0000) and drops otherwise-invalid unicode
- * sequences so a single bad character in an editor buffer can never poison
- * the whole project row. The round-trip through JSON.stringify/parse also
- * normalizes any stray non-serializable values.
+ * column: hard-blocks binary/media/lockfile paths, strips NUL bytes, BOM,
+ * lone surrogates and non-characters, applies per-file/project size caps and
+ * finishes with a full JSON round-trip. A single bad character in an editor
+ * buffer — or one imported logo.png — can therefore never poison the row.
+ *
+ * Implemented in `lib/dcode-sanitize` so the exact same gate is reused by
+ * every import path in the workspace UI.
  */
-function sanitizeFiles(files: DCodeFile[]): DCodeFile[] {
-  try {
-    const cleaned = JSON.stringify(files).replace(/\u0000/g, "");
-    return JSON.parse(cleaned) as DCodeFile[];
-  } catch {
-    // Never block a save because of sanitization — return the raw files.
-    return files;
-  }
+function safeFilesPayload(files: DCodeFile[]): DCodeFile[] {
+  return toSafeJsonPayload(sanitizeFiles(files));
 }
 
-function coerceFiles(raw: unknown): DCodeFile[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((f): f is Record<string, unknown> => Boolean(f) && typeof f === "object")
-    .map((f) => ({
+/**
+ * Normalizes the jsonb array into DCodeFile[] and hard-blocks anything that
+ * must never live in that column (binaries, media, lockfiles, generated
+ * output). Returns the kept files plus the names that were dropped so the
+ * workspace can explain the removal instead of hiding it.
+ */
+function coerceFiles(raw: unknown): { files: DCodeFile[]; skipped: string[] } {
+  if (!Array.isArray(raw)) return { files: [], skipped: [] };
+  const files: DCodeFile[] = [];
+  const skipped: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const f = item as Record<string, unknown>;
+    const name =
+      typeof f.name === "string" && f.name.trim() ? f.name : "untitled.txt";
+    if (isBlockedPath(name)) {
+      skipped.push(name);
+      continue;
+    }
+    files.push({
       id: typeof f.id === "string" ? f.id : newId(),
-      name: typeof f.name === "string" && f.name.trim() ? f.name : "untitled.txt",
+      name: cleanTextContent(name).slice(0, MAX_PATH_CHARS),
       language:
         typeof f.language === "string" && f.language
           ? f.language
-          : languageFromFilename(typeof f.name === "string" ? f.name : ""),
-      content: typeof f.content === "string" ? f.content : "",
-    }));
+          : languageFromFilename(name),
+      content: cleanTextContent(f.content).slice(0, MAX_FILE_CONTENT_CHARS),
+    });
+  }
+  return { files, skipped };
 }
 
 function rowToProject(row: DCodeProjectRow): DCodeProject {
+  const { files, skipped } = coerceFiles(row.files);
   return {
     id: row.id,
     userId: row.user_id,
     title: row.title ?? "Untitled project",
     description: row.description ?? null,
     language: row.language ?? "typescript",
-    files: coerceFiles(row.files),
+    files,
     isPublic: row.is_public,
     shareSlug: row.share_slug ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(skipped.length > 0 ? { skippedFiles: skipped } : {}),
   };
 }
 
-function classError(error: { message?: string } | null): Error {
-  return new Error(error?.message || "D-Code request failed");
+/**
+ * Error carrying enough of the Supabase/Postgres detail for the UI to tell a
+ * dead session apart from a one-off payload/network failure (see
+ * `describeSaveError` in lib/dcode-sanitize). `message` stays the raw driver
+ * message so existing callers keep working unchanged.
+ */
+export class DCodeError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly status?: number
+  ) {
+    super(message);
+    this.name = "DCodeError";
+  }
+}
+
+function classError(error: { message?: string; code?: string } | null): Error {
+  return new DCodeError(
+    error?.message || "D-Code request failed",
+    typeof error?.code === "string" ? error.code : undefined
+  );
+}
+
+/** Cleans free-text columns (title/description) with the same text gate. */
+function safeText(value: string | null | undefined, max = 200): string | null {
+  if (value === null || value === undefined) return null;
+  return cleanTextContent(value).slice(0, max);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -373,10 +443,10 @@ export async function createProject(
     .from("dcode_projects")
     .insert({
       user_id: user.id,
-      title: draft.title.trim() || "Untitled project",
-      description: draft.description ?? null,
+      title: safeText(draft.title.trim(), 200) || "Untitled project",
+      description: safeText(draft.description, 2000),
       language: draft.language,
-      files: sanitizeFiles(draft.files),
+      files: safeFilesPayload(draft.files),
     })
     .select("*")
     .single();
@@ -402,10 +472,11 @@ export async function updateProject(
   // Only include user_id when we actually have it; never override ownership
   // with an unauthenticated/empty id.
   if (user?.id) payload.user_id = user.id;
-  if (patch.title !== undefined) payload.title = patch.title.trim() || "Untitled project";
-  if (patch.description !== undefined) payload.description = patch.description;
+  if (patch.title !== undefined)
+    payload.title = safeText(patch.title.trim(), 200) || "Untitled project";
+  if (patch.description !== undefined) payload.description = safeText(patch.description, 2000);
   if (patch.language !== undefined) payload.language = patch.language;
-  if (patch.files !== undefined) payload.files = sanitizeFiles(patch.files);
+  if (patch.files !== undefined) payload.files = safeFilesPayload(patch.files);
   if (patch.isPublic !== undefined) payload.is_public = patch.isPublic;
 
   const { data, error } = await supabase
