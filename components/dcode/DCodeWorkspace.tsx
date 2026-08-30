@@ -19,7 +19,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ComponentType } from "react";
 import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 import {
   createProject,
   languageFromFilename,
@@ -32,14 +34,20 @@ import {
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
 import { useToast } from "@/components/Toast";
 import {
+  BracesIcon,
   CheckIcon,
+  CodeIcon,
   FileTextIcon,
+  FolderIcon,
+  GithubIcon,
   GlobeIcon,
   LockIcon,
   LoaderIcon,
+  PenIcon,
   PlusIcon,
   ShareIcon,
   TrashIcon,
+  XIcon,
 } from "@/components/icons";
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
@@ -60,6 +68,144 @@ export interface DCodeWorkspaceProps {
 }
 
 const AUTOSAVE_DEBOUNCE_MS = 1200;
+
+/** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
+const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
+
+interface GithubRepo {
+  full_name: string;
+  clone_url: string;
+  html_url?: string;
+  description?: string | null;
+}
+
+/** File-tree icon + accent based on the file type. */
+function fileIconFor(
+  name: string
+): { Icon: ComponentType<{ className?: string }>; color: string } {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (["ts", "tsx", "js", "jsx"].includes(ext)) {
+    return { Icon: CodeIcon, color: "text-cyan-400" };
+  }
+  if (["css", "json"].includes(ext)) {
+    return { Icon: BracesIcon, color: "text-cyan-300" };
+  }
+  if (["html", "htm"].includes(ext)) {
+    return { Icon: GlobeIcon, color: "text-cyan-400" };
+  }
+  return { Icon: FileTextIcon, color: "text-zinc-400" };
+}
+
+function parseGithubRepo(input: string): { owner: string; repo: string } | null {
+  const value = input.trim().replace(/\/$/, "").replace(/\.git$/, "");
+  const urlMatch = value.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/);
+  if (urlMatch) return { owner: urlMatch[1], repo: urlMatch[2] };
+  const shortMatch = value.match(/^([^/]+)\/([^/]+)$/);
+  if (shortMatch) return { owner: shortMatch[1], repo: shortMatch[2] };
+  return null;
+}
+
+/** Lists the signed-in user's GitHub repos when a provider token is available. */
+async function listGitHubRepos(): Promise<GithubRepo[]> {
+  const supabase = createClient();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  const providerToken = (session as { provider_token?: string | null } | null)
+    ?.provider_token;
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+  };
+  if (providerToken) headers.Authorization = `Bearer ${providerToken}`;
+
+  const res = await fetch(
+    "https://api.github.com/user/repos?per_page=60&sort=updated",
+    { headers }
+  );
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(
+      "GitHub token is not available. Paste a repo URL to import instead."
+    );
+  }
+  if (!res.ok) {
+    throw new Error(`GitHub API returned HTTP ${res.status}.`);
+  }
+  const data = (await res.json()) as unknown;
+  return Array.isArray(data) ? (data as GithubRepo[]) : [];
+}
+
+/**
+ * Basic scaffold importer: resolves a public GitHub repo, walks its tree and
+ * pulls up to 60 non-generated source files into D-Code. D-Code stores files
+ * as names (a project has no nested folders), so deeply nested paths collapse
+ * to their basename.
+ */
+async function importGitHubRepository(url: string): Promise<DCodeFile[]> {
+  const parsed = parseGithubRepo(url);
+  if (!parsed) {
+    throw new Error(
+      "Enter a valid GitHub repo URL (e.g. https://github.com/owner/repo)."
+    );
+  }
+  const { owner, repo } = parsed;
+
+  const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+    headers: { Accept: "application/vnd.github+json" },
+  });
+  if (!repoRes.ok) {
+    throw new Error(
+      `GitHub repo not found or not accessible (HTTP ${repoRes.status}).`
+    );
+  }
+  const repoInfo = (await repoRes.json()) as { default_branch?: string };
+  const branch = repoInfo.default_branch ?? "main";
+
+  const treeRes = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
+    { headers: { Accept: "application/vnd.github+json" } }
+  );
+  if (!treeRes.ok) {
+    throw new Error(
+      `Could not list GitHub repository contents (HTTP ${treeRes.status}).`
+    );
+  }
+  const tree = (await treeRes.json()) as {
+    tree?: Array<{ path?: string; type?: string; size?: number }>;
+  };
+
+  const paths = (tree.tree ?? [])
+    .filter((entry) => entry.type === "blob" && entry.path)
+    .map((entry) => entry.path as string)
+    .filter(
+      (path) =>
+        !/^(\/?node_modules\/|dist\/|build\/|\.next\/|\.git\/|coverage\/|out\/|target\/)/.test(
+          path
+        )
+    )
+    .filter((path) => /^[a-zA-Z0-9_\-\.\/]+$/.test(path))
+    .slice(0, 60);
+
+  if (paths.length === 0) {
+    throw new Error("No importable source files found in this repository.");
+  }
+
+  const files: DCodeFile[] = [];
+  for (const path of paths) {
+    const name = path.split("/").pop() ?? path;
+    const rawRes = await fetch(
+      `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
+    );
+    if (!rawRes.ok) continue;
+    const content = await rawRes.text();
+    if (content.length > 512 * 1024) continue;
+    files.push({ id: newId(), name, language: languageFromFilename(name), content });
+  }
+
+  if (files.length === 0) {
+    throw new Error("Could not fetch any raw files from this repository.");
+  }
+  return files;
+}
 
 export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorkspaceProps) {
   const router = useRouter();
@@ -89,6 +235,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [newFileName, setNewFileName] = useState("");
   const [addingFile, setAddingFile] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
+  const [renamingFileId, setRenamingFileId] = useState<string | null>(null);
+  const [renamingName, setRenamingName] = useState("");
+
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [githubModalOpen, setGithubModalOpen] = useState(false);
+  const [githubRepoUrl, setGithubRepoUrl] = useState("");
+  const [githubRepos, setGithubRepos] = useState<GithubRepo[]>([]);
+  const [listingRepos, setListingRepos] = useState(false);
+  const [importingRepo, setImportingRepo] = useState(false);
+  const [githubError, setGithubError] = useState<string | null>(null);
 
   /** Latest values for debounced/keyboard saves. */
   const latestRef = useRef({ projectId, title, files });
@@ -204,6 +360,32 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     };
   }, []);
 
+  /* ------------------------------ github state ---------------------------- */
+
+  useEffect(() => {
+    let cancelled = false;
+    async function detectGithub() {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (cancelled || !user) return;
+        const provider = (user.app_metadata?.provider as string | undefined) ?? "";
+        const viaIdentity =
+          user.identities?.some((identity) => identity.provider === "github") ??
+          false;
+        setGithubConnected(provider === "github" || viaIdentity);
+      } catch {
+        // Auth is best-effort — the GitHub prompt simply won't highlight.
+      }
+    }
+    void detectGithub();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /* -------------------------------- file ops ------------------------------ */
 
   const updateActiveContent = useCallback(
@@ -225,9 +407,26 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     [markDirty]
   );
 
+  const validateFileName = useCallback(
+    (name: string): boolean => {
+      if (!VALID_FILENAME.test(name)) {
+        toast.show({
+          type: "error",
+          title: "Invalid file name",
+          message:
+            "Use only letters, numbers, underscores, hyphens or dots (e.g. utils.ts).",
+        });
+        return false;
+      }
+      return true;
+    },
+    [toast]
+  );
+
   const handleAddFile = useCallback(() => {
     const name = newFileName.trim();
     if (!name) return;
+    if (!validateFileName(name)) return;
     if (files.some((f) => f.name.toLowerCase() === name.toLowerCase())) {
       toast.show({
         type: "error",
@@ -247,7 +446,57 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     setNewFileName("");
     setAddingFile(false);
     markDirty();
-  }, [files, markDirty, newFileName, toast]);
+  }, [files, markDirty, newFileName, toast, validateFileName]);
+
+  const startRename = useCallback((file: DCodeFile) => {
+    setRenamingFileId(file.id);
+    setRenamingName(file.name);
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setRenamingFileId(null);
+    setRenamingName("");
+  }, []);
+
+  const handleRenameFile = useCallback(() => {
+    const id = renamingFileId;
+    const name = renamingName.trim();
+    if (!id) return;
+    if (!name) {
+      cancelRename();
+      return;
+    }
+    if (!validateFileName(name)) return;
+
+    const target = files.find((f) => f.id === id);
+    if (!target) {
+      cancelRename();
+      return;
+    }
+    if (name.toLowerCase() === target.name.toLowerCase()) {
+      cancelRename();
+      return;
+    }
+    if (files.some((f) => f.id !== id && f.name.toLowerCase() === name.toLowerCase())) {
+      toast.show({
+        type: "error",
+        title: "File already exists",
+        message: `“${name}” is already in this project.`,
+      });
+      return;
+    }
+
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === id
+          ? { ...f, name, language: languageFromFilename(name) }
+          : f
+      )
+    );
+    setRenamingFileId(null);
+    setRenamingName("");
+    markDirty();
+  }, [cancelRename, files, markDirty, renamingFileId, renamingName, toast, validateFileName]);
 
   const handleDeleteFile = useCallback(
     (id: string) => {
@@ -345,6 +594,80 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       setSavingShare(false);
     }
   }, [projectId, savingShare, toast]);
+
+  /* --------------------------------- github ------------------------------- */
+
+  const openGitHubModal = useCallback(() => {
+    setGithubError(null);
+    setGithubRepoUrl("");
+    setGithubRepos([]);
+    setGithubModalOpen(true);
+  }, []);
+
+  const closeGitHubModal = useCallback(() => {
+    setGithubModalOpen(false);
+    setGithubError(null);
+    setGithubRepoUrl("");
+    setGithubRepos([]);
+  }, []);
+
+  const handleListRepos = useCallback(async () => {
+    setListingRepos(true);
+    setGithubError(null);
+    try {
+      const repos = await listGitHubRepos();
+      setGithubRepos(repos);
+    } catch (error) {
+      setGithubError(
+        error instanceof Error
+          ? error.message
+          : "Could not list GitHub repositories."
+      );
+    } finally {
+      setListingRepos(false);
+    }
+  }, []);
+
+  const handleImportRepo = useCallback(
+    async (repoUrl: string) => {
+      if (importingRepo) return;
+      setImportingRepo(true);
+      setGithubError(null);
+      try {
+        const imported = await importGitHubRepository(repoUrl);
+        setFiles((prev) => {
+          const existing = new Set(prev.map((f) => f.name.toLowerCase()));
+          const next = [...prev];
+          for (const file of imported) {
+            if (!existing.has(file.name.toLowerCase())) {
+              next.push(file);
+              existing.add(file.name.toLowerCase());
+            }
+          }
+          return next;
+        });
+        setActiveFileId(imported[0]?.id ?? "");
+        markDirty();
+        toast.show({
+          type: "success",
+          title: "GitHub repo imported",
+          message: `${imported.length} file${
+            imported.length === 1 ? "" : "s"
+          } added to this project.`,
+        });
+        closeGitHubModal();
+      } catch (error) {
+        setGithubError(
+          error instanceof Error
+            ? error.message
+            : "Could not import the repository."
+        );
+      } finally {
+        setImportingRepo(false);
+      }
+    },
+    [closeGitHubModal, importingRepo, markDirty, toast]
+  );
 
   /* ------------------------------ save status ----------------------------- */
 
@@ -451,6 +774,20 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </span>
           ) : (
             <>
+              <button
+                type="button"
+                onClick={openGitHubModal}
+                title="Connect GitHub — import or link a repository"
+                aria-label="Connect GitHub"
+                className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+              >
+                <GithubIcon
+                  className={`h-3.5 w-3.5 ${
+                    githubConnected ? "text-cyan-300" : "text-zinc-500"
+                  }`}
+                />
+                Connect GitHub
+              </button>
               {isPublic && (
                 <button
                   type="button"
@@ -499,35 +836,87 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           <ul className="min-h-0 flex-1 overflow-y-auto px-2">
             {files.map((file) => {
               const isActive = activeFile?.id === file.id;
+              const { Icon: FileIcon, color: fileColor } = fileIconFor(file.name);
+              const isRenaming = renamingFileId === file.id;
               return (
                 <li key={file.id} className="group relative">
-                  <button
-                    type="button"
-                    onClick={() => setActiveFileId(file.id)}
-                    className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
-                      isActive
-                        ? "bg-cyan-500/10 text-cyan-300"
-                        : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
-                    }`}
-                  >
-                    <FileTextIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                  </button>
-                  {!readOnly && (
-                    <button
-                      type="button"
-                      aria-label={`Delete ${file.name}`}
-                      title={`Delete ${file.name}`}
-                      onClick={() => handleDeleteFile(file.id)}
-                      disabled={deletingFileId !== null}
-                      className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded-md bg-[#0d1020]/90 p-1 text-zinc-500 transition-colors hover:text-red-400 disabled:opacity-50 group-hover:block"
-                    >
-                      {deletingFileId === file.id ? (
-                        <LoaderIcon className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <TrashIcon className="h-3 w-3" />
+                  {isRenaming ? (
+                    <div className="space-y-1.5 rounded-lg border border-cyan-400/40 bg-white/[0.03] p-1.5">
+                      <input
+                        type="text"
+                        value={renamingName}
+                        autoFocus
+                        onChange={(e) => setRenamingName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleRenameFile();
+                          if (e.key === "Escape") cancelRename();
+                        }}
+                        placeholder="e.g. utils.ts"
+                        aria-label="Rename file"
+                        spellCheck={false}
+                        className="h-8 w-full rounded-md bg-transparent px-1 text-xs text-zinc-200 placeholder-zinc-500 outline-none"
+                      />
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleRenameFile}
+                          className="flex-1 rounded-md bg-cyan-500 px-2 py-1 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRename}
+                          className="flex-1 rounded-md border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:text-zinc-200"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setActiveFileId(file.id)}
+                        className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
+                          isActive
+                            ? "bg-cyan-500/10 text-cyan-300"
+                            : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
+                        }`}
+                      >
+                        <FileIcon
+                          className={`h-3.5 w-3.5 flex-shrink-0 ${fileColor}`}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                      </button>
+                      {!readOnly && (
+                        <div className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md bg-[#0d1020]/90 p-0.5 group-hover:flex">
+                          <button
+                            type="button"
+                            aria-label={`Rename ${file.name}`}
+                            title={`Rename ${file.name}`}
+                            onClick={() => startRename(file)}
+                            className="rounded-md p-1 text-zinc-500 transition-colors hover:text-cyan-300"
+                          >
+                            <PenIcon className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Delete ${file.name}`}
+                            title={`Delete ${file.name}`}
+                            onClick={() => handleDeleteFile(file.id)}
+                            disabled={deletingFileId !== null}
+                            className="rounded-md p-1 text-zinc-500 transition-colors hover:text-red-400 disabled:opacity-50"
+                          >
+                            {deletingFileId === file.id ? (
+                              <LoaderIcon className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <TrashIcon className="h-3 w-3" />
+                            )}
+                          </button>
+                        </div>
                       )}
-                    </button>
+                    </>
                   )}
                 </li>
               );
@@ -617,20 +1006,197 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           <div className="min-h-0 flex-1">
             {activeFile ? (
               <MonacoEditor
-                key={activeFile.id}
+                key={`${activeFile.id}:${activeFile.language}`}
                 value={activeFile.content}
                 language={activeFile.language}
                 onChange={readOnly ? undefined : updateActiveContent}
                 readOnly={readOnly}
               />
             ) : (
-              <div className="flex h-full items-center justify-center text-sm text-zinc-600">
-                No file open
+              <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-400/10 shadow-2xl shadow-cyan-500/10">
+                  <CodeIcon className="h-8 w-8 text-cyan-400" />
+                </div>
+                <h2 className="mt-6 text-xl font-semibold tracking-tight text-white">
+                  Welcome to D-Code Workspace
+                </h2>
+                <p className="mt-2 max-w-sm text-sm leading-relaxed text-zinc-500">
+                  Create a source file to start coding, or open one of your
+                  existing projects.
+                </p>
+                <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setAddingFile(true)}
+                    className="flex items-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
+                  >
+                    <PlusIcon className="h-4 w-4" />
+                    Create New File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                  >
+                    <FolderIcon className="h-4 w-4" />
+                    Open Project
+                  </button>
+                </div>
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {/* GitHub connect / import modal */}
+      {githubModalOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="Close GitHub connect dialog"
+            className="fixed inset-0 z-40 cursor-default bg-black/60 backdrop-blur-sm"
+            onClick={closeGitHubModal}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Connect GitHub"
+            className="fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0d1220] shadow-2xl shadow-black/80"
+          >
+            <div className="flex items-center gap-3 border-b border-white/[0.06] px-5 py-4">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#24292f] text-white">
+                <GithubIcon className="h-5 w-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-white">Connect GitHub</h2>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  Import a repository or fetch raw files into this project.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeGitHubModal}
+                aria-label="Close"
+                className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+              >
+                <XIcon className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-5 py-5">
+              <div>
+                <label
+                  htmlFor="github-repo-url"
+                  className="mb-1.5 block text-xs font-medium text-zinc-400"
+                >
+                  GitHub repo URL
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="github-repo-url"
+                    type="text"
+                    value={githubRepoUrl}
+                    onChange={(e) => setGithubRepoUrl(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && githubRepoUrl.trim()) {
+                        void handleImportRepo(githubRepoUrl);
+                      }
+                    }}
+                    placeholder="https://github.com/owner/repo"
+                    spellCheck={false}
+                    className="h-9 flex-1 rounded-lg border border-white/[0.1] bg-white/[0.03] px-3 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-cyan-400/50"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleImportRepo(githubRepoUrl)}
+                    disabled={!githubRepoUrl.trim() || importingRepo}
+                    className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-[#06202a] transition-all hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {importingRepo ? (
+                      <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <PlusIcon className="h-3.5 w-3.5" />
+                    )}
+                    Import
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[11px] text-zinc-600">
+                  Paste any public repo. Up to 60 source files are pulled in.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="h-px flex-1 bg-white/[0.06]" />
+                <span className="text-[10px] uppercase tracking-widest text-zinc-600">
+                  or
+                </span>
+                <div className="h-px flex-1 bg-white/[0.06]" />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium text-zinc-400">
+                    Your repositories
+                    {githubConnected ? "" : " — sign in with GitHub to list"}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleListRepos()}
+                    disabled={listingRepos || importingRepo}
+                    className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
+                  >
+                    {listingRepos ? "Loading…" : "List repos"}
+                  </button>
+                </div>
+
+                {githubRepos.length > 0 && (
+                  <ul className="mt-3 max-h-52 overflow-y-auto rounded-xl border border-white/[0.06] bg-black/20">
+                    {githubRepos.slice(0, 20).map((repo) => (
+                      <li key={repo.full_name}>
+                        <button
+                          type="button"
+                          onClick={() => void handleImportRepo(repo.clone_url)}
+                          disabled={importingRepo}
+                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-white/[0.04] disabled:opacity-50"
+                        >
+                          <GithubIcon className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate font-mono text-xs text-zinc-200">
+                              {repo.full_name}
+                            </span>
+                            {repo.description && (
+                              <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
+                                {repo.description}
+                              </span>
+                            )}
+                          </span>
+                          <PlusIcon className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {githubError && (
+                <p
+                  role="alert"
+                  className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-300"
+                >
+                  {githubError}
+                </p>
+              )}
+
+              {githubConnected && (
+                <p className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  Signed in with GitHub — repo listing uses your provider token.
+                </p>
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
