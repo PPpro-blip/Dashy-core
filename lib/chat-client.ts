@@ -29,6 +29,11 @@ export const DASHY_DIGEST_URL =
   process.env.NEXT_PUBLIC_DASHY_DIGEST_URL ??
   "https://dashy-digest.kamleshprathampandey.workers.dev";
 
+export interface ChatHistoryEntry {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 export interface ChatRequest {
   message: string;
   model: string;
@@ -37,6 +42,13 @@ export interface ChatRequest {
   conversationId?: string;
   authToken?: string;
   signal?: AbortSignal;
+  /**
+   * FULL prior turn history for the active conversation, in send order,
+   * ending with the latest user message. Sent alongside `message` (which
+   * stays the latest user turn for backward compatibility) so the worker
+   * can reconstruct the whole thread — no earlier turns are dropped.
+   */
+  history?: ChatHistoryEntry[];
 }
 
 export interface ChatMemory {
@@ -44,6 +56,17 @@ export interface ChatMemory {
   title?: string;
   sourceType?: string;
   similarity?: number;
+}
+
+/**
+ * One entry in the worker's agent-mode `activity` timeline.
+ *
+ * Contract: `activity: [{ type, message, tool }]`.
+ */
+export interface AgentActivity {
+  type: string;
+  message?: string;
+  tool?: string;
 }
 
 export interface ChatCallbacks {
@@ -58,6 +81,12 @@ export interface ChatResult {
   conversationId?: string;
   memories: ChatMemory[];
   statusStates: string[];
+  /** Agent routing mode reported by the worker ("agent" | "standard" …). */
+  mode?: string;
+  /** Model id actually used by the worker router. */
+  modelId?: string;
+  /** Agent pipeline timeline: `[{ type, message, tool }]`. */
+  activity?: AgentActivity[];
 }
 
 export class ChatClientError extends Error {
@@ -153,6 +182,138 @@ function extractStatuses(obj: UnknownRecord): string[] {
   }
   if (typeof obj.status === "string") return [obj.status];
   return [];
+}
+
+/**
+ * Normalizes the agent-mode `activity` timeline into a stable shape.
+ * Accepts both the contract objects `{ type, message, tool }` and plain
+ * strings so older worker versions remain understandable.
+ */
+function normalizeActivity(raw: unknown): AgentActivity[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item): AgentActivity | null => {
+      if (typeof item === "string") {
+        return { type: "step", message: item };
+      }
+      const obj = item as UnknownRecord;
+      if (!obj || typeof obj !== "object") return null;
+      const type = pickString(obj, ["type", "kind"]);
+      return {
+        type: type ?? "step",
+        message: pickString(obj, ["message", "text", "description"]),
+        tool: pickString(obj, ["tool", "toolName", "name"]),
+      };
+    })
+    .filter((activity): activity is AgentActivity => activity !== null);
+}
+
+/**
+ * Parses a single agent-mode JSON document into a ChatResult.
+ *
+ * The worker contract is:
+ *   { success: true, mode: "agent", modelId, reply, memories: [], activity: [{ type, message, tool }] }
+ */
+function parseAgentResponse(raw: UnknownRecord): ChatResult {
+  if (typeof raw.error === "string" && raw.error.length > 0) {
+    throw new ChatClientError(raw.error, "server");
+  }
+
+  const content =
+    pickString(raw, ["reply", "content", "response", "text"]) ?? "";
+  const activity = normalizeActivity(raw.activity);
+
+  if (!content && activity.length === 0) {
+    throw new ChatClientError(
+      "The assistant returned an empty response. Please try again.",
+      "empty"
+    );
+  }
+
+  return {
+    content,
+    conversationId: extractConversationId(raw),
+    memories: normalizeMemories(raw.memories),
+    statusStates: extractStatuses(raw),
+    mode: pickString(raw, ["mode"]),
+    modelId: pickString(raw, ["modelId", "model_id", "model"]),
+    activity,
+  };
+}
+
+/**
+ * Reads Agent Mode as a standard JSON POST response (no SSE parsing).
+ * Defensively handles text/plain or mislabelled SSE bodies too, using the
+ * final `data:` JSON frame when necessary.
+ */
+async function readAgentModeResponse(res: Response): Promise<ChatResult> {
+  const contentType = res.headers.get("content-type") ?? "";
+  let raw: unknown;
+
+  if (contentType.includes("application/json")) {
+    try {
+      raw = await res.json();
+    } catch {
+      throw new ChatClientError(
+        "The backend returned malformed data.",
+        "server",
+        res.status
+      );
+    }
+  } else {
+    const text = await res.text();
+    const trimmed = text.trim();
+    if (!trimmed) {
+      throw new ChatClientError(
+        "The assistant returned an empty response. Please try again.",
+        "empty"
+      );
+    }
+
+    if (trimmed.startsWith("{")) {
+      try {
+        raw = JSON.parse(trimmed);
+      } catch {
+        throw new ChatClientError(
+          "The backend returned malformed data.",
+          "server",
+          res.status
+        );
+      }
+    } else {
+      // Mislabeled SSE: use the last `data:`-framed JSON document.
+      const frames = trimmed
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("data:") || line.startsWith("{"))
+        .map((line) => line.replace(/^data:\s*/, ""));
+      const last = frames[frames.length - 1];
+      if (!last) {
+        throw new ChatClientError(
+          "The assistant returned an empty response. Please try again.",
+          "empty"
+        );
+      }
+      try {
+        raw = JSON.parse(last);
+      } catch {
+        throw new ChatClientError(
+          "The backend returned malformed data.",
+          "server",
+          res.status
+        );
+      }
+    }
+  }
+
+  if (typeof raw !== "object" || raw === null) {
+    throw new ChatClientError(
+      "The assistant returned an empty response. Please try again.",
+      "empty"
+    );
+  }
+
+  return parseAgentResponse(raw as UnknownRecord);
 }
 
 function extractConversationId(obj: UnknownRecord): string | undefined {
@@ -365,6 +526,12 @@ export async function sendChatMessage(
         ...(request.conversationId
           ? { conversation_id: request.conversationId }
           : {}),
+        // Additive field: full conversation history (all user+assistant
+        // turns in order). The core contract fields above are unchanged,
+        // and the SSE response handling is untouched.
+        ...(request.history
+          ? { messages: request.history.map(({ role, content }) => ({ role, content })) }
+          : {}),
       }),
       signal: request.signal,
     });
@@ -413,6 +580,12 @@ export async function sendChatMessage(
     throw new ChatClientError(message, "server", res.status);
   }
 
+  if (request.agentMode) {
+    // Agent Mode always returns a standard JSON object (never SSE), so skip
+    // the streaming parser entirely and return the parsed payload.
+    return readAgentModeResponse(res);
+  }
+
   if (contentType.includes("text/event-stream")) {
     return consumeStream(res, callbacks);
   }
@@ -437,6 +610,9 @@ export async function sendChatMessage(
       conversationId: state.conversationId,
       memories: normalizeMemories(raw.memories),
       statusStates: extractStatuses(raw),
+      mode: pickString(raw, ["mode"]),
+      modelId: pickString(raw, ["modelId", "model_id", "model"]),
+      activity: normalizeActivity(raw.activity),
     };
   }
 

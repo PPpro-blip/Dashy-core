@@ -6,24 +6,34 @@
  * - Hero: logo mark, "How can I help you today?", 2×2 action cards
  * - Bottom-anchored input bar: attach (dashy-digest) + textarea + cyan send
  * - Real streaming from the dashy-flow-state worker via lib/chat-client
- *   (POST /chat · { message, model, userId, agentMode, conversation_id })
+ *   (POST /chat · { message, model, userId, agentMode, conversation_id,
+ *   messages } — `messages` carries the FULL prior turn history)
  * - Model is a workspace-wide preference owned by the header selector
- * - Conversations persist locally and sync with the sidebar via events
+ * - Conversations persist cloud-first (Supabase when signed in, else
+ *   localStorage) and sync with the sidebar via events
+ * - Code blocks offer Copy + "Open in D-Code" (hands the snapshot to the
+ *   D-Code editor via sessionStorage; streaming is untouched)
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, isValidElement, useRef, useState, type ReactNode } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { createClient } from "@/lib/supabase/client";
-import { ChatClientError, sendChatMessage } from "@/lib/chat-client";
+import { DCODE_INCOMING_KEY } from "@/lib/dcode";
+import {
+  ChatClientError,
+  sendChatMessage,
+  type ChatHistoryEntry,
+} from "@/lib/chat-client";
 import {
   EVENTS,
   emitChatTitle,
-  getConversation,
+  getConversationAsync,
   newConversationId,
-  saveConversation,
+  saveConversationAsync,
   titleFromContent,
   type Conversation,
   type HistoryMessage,
@@ -37,6 +47,7 @@ import {
   CheckIcon,
   CodeIcon,
   CopyIcon,
+  ImageIcon,
   LightbulbIcon,
   RefreshIcon,
   RocketIcon,
@@ -48,10 +59,13 @@ import {
 
 const ACTIONS = [
   {
+    // Generates an image through the zero-cost pollinations <IMG> engine —
+    // no text model call, no dashy-flow-state round-trip.
     title: "Create AI art",
     desc: "A cyberpunk cat in neon rain",
-    prompt: "Generate an image of a cyberpunk cat in neon rain",
-    Icon: SparklesIcon,
+    prompt: "A cyberpunk cat in neon rain",
+    Icon: ImageIcon,
+    image: true,
   },
   {
     title: "Write code",
@@ -88,6 +102,7 @@ function markActiveConversation(id: string | null): void {
 }
 
 export default function ChatPage() {
+  const router = useRouter();
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -100,6 +115,9 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HistoryMessage[]>([]);
+  /** Title / creation time of the active conversation (cloud-agnostic). */
+  const activeTitleRef = useRef<string>("New Chat");
+  const activeCreatedAtRef = useRef<number>(Date.now());
   const toast = useToast();
 
   useEffect(() => {
@@ -164,14 +182,17 @@ export default function ChatPage() {
     setInput("");
     setActiveConversationId(null);
     markActiveConversation(null);
+    activeTitleRef.current = "New Chat";
+    activeCreatedAtRef.current = Date.now();
     emitChatTitle("DashyCore");
     if (focus) {
       window.setTimeout(() => textareaRef.current?.focus(), 0);
     }
   }, []);
 
-  const openConversation = useCallback((id: string) => {
-    const conversation = getConversation(id);
+  const openConversation = useCallback(async (id: string) => {
+    // Cloud-first load (Supabase when signed in, localStorage otherwise).
+    const conversation = await getConversationAsync(id);
     if (!conversation) return;
     abortControllerRef.current?.abort();
     setIsStreaming(false);
@@ -179,6 +200,8 @@ export default function ChatPage() {
     setMessages(conversation.messages);
     setActiveConversationId(conversation.id);
     markActiveConversation(conversation.id);
+    activeTitleRef.current = conversation.title;
+    activeCreatedAtRef.current = conversation.createdAt || Date.now();
     emitChatTitle(conversation.title);
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }, []);
@@ -187,7 +210,7 @@ export default function ChatPage() {
     const onNewChat = () => startNewChat(true);
     const onOpen = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string }>).detail;
-      if (detail?.id) openConversation(detail.id);
+      if (detail?.id) void openConversation(detail.id);
     };
     const onDelete = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string }>).detail;
@@ -228,16 +251,17 @@ export default function ChatPage() {
 
   const persistConversation = useCallback(
     (conversationId: string, msgs: HistoryMessage[], model: string, title?: string) => {
-      const existing = getConversation(conversationId);
+      if (title) activeTitleRef.current = title;
       const conversation: Conversation = {
         id: conversationId,
-        title: title ?? existing?.title ?? "New Chat",
+        title: activeTitleRef.current,
         model,
         messages: msgs,
-        createdAt: existing?.createdAt ?? Date.now(),
+        createdAt: activeCreatedAtRef.current,
         updatedAt: Date.now(),
       };
-      saveConversation(conversation);
+      // Cloud-first: Supabase when signed in, localStorage when signed out.
+      void saveConversationAsync(conversation);
       return conversation;
     },
     []
@@ -246,6 +270,11 @@ export default function ChatPage() {
   /**
    * Streams an assistant reply from the real dashy-flow-state worker into
    * the given assistant message bubble, token by token.
+   *
+   * `history` is the FULL conversation thread (all prior user+assistant
+   * turns in order, ending with the current user message) and is sent on
+   * every request so the worker sees the entire conversation — no earlier
+   * turns are dropped.
    */
   const streamAssistantReply = useCallback(
     async (
@@ -253,6 +282,7 @@ export default function ChatPage() {
       assistantMessageId: string,
       conversationId: string,
       model: string,
+      history: ChatHistoryEntry[],
       authToken?: string
     ): Promise<void> => {
       const controller = new AbortController();
@@ -267,6 +297,7 @@ export default function ChatPage() {
             userId: userId ?? undefined,
             agentMode: false,
             conversationId,
+            history,
             authToken,
             signal: controller.signal,
           },
@@ -350,10 +381,19 @@ export default function ChatPage() {
       const withUserMessage = [...messages, userMessage, assistantMessage];
       setMessages(withUserMessage);
 
-      // Title the conversation after the first user message.
-      const existing = getConversation(conversationId);
-      const title = existing?.messages.length
-        ? existing.title
+      // FULL-HISTORY payload: every prior turn of this conversation
+      // (user + assistant, in send order) plus the message being sent
+      // right now. Nothing is truncated and no earlier turns are dropped.
+      const history: ChatHistoryEntry[] = [
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user", content: promptText },
+      ];
+
+      // Title the conversation from its first user message (stable across
+      // turns, independent of which backend stores the thread).
+      const firstUserMessage = messages.find((m) => m.role === "user");
+      const title = firstUserMessage
+        ? titleFromContent(firstUserMessage.content)
         : titleFromContent(promptText);
       emitChatTitle(title);
       persistConversation(conversationId, withUserMessage, selectedModel, title);
@@ -375,6 +415,7 @@ export default function ChatPage() {
         assistantMessage.id,
         conversationId,
         selectedModel,
+        history,
         authToken
       );
     },
@@ -416,12 +457,20 @@ export default function ChatPage() {
       }
       persistConversation(conversationId, withoutOld, selectedModel);
 
+      // FULL-HISTORY payload for regeneration: every turn before the one
+      // being regenerated, ending with its user message — identical to
+      // what a fresh send of that message would carry.
+      const history: ChatHistoryEntry[] = messages
+        .slice(0, index)
+        .map((m) => ({ role: m.role, content: m.content }));
+
       setIsStreaming(true);
       void streamAssistantReply(
         userMessage.content,
         freshAssistant.id,
         conversationId,
-        selectedModel
+        selectedModel,
+        history
       );
     },
     [
@@ -444,6 +493,93 @@ export default function ChatPage() {
       }
     },
     [toast]
+  );
+
+  /**
+   * Zero-cost <IMG> engine (pollinations.ai) — NO dashy-flow-state call.
+   * Takes the composer prompt, then immediately appends a user message and an
+   * assistant message that renders the generated image as markdown.
+   */
+  const handleGenerateImage = useCallback(
+    (promptFromComposer?: string) => {
+      const prompt = (promptFromComposer ?? input).trim();
+      if (!prompt || isStreaming) {
+        if (!prompt) {
+          toast.error(
+            "Describe an image first",
+            "Type what you want to generate, then tap the <IMG> button."
+          );
+        }
+        return;
+      }
+
+      setInput("");
+      setStatuses([]);
+
+      let conversationId = activeConversationId;
+      if (!conversationId) {
+        conversationId = newConversationId();
+        setActiveConversationId(conversationId);
+        markActiveConversation(conversationId);
+      }
+
+      const engine = "img" as const;
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+        prompt
+      )}?width=1024&height=1024&nologo=true&seed=${Math.floor(
+        Math.random() * 100000
+      )}`;
+
+      const userMessage: HistoryMessage = {
+        id: newConversationId(),
+        role: "user",
+        content: prompt,
+        timestamp: Date.now(),
+      };
+      const assistantMessage: HistoryMessage = {
+        id: newConversationId(),
+        role: "assistant",
+        content: `![<IMG> generated](${imageUrl})`,
+        timestamp: Date.now(),
+        engine,
+      };
+
+      const withMessages = [...messages, userMessage, assistantMessage];
+      setMessages(withMessages);
+
+      const firstUserMessage = messages.find((m) => m.role === "user");
+      const title = firstUserMessage
+        ? titleFromContent(firstUserMessage.content)
+        : titleFromContent(prompt);
+      emitChatTitle(title);
+      persistConversation(conversationId, withMessages, selectedModel, title);
+
+      toast.success(
+        "<IMG> engine",
+        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
+      );
+    },
+    [activeConversationId, input, isStreaming, messages, persistConversation, selectedModel, toast]
+  );
+
+  /**
+   * Hands a fenced code block to D-Code: stashes the snapshot in
+   * sessionStorage and opens a scratch project seeded with it. Purely
+   * client-side — the SSE stream is untouched.
+   */
+  const handleOpenInDcode = useCallback(
+    (code: string, language: string) => {
+      try {
+        window.sessionStorage.setItem(
+          DCODE_INCOMING_KEY,
+          JSON.stringify({ code, language })
+        );
+      } catch {
+        // Storage unavailable — D-Code will open with the starter file.
+      }
+      router.push("/d-code");
+    },
+    [router]
   );
 
   const handleStop = useCallback(() => {
@@ -477,16 +613,22 @@ export default function ChatPage() {
             How can I help you <span className="text-gradient">today?</span>
           </h1>
           <p className="mt-2 text-sm text-zinc-500">
-            Ask me anything, generate images, write code, or explore ideas
+            Ask me anything, get creative, write code, or explore ideas
           </p>
 
           {/* 2x2 action cards */}
           <div className="mt-8 grid w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
-            {ACTIONS.map(({ title, desc, prompt, Icon }) => (
+            {ACTIONS.map(({ title, desc, prompt, Icon, image }) => (
               <button
                 key={title}
                 type="button"
-                onClick={() => void handleSend(prompt)}
+                onClick={() => {
+                  if (image) {
+                    handleGenerateImage(prompt);
+                  } else {
+                    void handleSend(prompt);
+                  }
+                }}
                 disabled={isStreaming}
                 className="group flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-left transition-all hover:border-cyan-400/30 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-cyan-500/5 disabled:opacity-50"
               >
@@ -520,6 +662,7 @@ export default function ChatPage() {
               isStreaming={isStreaming}
               statuses={statuses}
               onCopy={() => void handleCopy(message.content)}
+              onOpenInDcode={handleOpenInDcode}
               onRegenerate={() => handleRegenerate(message.id)}
             />
           ))}
@@ -546,6 +689,17 @@ export default function ChatPage() {
               disabled={isStreaming}
               className="max-h-[200px] flex-1 resize-none bg-transparent py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
             />
+            <button
+              type="button"
+              onClick={() => handleGenerateImage()}
+              disabled={!input.trim() || isStreaming}
+              aria-label="Generate image with <IMG> Engine"
+              title="Generate image with <IMG> Engine"
+              className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <ImageIcon className="h-4 w-4" />
+              IMG
+            </button>
             {isStreaming ? (
               <button
                 type="button"
@@ -587,12 +741,14 @@ function MessageRow({
   isStreaming,
   statuses,
   onCopy,
+  onOpenInDcode,
   onRegenerate,
 }: {
   message: HistoryMessage;
   isStreaming: boolean;
   statuses: string[];
   onCopy: () => void;
+  onOpenInDcode: (code: string, language: string) => void;
   onRegenerate: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -617,12 +773,18 @@ function MessageRow({
       )}
 
       <div className={`max-w-[85%] min-w-0 space-y-2 ${isUser ? "flex flex-col items-end" : ""}`}>
-        {/* Model badge */}
-        {!isUser && modelLabel && (
+        {/* Model / engine badge */}
+        {!isUser && (modelLabel || message.engine === "img") && (
           <div className="flex items-center gap-2">
-            <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
-              {modelLabel}
-            </span>
+            {message.engine === "img" ? (
+              <span className="rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
+                &lt;IMG&gt; engine
+              </span>
+            ) : modelLabel ? (
+              <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
+                {modelLabel}
+              </span>
+            ) : null}
           </div>
         )}
 
@@ -657,8 +819,17 @@ function MessageRow({
                   a: (props) => (
                     <a {...props} target="_blank" rel="noopener noreferrer" />
                   ),
-                  code: (props) => <InlineCode {...props} />,
-                  pre: (props) => <PreBlock {...props} />,
+                  code: (props) => <CodeSpan {...props} />,
+                  pre: (props) => <PreBlock {...props} onOpenInDcode={onOpenInDcode} />,
+                  img: (props) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      {...props}
+                      loading="lazy"
+                      alt={props.alt || "<IMG> generated"}
+                      className="my-2 max-w-full rounded-xl border border-white/[0.08] object-contain transition-colors hover:border-cyan-400/50"
+                    />
+                  ),
                 }}
               >
                 {message.content}
@@ -713,8 +884,47 @@ function MessageRow({
 /* Markdown helpers                                                           */
 /* ========================================================================== */
 
-function InlineCode(props: React.HTMLAttributes<HTMLElement>) {
+/** Recovers the raw text of a code element (works mid-stream). */
+function textFromChildren(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(textFromChildren).join("");
+  if (isValidElement(children)) {
+    return textFromChildren(
+      (children.props as { children?: ReactNode }).children
+    );
+  }
+  return "";
+}
+
+/** Extracts the fenced-block language (e.g. "language-ts" → "ts"). */
+function languageFromNode(children: ReactNode): string {
+  if (isValidElement(children)) {
+    const className =
+      (children.props as { className?: string }).className ?? "";
+    const match = /language-([\w+#.-]+)/.exec(className);
+    if (match) return match[1];
+  }
+  return "";
+}
+
+/**
+ * `code` renderer — styled chip for inline code, plain element for fenced
+ * blocks (the surrounding PreBlock provides the block chrome).
+ */
+function CodeSpan(props: React.HTMLAttributes<HTMLElement>) {
   const { className, children, ...rest } = props;
+  const raw = typeof children === "string" ? children : "";
+  const isBlock =
+    (typeof className === "string" && className.includes("language-")) ||
+    raw.includes("\n");
+  if (isBlock) {
+    return (
+      <code {...rest} className={className}>
+        {children}
+      </code>
+    );
+  }
   return (
     <code
       {...rest}
@@ -725,14 +935,90 @@ function InlineCode(props: React.HTMLAttributes<HTMLElement>) {
   );
 }
 
-function PreBlock(props: React.HTMLAttributes<HTMLElement>) {
-  const { className, children, ...rest } = props;
+/**
+ * Fenced code block: header bar with the language label (left) and Copy +
+ * "Open in D-Code" actions (right). The snapshots are taken from the
+ * currently rendered children, so both work while the block is still
+ * streaming in.
+ */
+function PreBlock({
+  onOpenInDcode,
+  ...props
+}: React.HTMLAttributes<HTMLElement> & {
+  onOpenInDcode: (code: string, language: string) => void;
+}) {
+  const { children, ...rest } = props;
+  const [copied, setCopied] = useState(false);
+  const [opened, setOpened] = useState(false);
+
+  const language = languageFromNode(children);
+  const code = textFromChildren(children);
+
+  const handleCopyClick = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard denied — leave the button in its default state.
+    }
+  };
+
+  const handleOpenInDcode = () => {
+    onOpenInDcode(code, language);
+    setOpened(true);
+    window.setTimeout(() => setOpened(false), 2000);
+  };
+
   return (
-    <pre
-      {...rest}
-      className="my-2 overflow-x-auto rounded-xl border border-white/[0.06] bg-black/30 p-3 font-mono text-[12.5px] leading-relaxed text-zinc-200"
-    >
-      {children}
-    </pre>
+    <div className="my-2 overflow-hidden rounded-xl border border-white/[0.06] bg-black/30">
+      <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-3 py-1.5">
+        <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">
+          {language || "code"}
+        </span>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleOpenInDcode}
+            title={
+              opened ? "Opening in D-Code…" : "Open this code in the D-Code editor"
+            }
+            aria-label="Open in D-Code editor"
+            className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 font-sans text-[10px] font-medium transition-colors ${
+              opened
+                ? "text-cyan-300"
+                : "text-zinc-500 hover:bg-white/[0.06] hover:text-cyan-300"
+            }`}
+          >
+            <CodeIcon className="h-3 w-3" />
+            {opened ? "Opening…" : "Open in D-Code"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleCopyClick()}
+            title={copied ? "Copied!" : "Copy code"}
+            aria-label={copied ? "Copied" : "Copy code to clipboard"}
+            className={`flex items-center gap-1.5 rounded-md px-1.5 py-1 font-sans text-[10px] font-medium transition-colors ${
+              copied
+                ? "text-emerald-400"
+                : "text-zinc-500 hover:bg-white/[0.06] hover:text-cyan-300"
+            }`}
+          >
+            {copied ? (
+              <CheckIcon className="h-3 w-3" />
+            ) : (
+              <CopyIcon className="h-3 w-3" />
+            )}
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+      </div>
+      <pre
+        {...rest}
+        className="overflow-x-auto p-3 font-mono text-[12.5px] leading-relaxed text-zinc-200"
+      >
+        {children}
+      </pre>
+    </div>
   );
 }

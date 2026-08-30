@@ -10,9 +10,22 @@ import { NextResponse, type NextRequest } from "next/server";
  *
  * Routing rules:
  *  - Unauthenticated users are redirected from protected routes to /login.
+ *  - /d-code/share/<slug> stays PUBLIC (RLS allows reading is_public rows
+ *    anonymously), so it is exempt from the protected-route redirect.
  *  - Authenticated users hitting /login are sent to /chat.
  */
-const PROTECTED_ROUTES = ["/chat", "/settings"];
+const PROTECTED_ROUTES = [
+  "/chat",
+  "/settings",
+  "/projects",
+  "/d-code",
+  "/knowledge",
+  "/agents",
+  "/voice",
+];
+
+/** Prefixes served without a session (exempt from the redirect above). */
+const PUBLIC_PREFIXES = ["/d-code/share/"];
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
@@ -45,9 +58,14 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const pathname = request.nextUrl.pathname;
-  const isProtected = PROTECTED_ROUTES.some(
-    (route) => pathname === route || pathname.startsWith(`${route}/`)
+  const isPublicRoute = PUBLIC_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(prefix)
   );
+  const isProtected =
+    !isPublicRoute &&
+    PROTECTED_ROUTES.some(
+      (route) => pathname === route || pathname.startsWith(`${route}/`)
+    );
 
   if (!user && isProtected) {
     // Rewrite to /login while preserving the URL in the browser.
