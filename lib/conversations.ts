@@ -24,6 +24,11 @@ export interface HistoryMessage {
   timestamp: number;
   /** Dashy model id used for this assistant reply (display badge). */
   model?: string;
+  /**
+   * Marks a message produced by a specialized engine (e.g. the <IMG> engine)
+   * so the bubble can show an engine badge and render cleanly.
+   */
+  engine?: "img";
 }
 
 export interface Conversation {

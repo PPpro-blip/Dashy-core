@@ -47,6 +47,7 @@ import {
   CheckIcon,
   CodeIcon,
   CopyIcon,
+  ImageIcon,
   LightbulbIcon,
   RefreshIcon,
   RocketIcon,
@@ -58,12 +59,13 @@ import {
 
 const ACTIONS = [
   {
-    // Creative-prompt helper: this sends a text prompt to the chat model —
-    // it is NOT an image generator (no image endpoint exists yet).
-    title: "Get creative",
+    // Generates an image through the zero-cost pollinations <IMG> engine —
+    // no text model call, no dashy-flow-state round-trip.
+    title: "Create AI art",
     desc: "A cyberpunk cat in neon rain",
-    prompt: "Write a vivid description of a cyberpunk cat in neon rain",
-    Icon: SparklesIcon,
+    prompt: "A cyberpunk cat in neon rain",
+    Icon: ImageIcon,
+    image: true,
   },
   {
     title: "Write code",
@@ -494,6 +496,73 @@ export default function ChatPage() {
   );
 
   /**
+   * Zero-cost <IMG> engine (pollinations.ai) — NO dashy-flow-state call.
+   * Takes the composer prompt, then immediately appends a user message and an
+   * assistant message that renders the generated image as markdown.
+   */
+  const handleGenerateImage = useCallback(
+    (promptFromComposer?: string) => {
+      const prompt = (promptFromComposer ?? input).trim();
+      if (!prompt || isStreaming) {
+        if (!prompt) {
+          toast.error(
+            "Describe an image first",
+            "Type what you want to generate, then tap the <IMG> button."
+          );
+        }
+        return;
+      }
+
+      setInput("");
+      setStatuses([]);
+
+      let conversationId = activeConversationId;
+      if (!conversationId) {
+        conversationId = newConversationId();
+        setActiveConversationId(conversationId);
+        markActiveConversation(conversationId);
+      }
+
+      const engine = "img" as const;
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+        prompt
+      )}?width=1024&height=1024&nologo=true&seed=${Math.floor(
+        Math.random() * 100000
+      )}`;
+
+      const userMessage: HistoryMessage = {
+        id: newConversationId(),
+        role: "user",
+        content: prompt,
+        timestamp: Date.now(),
+      };
+      const assistantMessage: HistoryMessage = {
+        id: newConversationId(),
+        role: "assistant",
+        content: `![<IMG> generated](${imageUrl})`,
+        timestamp: Date.now(),
+        engine,
+      };
+
+      const withMessages = [...messages, userMessage, assistantMessage];
+      setMessages(withMessages);
+
+      const firstUserMessage = messages.find((m) => m.role === "user");
+      const title = firstUserMessage
+        ? titleFromContent(firstUserMessage.content)
+        : titleFromContent(prompt);
+      emitChatTitle(title);
+      persistConversation(conversationId, withMessages, selectedModel, title);
+
+      toast.success(
+        "<IMG> engine",
+        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
+      );
+    },
+    [activeConversationId, input, isStreaming, messages, persistConversation, selectedModel, toast]
+  );
+
+  /**
    * Hands a fenced code block to D-Code: stashes the snapshot in
    * sessionStorage and opens a scratch project seeded with it. Purely
    * client-side — the SSE stream is untouched.
@@ -549,11 +618,17 @@ export default function ChatPage() {
 
           {/* 2x2 action cards */}
           <div className="mt-8 grid w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
-            {ACTIONS.map(({ title, desc, prompt, Icon }) => (
+            {ACTIONS.map(({ title, desc, prompt, Icon, image }) => (
               <button
                 key={title}
                 type="button"
-                onClick={() => void handleSend(prompt)}
+                onClick={() => {
+                  if (image) {
+                    handleGenerateImage(prompt);
+                  } else {
+                    void handleSend(prompt);
+                  }
+                }}
                 disabled={isStreaming}
                 className="group flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-left transition-all hover:border-cyan-400/30 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-cyan-500/5 disabled:opacity-50"
               >
@@ -614,6 +689,17 @@ export default function ChatPage() {
               disabled={isStreaming}
               className="max-h-[200px] flex-1 resize-none bg-transparent py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
             />
+            <button
+              type="button"
+              onClick={() => handleGenerateImage()}
+              disabled={!input.trim() || isStreaming}
+              aria-label="Generate image with <IMG> Engine"
+              title="Generate image with <IMG> Engine"
+              className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <ImageIcon className="h-4 w-4" />
+              IMG
+            </button>
             {isStreaming ? (
               <button
                 type="button"
@@ -687,12 +773,18 @@ function MessageRow({
       )}
 
       <div className={`max-w-[85%] min-w-0 space-y-2 ${isUser ? "flex flex-col items-end" : ""}`}>
-        {/* Model badge */}
-        {!isUser && modelLabel && (
+        {/* Model / engine badge */}
+        {!isUser && (modelLabel || message.engine === "img") && (
           <div className="flex items-center gap-2">
-            <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
-              {modelLabel}
-            </span>
+            {message.engine === "img" ? (
+              <span className="rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
+                &lt;IMG&gt; engine
+              </span>
+            ) : modelLabel ? (
+              <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
+                {modelLabel}
+              </span>
+            ) : null}
           </div>
         )}
 
@@ -729,6 +821,15 @@ function MessageRow({
                   ),
                   code: (props) => <CodeSpan {...props} />,
                   pre: (props) => <PreBlock {...props} onOpenInDcode={onOpenInDcode} />,
+                  img: (props) => (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      {...props}
+                      loading="lazy"
+                      alt={props.alt || "<IMG> generated"}
+                      className="my-2 max-w-full rounded-xl border border-white/[0.08] object-contain transition-colors hover:border-cyan-400/50"
+                    />
+                  ),
                 }}
               >
                 {message.content}

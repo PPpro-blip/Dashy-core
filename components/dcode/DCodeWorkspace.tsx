@@ -31,6 +31,7 @@ import {
   type DCodeFile,
   type DCodeProject,
 } from "@/lib/dcode";
+import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
 import { useToast } from "@/components/Toast";
 import {
@@ -46,6 +47,7 @@ import {
   PenIcon,
   PlusIcon,
   ShareIcon,
+  TerminalIcon,
   TrashIcon,
   XIcon,
 } from "@/components/icons";
@@ -246,6 +248,17 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [importingRepo, setImportingRepo] = useState(false);
   const [githubError, setGithubError] = useState<string | null>(null);
 
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  /**
+   * Latest content seen from the Monaco editor for the ACTIVE file. Monaco
+   * reports changes asynchronously; keeping the newest buffer here lets us
+   * flush it into `files` state deterministically on tab switch and on save,
+   * so an edit is never lost by switching files before a save.
+   */
+  const editorBufferRef = useRef<{ fileId: string; content: string } | null>(null);
+
   /** Latest values for debounced/keyboard saves. */
   const latestRef = useRef({ projectId, title, files });
   useEffect(() => {
@@ -263,8 +276,17 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   const persist = useCallback(
     async (mode: "autosave" | "manual"): Promise<void> => {
-      const { projectId: id, title: t, files: fs } = latestRef.current;
+      const { projectId: id, title: t, files: rawFiles } = latestRef.current;
       if (readOnly) return;
+
+      // Flush any pending Monaco buffer into the snapshot being persisted so
+      // an edit made in the last few milliseconds is never dropped.
+      const buffer = editorBufferRef.current;
+      const fs = buffer
+        ? rawFiles.map((f) =>
+            f.id === buffer.fileId ? { ...f, content: buffer.content } : f
+          )
+        : rawFiles;
 
       // Draft without a row yet → only an explicit save creates it.
       if (!id) {
@@ -304,12 +326,19 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         const updated = await updateProject(id, { title: t, files: fs });
         setSaveState("saved");
         setLastSavedAt(new Date(updated.updatedAt));
+        if (mode === "manual") {
+          toast.show({
+            type: "success",
+            title: "Saved ✓",
+            message: "Your changes are saved to D-Code.",
+          });
+        }
       } catch (error) {
         setSaveState("error");
         if (mode === "manual") {
           toast.show({
             type: "error",
-            title: "Could not save project",
+            title: "Save failed",
             message: error instanceof Error ? error.message : "Please try again.",
           });
         }
@@ -341,6 +370,43 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [persist, readOnly]);
+
+  /* Ctrl + ` toggles the mock terminal drawer. */
+  useEffect(() => {
+    if (readOnly) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        (event.key === "`" || event.code === "Backquote")
+      ) {
+        event.preventDefault();
+        setTerminalOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [readOnly]);
+
+  /* Load the authenticated user's email for the terminal `whoami`. */
+  useEffect(() => {
+    let cancelled = false;
+    async function loadEmail() {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (cancelled || !user?.email) return;
+        setUserEmail(user.email);
+      } catch {
+        // Email is best-effort; whoami falls back to "(signed out)".
+      }
+    }
+    void loadEmail();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /* Warn before leaving with unsaved changes (best-effort). */
   useEffect(() => {
@@ -391,12 +457,44 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const updateActiveContent = useCallback(
     (content: string | undefined) => {
       const next = content ?? "";
+      // Remember the latest Monaco buffer for the active file so a tab switch
+      // or save can never lose it (Monaco delivers changes asynchronously).
+      editorBufferRef.current = { fileId: activeFile?.id ?? "", content: next };
       setFiles((prev) =>
         prev.map((f) => (f.id === activeFile?.id ? { ...f, content: next } : f))
       );
       markDirty();
     },
     [activeFile?.id, markDirty]
+  );
+
+  /**
+   * Writes any pending Monaco buffer for the active file into `files` state.
+   * Called before switching tabs / saving so an in-flight edit is flushed
+   * deterministically and never lost.
+   */
+  const flushActiveBuffer = useCallback(() => {
+    const buffer = editorBufferRef.current;
+    if (!buffer || !buffer.fileId) return;
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === buffer.fileId && f.content !== buffer.content
+          ? { ...f, content: buffer.content }
+          : f
+      )
+    );
+  }, []);
+
+  /**
+   * Switches the active file. Flushes the current Monaco buffer to state FIRST
+   * so editing file A then switching to B always preserves A's content.
+   */
+  const handleSelectFile = useCallback(
+    (fileId: string) => {
+      flushActiveBuffer();
+      setActiveFileId(fileId);
+    },
+    [flushActiveBuffer]
   );
 
   const handleTitleChange = useCallback(
@@ -409,16 +507,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   const validateFileName = useCallback(
     (name: string): boolean => {
-      if (!VALID_FILENAME.test(name)) {
-        toast.show({
-          type: "error",
-          title: "Invalid file name",
-          message:
-            "Use only letters, numbers, underscores, hyphens or dots (e.g. utils.ts).",
-        });
-        return false;
-      }
-      return true;
+      const isValid =
+        /^[a-zA-Z0-9_\-\.]+$/.test(name) && name.length > 0 && name.length <= 60;
+      if (isValid) return true;
+      toast.show({
+        type: "error",
+        title: "Invalid file name",
+        message:
+          "Invalid file name. Use letters, numbers, dashes, underscores, dots. Max 60 chars.",
+      });
+      return false;
     },
     [toast]
   );
@@ -776,6 +874,20 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             <>
               <button
                 type="button"
+                onClick={() => setTerminalOpen((open) => !open)}
+                title="Toggle terminal (Ctrl + `)"
+                aria-label="Toggle terminal"
+                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                  terminalOpen
+                    ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
+                    : "border-white/[0.08] bg-white/[0.02] text-zinc-400 hover:border-cyan-400/40 hover:text-cyan-300"
+                }`}
+              >
+                <TerminalIcon className="h-3.5 w-3.5" />
+                Terminal
+              </button>
+              <button
+                type="button"
                 onClick={openGitHubModal}
                 title="Connect GitHub — import or link a repository"
                 aria-label="Connect GitHub"
@@ -827,9 +939,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Split: editor body gets 70% (flex-7) when the terminal is open,
+            otherwise it fills the whole remaining column. */}
+        <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
         {/* File tree */}
-        <aside className="flex w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+        <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
           <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
             Files
           </p>
@@ -877,7 +992,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                     <>
                       <button
                         type="button"
-                        onClick={() => setActiveFileId(file.id)}
+                        onClick={() => handleSelectFile(file.id)}
                         className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
                           isActive
                             ? "bg-cyan-500/10 text-cyan-300"
@@ -989,7 +1104,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 <button
                   key={file.id}
                   type="button"
-                  onClick={() => setActiveFileId(file.id)}
+                  onClick={() => handleSelectFile(file.id)}
                   className={`flex flex-shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[11px] transition-colors ${
                     isActive
                       ? "bg-cyan-500/10 text-cyan-300"
@@ -1046,6 +1161,19 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             )}
           </div>
         </div>
+        </div>
+
+        {/* Mock terminal drawer — bottom 30% of the workspace when open. */}
+        {terminalOpen && (
+          <DCodeTerminal
+            files={files}
+            projectTitle={title}
+            userEmail={userEmail}
+            onOpenFile={handleSelectFile}
+            onClose={() => setTerminalOpen(false)}
+            className="flex-[3] min-h-0"
+          />
+        )}
       </div>
 
       {/* GitHub connect / import modal */}
