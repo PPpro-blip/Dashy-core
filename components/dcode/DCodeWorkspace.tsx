@@ -31,6 +31,15 @@ import {
   type DCodeFile,
   type DCodeProject,
 } from "@/lib/dcode";
+import {
+  BLOCKED_FILE_MESSAGE,
+  cleanTextContent,
+  containsBinaryMarkers,
+  describeSaveError,
+  isBlockedPath,
+  MAX_FILE_CONTENT_CHARS,
+  sanitizeFiles,
+} from "@/lib/dcode-sanitize";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
 import { useToast } from "@/components/Toast";
@@ -136,13 +145,26 @@ async function listGitHubRepos(): Promise<GithubRepo[]> {
   return Array.isArray(data) ? (data as GithubRepo[]) : [];
 }
 
+/** Result of a repo import: kept files + how many were hard-blocked. */
+interface GithubImportResult {
+  files: DCodeFile[];
+  /** Binaries, media, lockfiles and generated output that were skipped. */
+  skipped: number;
+}
+
 /**
  * Basic scaffold importer: resolves a public GitHub repo, walks its tree and
  * pulls up to 60 non-generated source files into D-Code. D-Code stores files
  * as names (a project has no nested folders), so deeply nested paths collapse
  * to their basename.
+ *
+ * Binary/media/lockfile paths are hard-blocked here (`isBlockedPath`) — they
+ * can never be represented in the jsonb `files` column, and one of them is
+ * enough to make every later save of the project fail.
  */
-async function importGitHubRepository(url: string): Promise<DCodeFile[]> {
+async function importGitHubRepository(
+  url: string
+): Promise<GithubImportResult> {
   const parsed = parseGithubRepo(url);
   if (!parsed) {
     throw new Error(
@@ -175,38 +197,59 @@ async function importGitHubRepository(url: string): Promise<DCodeFile[]> {
     tree?: Array<{ path?: string; type?: string; size?: number }>;
   };
 
-  const paths = (tree.tree ?? [])
+  const blobs = (tree.tree ?? [])
     .filter((entry) => entry.type === "blob" && entry.path)
-    .map((entry) => entry.path as string)
-    .filter(
-      (path) =>
-        !/^(\/?node_modules\/|dist\/|build\/|\.next\/|\.git\/|coverage\/|out\/|target\/)/.test(
-          path
-        )
-    )
+    .map((entry) => entry.path as string);
+
+  // Hard block #1 — binaries, media, fonts, archives, source maps, lockfiles
+  // and generated output never enter files[] (they poison the jsonb row with
+  // "unsupported Unicode escape sequence" the moment the project is saved).
+  let skipped = blobs.filter((path) => isBlockedPath(path)).length;
+
+  const paths = blobs
     .filter((path) => /^[a-zA-Z0-9_\-\.\/]+$/.test(path))
+    .filter((path) => !isBlockedPath(path))
     .slice(0, 60);
 
   if (paths.length === 0) {
-    throw new Error("No importable source files found in this repository.");
+    throw new Error(
+      skipped > 0
+        ? "This repository only contains binary/media files, which D-Code can't store yet."
+        : "No importable source files found in this repository."
+    );
   }
 
   const files: DCodeFile[] = [];
   for (const path of paths) {
     const name = path.split("/").pop() ?? path;
+    // Hard block #2 — the basename can be blocked even when the path passed.
+    if (isBlockedPath(name)) {
+      skipped += 1;
+      continue;
+    }
     const rawRes = await fetch(
       `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
     );
     if (!rawRes.ok) continue;
     const content = await rawRes.text();
-    if (content.length > 512 * 1024) continue;
-    files.push({ id: newId(), name, language: languageFromFilename(name), content });
+    // Hard block #3 — content sniff catches mislabeled / renamed binaries.
+    if (containsBinaryMarkers(content)) {
+      skipped += 1;
+      continue;
+    }
+    if (content.length > MAX_FILE_CONTENT_CHARS) continue;
+    files.push({
+      id: newId(),
+      name,
+      language: languageFromFilename(name),
+      content: cleanTextContent(content),
+    });
   }
 
   if (files.length === 0) {
     throw new Error("Could not fetch any raw files from this repository.");
   }
-  return files;
+  return { files, skipped };
 }
 
 export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorkspaceProps) {
@@ -265,14 +308,105 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     latestRef.current = { projectId, title, files };
   }, [projectId, title, files]);
 
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
     [files, activeFileId]
   );
 
+  /**
+   * Ingest guard for seed state (chat hand-off, an old project row, a draft
+   * built elsewhere). Anything blocked is dropped from `files[]` before it
+   * can reach a save, and the user is told what was removed instead of
+   * watching a mystery save failure.
+   */
+  useEffect(() => {
+    const blocked = files.filter((f) => isBlockedPath(f.name));
+    if (blocked.length > 0) {
+      setFiles((prev) => prev.filter((f) => !isBlockedPath(f.name)));
+      toast.show({
+        type: "info",
+        title: `${blocked.length} file${blocked.length === 1 ? "" : "s"} skipped`,
+        message: BLOCKED_FILE_MESSAGE,
+      });
+      return;
+    }
+    const stored = project?.skippedFiles ?? [];
+    if (stored.length > 0) {
+      toast.show({
+        type: "info",
+        title: `${stored.length} stored file${
+          stored.length === 1 ? "" : "s"
+        } not loaded`,
+        message: `${stored.slice(0, 3).join(", ")}${
+          stored.length > 3 ? "…" : ""
+        } — ${BLOCKED_FILE_MESSAGE}`,
+      });
+    }
+    // Runs once per project/draft seed — the toast must not repeat on edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
+
   /* ------------------------------- persistence --------------------------- */
+
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Timer that un-sticks the header pill after a non-auth save failure. */
+  const saveErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Late-bound reference so the retry timer can call the newest `persist`. */
+  const persistRef = useRef<(mode: "autosave" | "manual") => Promise<void>>(
+    async () => {}
+  );
+
+  const clearSaveErrorTimer = useCallback(() => {
+    if (saveErrorTimerRef.current) {
+      clearTimeout(saveErrorTimerRef.current);
+      saveErrorTimerRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Reports a failed save with the *real* driver error, shortened, plus a
+   * remediation tip when the payload (binaries/lockfiles/size) is at fault.
+   *
+   * Only a genuinely dead session stays sticky. Any other failure (payload,
+   * network, 5xx) falls back to "Unsaved changes" after a moment and is
+   * retried by the next autosave, so one bad save never parks the header in a
+   * permanent offline/failed state.
+   */
+  const handleSaveFailure = useCallback(
+    (error: unknown, mode: "autosave" | "manual") => {
+      const info = describeSaveError(error);
+      clearSaveErrorTimer();
+
+      if (info.isAuth) {
+        // Auth really is gone — keep the failure visible until re-sign-in.
+        setSaveState("error");
+        toast.show({
+          type: "error",
+          title: "Save failed — sign in again",
+          message: info.withTip,
+          duration: 8000,
+        });
+        return;
+      }
+
+      setSaveState("error");
+      toast.show({
+        type: "error",
+        title: mode === "manual" ? "Save failed" : "Autosave failed",
+        message: info.withTip,
+      });
+
+      saveErrorTimerRef.current = setTimeout(() => {
+        saveErrorTimerRef.current = null;
+        setSaveState("dirty");
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(() => {
+          void persistRef.current("autosave");
+        }, AUTOSAVE_DEBOUNCE_MS);
+      }, 6000);
+    },
+    [clearSaveErrorTimer, toast]
+  );
 
   const persist = useCallback(
     async (mode: "autosave" | "manual"): Promise<void> => {
@@ -300,6 +434,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           });
           setProjectId(created.id);
           latestRef.current.projectId = created.id;
+          clearSaveErrorTimer();
           setSaveState("saved");
           setLastSavedAt(new Date(created.updatedAt));
           toast.show({
@@ -311,12 +446,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           // everything is already persisted).
           router.replace(`/d-code/${created.id}`);
         } catch (error) {
-          setSaveState("error");
-          toast.show({
-            type: "error",
-            title: "Could not save project",
-            message: error instanceof Error ? error.message : "Please try again.",
-          });
+          handleSaveFailure(error, "manual");
         }
         return;
       }
@@ -324,6 +454,8 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       setSaveState("saving");
       try {
         const updated = await updateProject(id, { title: t, files: fs });
+        // Success always clears a lingering "Save failed" pill.
+        clearSaveErrorTimer();
         setSaveState("saved");
         setLastSavedAt(new Date(updated.updatedAt));
         if (mode === "manual") {
@@ -334,18 +466,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           });
         }
       } catch (error) {
-        setSaveState("error");
-        if (mode === "manual") {
-          toast.show({
-            type: "error",
-            title: "Save failed",
-            message: error instanceof Error ? error.message : "Please try again.",
-          });
-        }
+        handleSaveFailure(error, mode);
       }
     },
-    [readOnly, router, toast]
+    [clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast]
   );
+
+  /* Keep the retry timer pointed at the freshest persist implementation. */
+  useEffect(() => {
+    persistRef.current = persist;
+  }, [persist]);
 
   /** Marks state dirty and schedules the debounced autosave. */
   const markDirty = useCallback(() => {
@@ -423,6 +553,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   useEffect(() => {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      if (saveErrorTimerRef.current) clearTimeout(saveErrorTimerRef.current);
     };
   }, []);
 
@@ -491,10 +622,19 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
    */
   const handleSelectFile = useCallback(
     (fileId: string) => {
+      const target = latestRef.current.files.find((f) => f.id === fileId);
+      if (target && isBlockedPath(target.name)) {
+        toast.show({
+          type: "error",
+          title: "Can't open this file",
+          message: BLOCKED_FILE_MESSAGE,
+        });
+        return;
+      }
       flushActiveBuffer();
       setActiveFileId(fileId);
     },
-    [flushActiveBuffer]
+    [flushActiveBuffer, toast]
   );
 
   const handleTitleChange = useCallback(
@@ -525,6 +665,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     const name = newFileName.trim();
     if (!name) return;
     if (!validateFileName(name)) return;
+    if (isBlockedPath(name)) {
+      toast.show({ type: "error", title: "Unsupported file", message: BLOCKED_FILE_MESSAGE });
+      return;
+    }
     if (files.some((f) => f.name.toLowerCase() === name.toLowerCase())) {
       toast.show({
         type: "error",
@@ -565,6 +709,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       return;
     }
     if (!validateFileName(name)) return;
+    if (isBlockedPath(name)) {
+      toast.show({ type: "error", title: "Unsupported file", message: BLOCKED_FILE_MESSAGE });
+      return;
+    }
 
     const target = files.find((f) => f.id === id);
     if (!target) {
@@ -732,7 +880,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       setImportingRepo(true);
       setGithubError(null);
       try {
-        const imported = await importGitHubRepository(repoUrl);
+        const result = await importGitHubRepository(repoUrl);
+        // Final gate before the files touch state: same sanitizer that runs
+        // on save, so nothing un-storable can slip in through any import path.
+        const imported = sanitizeFiles(result.files);
         setFiles((prev) => {
           const existing = new Set(prev.map((f) => f.name.toLowerCase()));
           const next = [...prev];
@@ -746,12 +897,18 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         });
         setActiveFileId(imported[0]?.id ?? "");
         markDirty();
+        const skippedNote =
+          result.skipped > 0
+            ? ` ${result.skipped} binary/lock file${
+                result.skipped === 1 ? "" : "s"
+              } skipped.`
+            : "";
         toast.show({
           type: "success",
           title: "GitHub repo imported",
           message: `${imported.length} file${
             imported.length === 1 ? "" : "s"
-          } added to this project.`,
+          } added to this project.${skippedNote}`,
         });
         closeGitHubModal();
       } catch (error) {
