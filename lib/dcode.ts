@@ -256,6 +256,23 @@ export function starterProjectDraft(language = "typescript"): DCodeProjectDraft 
 /* Row mapping                                                             */
 /* ---------------------------------------------------------------------- */
 
+/**
+ * Sanitizes a file array before it is persisted into the postgres jsonb
+ * column. Strips null bytes (\u0000) and drops otherwise-invalid unicode
+ * sequences so a single bad character in an editor buffer can never poison
+ * the whole project row. The round-trip through JSON.stringify/parse also
+ * normalizes any stray non-serializable values.
+ */
+function sanitizeFiles(files: DCodeFile[]): DCodeFile[] {
+  try {
+    const cleaned = JSON.stringify(files).replace(/\u0000/g, "");
+    return JSON.parse(cleaned) as DCodeFile[];
+  } catch {
+    // Never block a save because of sanitization — return the raw files.
+    return files;
+  }
+}
+
 function coerceFiles(raw: unknown): DCodeFile[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -359,7 +376,7 @@ export async function createProject(
       title: draft.title.trim() || "Untitled project",
       description: draft.description ?? null,
       language: draft.language,
-      files: draft.files,
+      files: sanitizeFiles(draft.files),
     })
     .select("*")
     .single();
@@ -373,11 +390,22 @@ export async function updateProject(
   patch: DCodeProjectPatch
 ): Promise<DCodeProject> {
   const supabase = createClient();
+
+  // Explicitly resolve the authenticated user and pass user_id through so the
+  // RLS `with check (auth.uid() = user_id)` always matches the session, even
+  // when a stale browser row is being patched.
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
   const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  // Only include user_id when we actually have it; never override ownership
+  // with an unauthenticated/empty id.
+  if (user?.id) payload.user_id = user.id;
   if (patch.title !== undefined) payload.title = patch.title.trim() || "Untitled project";
   if (patch.description !== undefined) payload.description = patch.description;
   if (patch.language !== undefined) payload.language = patch.language;
-  if (patch.files !== undefined) payload.files = patch.files;
+  if (patch.files !== undefined) payload.files = sanitizeFiles(patch.files);
   if (patch.isPublic !== undefined) payload.is_public = patch.isPublic;
 
   const { data, error } = await supabase
