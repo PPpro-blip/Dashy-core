@@ -338,9 +338,24 @@ export async function createProject(
   draft: DCodeProjectDraft
 ): Promise<DCodeProject> {
   const supabase = createClient();
+
+  // Explicitly fetch the authenticated user and pass user_id directly in the
+  // payload. RLS requires auth.uid() = user_id, so we never rely on a
+  // database default (the column has none) or on the insert policy alone.
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+  if (userError || !user) {
+    throw classError(
+      userError ?? { message: "You must be signed in to create a D-Code project." }
+    );
+  }
+
   const { data, error } = await supabase
     .from("dcode_projects")
     .insert({
+      user_id: user.id,
       title: draft.title.trim() || "Untitled project",
       description: draft.description ?? null,
       language: draft.language,

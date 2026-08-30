@@ -4,6 +4,7 @@ import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
+import { GithubIcon } from "@/components/icons";
 
 /**
  * DashyCore — Authentication
@@ -28,6 +29,29 @@ export default function LoginPage() {
       const supabase = createClient();
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+        },
+      });
+
+      if (error) {
+        setError(error.message);
+        setLoading(false);
+      }
+    } catch (err) {
+      setError("Network error. Please check your connection and try again.");
+      setLoading(false);
+    }
+  };
+
+  const handleGitHubSignIn = async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "github",
         options: {
           redirectTo: `${window.location.origin}/auth/callback`,
         },
@@ -274,6 +298,41 @@ export default function LoginPage() {
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   className="h-4 w-4 text-neutral-500"
+                  aria-hidden="true"
+                >
+                  <path d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </>
+            )}
+          </button>
+
+          {/* GitHub OAuth */}
+          <button
+            type="button"
+            onClick={handleGitHubSignIn}
+            disabled={loading}
+            className="mt-3 flex w-full items-center justify-center gap-3 rounded-xl border border-white/[0.12] bg-[#24292f] px-5 py-3.5 text-sm font-medium text-white shadow-md shadow-black/30 transition-all hover:bg-[#2f353d] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loading ? (
+              <>
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                />
+                <span>Redirecting to GitHub…</span>
+              </>
+            ) : (
+              <>
+                <GithubIcon className="h-5 w-5 text-white" />
+                <span>Continue with GitHub</span>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="h-4 w-4 text-zinc-500"
                   aria-hidden="true"
                 >
                   <path d="M5 12h14M12 5l7 7-7 7" />
