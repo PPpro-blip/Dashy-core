@@ -1,0 +1,78 @@
+name: temp-probe-digest-worker
+
+# TEMPORARY diagnostic workflow — runs the live-worker probe from a GitHub
+# runner (full egress) because the dev sandbox blocks workers.dev.
+# Remove this file once the probe results have been captured.
+
+on:
+  push:
+    branches: [arena/01a058a5-dashy-core]
+    paths:
+      - '.github/workflows/temp-probe-digest.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Probe via node fetch (scripts/probe-digest-worker.mjs)
+        run: node scripts/probe-digest-worker.mjs
+
+      - name: Probe via raw curl
+        shell: bash
+        run: |
+          set -u
+          WORKER="https://dashy-digest.kamleshprathampandey.workers.dev"
+          UUID="11111111-1111-1111-1111-111111111111"
+          echo "hello dashy probe" > probe.txt
+
+          probe() {
+            local label="$1"; shift
+            echo ""
+            echo "=== $label ==="
+            code=$(curl -sS -m 25 -o /tmp/body -w "%{http_code}" "$@" 2>/tmp/err) || {
+              echo "curl failed: $(cat /tmp/err)"; return; }
+            echo "HTTP $code"
+            head -c 400 /tmp/body; echo
+          }
+
+          probe "[0a] GET /" "$WORKER"
+          probe "[0b] POST empty" -X POST "$WORKER"
+
+          probe "[1a] FormData userId" \
+            -F file=@probe.txt -F filename=probe.txt -F sourceType=text -F "userId=$UUID" "$WORKER"
+          probe "[1b] FormData user_id" \
+            -F file=@probe.txt -F filename=probe.txt -F sourceType=text -F "user_id=$UUID" "$WORKER"
+          probe "[1c] FormData userId+user_id BOTH" \
+            -F file=@probe.txt -F filename=probe.txt -F sourceType=text -F "userId=$UUID" -F "user_id=$UUID" "$WORKER"
+
+          probe "[2a] QS ?userId=" -F file=@probe.txt "$WORKER/?userId=$UUID"
+          probe "[2b] QS ?user_id=" -F file=@probe.txt "$WORKER/?user_id=$UUID"
+          probe "[2c] QS both + empty body" -X POST "$WORKER/?userId=$UUID&user_id=$UUID"
+
+          probe "[3a] header x-user-id" -F file=@probe.txt -H "x-user-id: $UUID" "$WORKER"
+          probe "[3b] header X-UserId" -F file=@probe.txt -H "X-UserId: $UUID" "$WORKER"
+          probe "[3c] header x-userid lowercase no dash" -F file=@probe.txt -H "x-userid: $UUID" "$WORKER"
+
+          probe "[4a] JSON {userId}" \
+            -H "Content-Type: application/json" -d "{\"userId\":\"$UUID\"}" "$WORKER"
+          probe "[4b] JSON {userId,user_id,text,...}" \
+            -H "Content-Type: application/json" -d "{\"userId\":\"$UUID\",\"user_id\":\"$UUID\",\"text\":\"hello probe\",\"sourceType\":\"text\",\"sourceId\":\"probe\",\"title\":\"probe\"}" "$WORKER"
+
+          probe "[5] urlencoded userId&user_id" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data "userId=$UUID&user_id=$UUID" "$WORKER"
+
+          for p in upload ingest digest; do
+            probe "[6] POST /$p FormData userId" \
+              -F file=@probe.txt -F filename=probe.txt -F sourceType=text -F "userId=$UUID" "$WORKER/$p"
+          done
+
+          echo ""
+          echo "=== PROBE COMPLETE ==="
