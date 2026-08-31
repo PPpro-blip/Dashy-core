@@ -3,35 +3,36 @@
 /**
  * DashyCore v7 — document / screenshot attachment button.
  *
- * Opens a file picker (PDF, TXT, MD, PNG, JPG) and uploads the raw file to
- * the `dashy-digest` worker via multipart FormData:
+ * Opens a file picker (PDF, TXT, MD, PNG, JPG) and hands the raw file to the
+ * shared digest client (`lib/digest-client`), which owns the wire contract:
  *
  *   POST https://dashy-digest.kamleshprathampandey.workers.dev
- *   FormData: { file, userId, filename }
+ *   Authorization: Bearer <supabase access token>
+ *   FormData: { file, filename, sourceType, userId }
+ *
+ * The Supabase user id is resolved from the live session BEFORE the request
+ * is sent, so the worker never receives an upload without `userId`. Signed-out
+ * visitors get "Please log in to upload files." and the worker is not called.
  *
  * Progress is surfaced through the toast system:
  *   info "Uploading …" → success "Document indexed to memory ✓" (or error).
  */
 
 import { useRef, useState } from "react";
-import { DASHY_DIGEST_URL } from "@/lib/chat-client";
 import { useToast } from "@/components/Toast";
 import { LoaderIcon, PaperclipIcon } from "@/components/icons";
-import { createClient } from "@/lib/supabase/client";
+import {
+  DIGEST_LOGIN_REQUIRED_MESSAGE,
+  DigestUploadError,
+  digestSourceTypeFor,
+  resolveDigestIdentity,
+  uploadFileToDigest,
+} from "@/lib/digest-client";
 
 const ACCEPT =
   "application/pdf,.pdf,text/plain,.txt,text/markdown,text/x-markdown,.md,.markdown,image/png,.png,image/jpeg,.jpg,.jpeg";
 
 const MAX_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
-
-function sourceTypeFor(file: File): string {
-  if (file.type === "application/pdf") return "pdf";
-  if (file.type.startsWith("image/")) return "image";
-  if (file.type.includes("markdown") || file.name.match(/\.(md|markdown)$/i)) {
-    return "markdown";
-  }
-  return "text";
-}
 
 function isSupported(file: File): boolean {
   return (
@@ -46,6 +47,10 @@ function isSupported(file: File): boolean {
 }
 
 interface AttachmentButtonProps {
+  /**
+   * Optional pre-loaded Supabase user id (e.g. the chat page already holds
+   * one). Only a fallback — the live session is always consulted first.
+   */
   userId?: string | null;
   disabled?: boolean;
   className?: string;
@@ -88,72 +93,24 @@ export function AttachmentButton({
       return;
     }
 
-    let uploadUserId = userId ?? null;
-    let token: string | undefined;
-
-    try {
-      const supabase = createClient();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      token = session?.access_token;
-      if (!uploadUserId) {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        uploadUserId = user?.id ?? null;
-      }
-    } catch {
-      // Auth lookup is best-effort — the worker validates the token anyway.
-    }
-
-    if (!token) {
-      toast.error(
-        "Not signed in",
-        "Please sign in again before uploading documents."
-      );
+    // Resolve the Supabase identity FIRST — a signed-out visitor must get a
+    // clean login message instead of the worker's "userId is required".
+    const identity = await resolveDigestIdentity(userId);
+    if (!identity) {
+      toast.error("Sign in required", DIGEST_LOGIN_REQUIRED_MESSAGE);
       return;
     }
 
     setUploading(true);
     const toastId = toast.info(
       `Uploading ${file.name}…`,
-      `${sourceTypeFor(file).toUpperCase()} · sending to dashy-digest`,
+      `${digestSourceTypeFor(file).toUpperCase()} · sending to dashy-digest`,
       0
     );
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("filename", file.name);
-      formData.append("sourceType", sourceTypeFor(file));
-      if (uploadUserId) formData.append("userId", uploadUserId);
+      const { documentId } = await uploadFileToDigest({ file, identity });
 
-      const response = await fetch(DASHY_DIGEST_URL.replace(/\/$/, ""), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      });
-
-      let payload: Record<string, unknown> = {};
-      try {
-        payload = (await response.json()) as Record<string, unknown>;
-      } catch {
-        // Non-JSON response body — status code still tells the story.
-      }
-
-      if (!response.ok) {
-        const message =
-          typeof payload.error === "string" && payload.error.length > 0
-            ? payload.error
-            : `Upload failed (HTTP ${response.status})`;
-        throw new Error(message);
-      }
-
-      const documentId =
-        typeof payload.documentId === "string" ? payload.documentId : undefined;
       toast.update(toastId, {
         type: "success",
         title: "Document indexed to memory ✓",
@@ -161,11 +118,13 @@ export function AttachmentButton({
       });
       onUploaded?.({ filename: file.name, documentId });
     } catch (error) {
+      const isAuthError =
+        error instanceof DigestUploadError && error.kind === "unauthenticated";
       const message =
         error instanceof Error ? error.message : "Something went wrong.";
       toast.update(toastId, {
         type: "error",
-        title: "Upload failed",
+        title: isAuthError ? "Sign in required" : "Upload failed",
         message: message.length > 160 ? `${message.slice(0, 157)}…` : message,
       });
     } finally {
