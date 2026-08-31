@@ -7,16 +7,26 @@
  * shared by every upload surface (chat composer attachment, Knowledge page,
  * and any future memory upload button) so they can never drift apart.
  *
- *   POST {DASHY_DIGEST_URL}
+ *   POST {DASHY_DIGEST_URL}?userId=…&user_id=…
  *   Auth:     Authorization: Bearer <supabase access token>
  *   Body:     multipart/form-data
- *   Fields:   file, filename, sourceType, userId
+ *   Fields:   file, filename, sourceType, userId, user_id
+ *   Headers:  X-User-Id / X-UserId
  *
  * `userId` is the Supabase auth UUID (`session.user.id`) and is REQUIRED by
  * the worker — omitting it is what produced the production
- * "Upload failed: userId is required" toast. The identity is resolved from
- * the Supabase session BEFORE the request is made, and the request is never
- * dispatched without it.
+ * "Upload failed: userId is required" toast.
+ *
+ * SHOTGUN CONTRACT: the live worker's deployed script is not in this repo,
+ * so we cannot know which channel it reads the id from (query, form field,
+ * header, camelCase vs snake_case). Until a probe pins that down
+ * (`node scripts/probe-digest-worker.mjs` from a machine with egress to
+ * workers.dev), the id is attached to EVERY channel simultaneously. Whichever
+ * the worker consults, it finds the identical UUID, so extra carriers are
+ * inert duplicates — never a mismatch.
+ *
+ * The identity is resolved from the Supabase session BEFORE the request is
+ * made, and the request is never dispatched without it.
  */
 
 import { DASHY_DIGEST_URL } from "@/lib/chat-client";
@@ -109,18 +119,33 @@ export function digestSourceTypeFor(file: File): string {
   return "text";
 }
 
+/** Strips HTML tags/entities and collapses whitespace from a raw body. */
+function cleanBodyText(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&[a-z]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 /** Pulls the worker's own error text out of a JSON or plain-text body. */
 function workerErrorMessage(
   payload: Record<string, unknown>,
   fallbackText: string,
-  status: number
+  status: number,
+  statusText: string
 ): string {
   const candidate =
-    (typeof payload.error === "string" && payload.error) ||
-    (typeof payload.message === "string" && payload.message) ||
-    (fallbackText.trim().length > 0 && fallbackText.trim().slice(0, 300)) ||
+    (typeof payload.error === "string" && payload.error.trim()) ||
+    (typeof payload.message === "string" && payload.message.trim()) ||
+    (typeof payload.details === "string" && payload.details.trim()) ||
+    cleanBodyText(fallbackText).slice(0, 300) ||
+    statusText ||
     "";
-  return candidate || `Upload failed (HTTP ${status})`;
+  return (
+    candidate ||
+    `Upload failed (HTTP ${status}${statusText ? ` ${statusText}` : ""})`
+  );
 }
 
 /**
@@ -154,22 +179,36 @@ export async function uploadFileToDigest(options: {
 
   const sourceType = options.sourceType ?? digestSourceTypeFor(file);
 
-  // Field names match what dashy-digest already implements — file, filename,
-  // sourceType, userId. `userId` is ALWAYS appended (never conditionally).
+  // ── SHOTGUN userId CARRIERS ────────────────────────────────────────────
+  // The deployed dashy-digest script is not in this repo, so `userId` is
+  // delivered on every channel a Worker can plausibly read. All carriers
+  // hold the identical, verified Supabase UUID (`identity.userId`), so no
+  // matter which one the script consults it sees the same value.
+  const userIdQS = new URLSearchParams({
+    userId: identity.userId,
+    user_id: identity.userId,
+  });
+  const digestUrl = `${DASHY_DIGEST_URL.replace(/\/+$/, "")}/?${userIdQS.toString()}`;
+
+  // Carrier 1 + 2: multipart form fields (camelCase AND snake_case).
   const formData = new FormData();
   formData.append("file", file, file.name);
   formData.append("filename", file.name);
   formData.append("sourceType", sourceType);
   formData.append("userId", identity.userId);
+  formData.append("user_id", identity.userId);
 
   let response: Response;
   try {
-    response = await fetch(DASHY_DIGEST_URL.replace(/\/$/, ""), {
+    response = await fetch(digestUrl, {
       method: "POST",
       headers: {
         // NOTE: no Content-Type here — the browser sets the multipart
         // boundary itself.
         Authorization: `Bearer ${identity.accessToken}`,
+        // Carrier 3 + 4: headers (kebab-case AND case-folded).
+        "X-User-Id": identity.userId,
+        "X-UserId": identity.userId,
       },
       body: formData,
       signal,
@@ -208,7 +247,12 @@ export async function uploadFileToDigest(options: {
 
   if (!response.ok || payload.success === false) {
     throw new DigestUploadError(
-      workerErrorMessage(payload, rawText, response.status),
+      workerErrorMessage(
+        payload,
+        rawText,
+        response.status,
+        response.statusText
+      ),
       "worker",
       response.status
     );
