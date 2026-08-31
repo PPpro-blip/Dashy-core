@@ -135,10 +135,18 @@ function workerErrorMessage(
   status: number,
   statusText: string
 ): string {
+  const stringValue = (value: unknown): string => {
+    if (typeof value === "string") return value.trim();
+    if (value && typeof value === "object") {
+      const nested = value as Record<string, unknown>;
+      return stringValue(nested.message) || stringValue(nested.error);
+    }
+    return "";
+  };
   const candidate =
-    (typeof payload.error === "string" && payload.error.trim()) ||
-    (typeof payload.message === "string" && payload.message.trim()) ||
-    (typeof payload.details === "string" && payload.details.trim()) ||
+    stringValue(payload.error) ||
+    stringValue(payload.message) ||
+    stringValue(payload.details) ||
     cleanBodyText(fallbackText).slice(0, 300) ||
     statusText ||
     "";
@@ -188,7 +196,9 @@ export async function uploadFileToDigest(options: {
     userId: identity.userId,
     user_id: identity.userId,
   });
-  const digestUrl = `${DASHY_DIGEST_URL.replace(/\/+$/, "")}/?${userIdQS.toString()}`;
+  // Do not add a trailing slash: the production Worker is mounted at the
+  // configured URL itself, and redirects can alter multipart POST handling.
+  const digestUrl = `${DASHY_DIGEST_URL.replace(/\/+$/, "")}?${userIdQS.toString()}`;
 
   // Carrier 1 + 2: multipart form fields (camelCase AND snake_case).
   const formData = new FormData();
