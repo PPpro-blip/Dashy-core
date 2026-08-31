@@ -22,6 +22,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { createClient } from "@/lib/supabase/client";
+import { getDashySession } from "@/lib/auth-session";
 import { DCODE_INCOMING_KEY } from "@/lib/dcode";
 import {
   ChatClientError,
@@ -129,15 +130,10 @@ export default function ChatPage() {
   useEffect(() => {
     let cancelled = false;
     async function loadUser() {
-      try {
-        const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!cancelled && user) setUserId(user.id);
-      } catch {
-        // Auth is best-effort here — the layout already guards the route.
-      }
+      // Shared resolver: local cookie session first, auth-server lookup as
+      // a fallback. Uploads and chat sends both need a real userId.
+      const session = await getDashySession();
+      if (!cancelled && session?.userId) setUserId(session.userId);
     }
     void loadUser();
     return () => {
