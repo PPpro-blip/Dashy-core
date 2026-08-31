@@ -5,48 +5,46 @@
  *
  *   "unsupported Unicode escape sequence"
  *
- * A single imported binary file (logo.png, favicon.ico, font.woff2, a source
- * map…) is enough to make the *entire* `dcode_projects.files` row unwritable,
- * because every file lives in that one jsonb column. This module is the only
- * gate between "anything the browser handed us" and that column:
+ * A single raw imported binary file (logo.png, favicon.ico, font.woff2…)
+ * used to make the *entire* `dcode_projects.files` row unwritable, because
+ * every file lives in that one jsonb column. Binary ASSETS are no longer
+ * blocked, though — the import path (see lib/dcode-binary) encodes them as
+ * Base64 data URLs (`data:image/png;base64,…`), which are pure ASCII and
+ * save safely. This module remains the only gate between "anything the
+ * browser handed us" and that column:
  *
- *   1. `isBlockedPath`   — hard-block binaries/media/lockfiles at import time
- *                          so they never enter `files[]` in the first place.
+ *   1. `isBlockedPath`   — hard-block archives/executables/audio-video and
+ *                          generated output at import time.
  *   2. `cleanTextContent`— strip NULs, BOM, lone surrogates and non-characters
  *                          from any string that is about to be persisted.
- *   3. `sanitizeFiles`   — apply 1 + 2 plus per-file/project size caps to the
- *                          whole array immediately before insert/update.
+ *   3. `sanitizeFiles`   — apply 1 + 2, drop any binary-named file whose
+ *                          content was NOT encoded as a data URL (a raw
+ *                          binary that slipped past the importer), plus
+ *                          per-file/project size caps.
  *   4. `toSafeJsonPayload` — final `JSON.parse(JSON.stringify())` round-trip.
  *
  * Nothing here touches the network; it is safe to import from client and
  * server components alike.
  */
 
+import { isBinaryPath, isDataUrl } from "@/lib/dcode-binary";
+
 /* ---------------------------------------------------------------------- */
 /* Hard blocks                                                             */
 /* ---------------------------------------------------------------------- */
 
-/** Extensions that are binary or media — they cannot live in a jsonb string. */
+/**
+ * Extensions that cannot live in a jsonb string at all — archives,
+ * executables, native libraries and audio/video media. Raster images,
+ * fonts and PDFs are NOT here anymore: they enter `files[]` as Base64 data
+ * URLs (see lib/dcode-binary).
+ */
 export const BLOCKED_EXT = new Set<string>([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "ico",
-  "bmp",
-  "svg",
-  "woff",
-  "woff2",
-  "ttf",
-  "eot",
-  "otf",
   "zip",
   "tar",
   "gz",
   "rar",
   "7z",
-  "pdf",
   "exe",
   "dll",
   "so",
@@ -94,7 +92,7 @@ export const MAX_PROJECT_FILES = 200;
 
 /** User-facing reason shown when a file is refused. */
 export const BLOCKED_FILE_MESSAGE =
-  "Binary/media files can't be stored in D-Code yet.";
+  "Archives, executables and audio/video files can't be stored in D-Code. Images and fonts are imported automatically as Base64 previews.";
 
 /* ---------------------------------------------------------------------- */
 /* Path checks                                                             */
@@ -191,21 +189,28 @@ export interface SanitizableFile {
 }
 
 /**
- * The single gate before an insert/update. Drops blocked files, cleans every
- * string, caps path + content length and caps the file count, so a hostile or
- * merely messy import can never poison the row. Extra fields (`id`,
- * `language`, …) are preserved via the spread.
+ * The single gate before an insert/update. Drops blocked paths and any
+ * binary-named file whose content was NOT encoded as a Base64 data URL (a
+ * raw binary that somehow slipped past the importer would still contain
+ * NULs and poison the jsonb row). Data-URL assets are kept untouched, every
+ * string is cleaned, path + content length and the file count are capped,
+ * so a hostile or merely messy import can never poison the row. Extra
+ * fields (`id`, `language`, …) are preserved via the spread.
  */
 export function sanitizeFiles<T extends SanitizableFile>(files: readonly T[]): T[] {
   if (!Array.isArray(files)) return [];
   return files
-    .filter(
-      (f): f is T =>
-        Boolean(f) && typeof f?.name === "string" && !isBlockedPath(f.name)
-    )
+    .filter((f): f is T => {
+      if (!Boolean(f) || typeof f?.name !== "string") return false;
+      if (isBlockedPath(f.name)) return false;
+      // Binary asset — only storable when the importer encoded it.
+      if (isBinaryPath(f.name) && !isDataUrl(f.content)) return false;
+      return true;
+    })
     .map((f) => ({
       ...f,
       name: cleanTextContent(f.name).slice(0, MAX_PATH_CHARS),
+      // cleanTextContent leaves Base64 data URLs intact (ASCII only).
       content: cleanTextContent(f.content).slice(0, MAX_FILE_CONTENT_CHARS),
     }))
     .slice(0, MAX_PROJECT_FILES);
