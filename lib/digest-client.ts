@@ -7,26 +7,39 @@
  * shared by every upload surface (chat composer attachment, Knowledge page,
  * and any future memory upload button) so they can never drift apart.
  *
- *   POST {DASHY_DIGEST_URL}?userId=…&user_id=…
- *   Auth:     Authorization: Bearer <supabase access token>
- *   Body:     multipart/form-data
- *   Fields:   file, filename, sourceType, userId, user_id
- *   Headers:  X-User-Id / X-UserId
+ * WIRES (proven contract family — both are sent; the worker answers one):
+ *
+ *  1. MULTIPART (file upload):
+ *       POST {DASHY_DIGEST_URL}?userId=…&user_id=…&userid=…
+ *       Auth:     Authorization: Bearer <supabase access token>
+ *       Headers:  X-User-Id / X-UserId / x-userid
+ *       Body:     multipart/form-data — file, filename, sourceType,
+ *                 userId, user_id, userid
+ *
+ *  2. JSON (text ingest / the worker/ingest.ts body contract used by the
+ *     deployed `dashy-digest` script — this is the family BOTH workers in
+ *     the `PPpro-blip/dashy` repo use: `await request.json()`):
+ *       POST {DASHY_DIGEST_URL}?userId=…&user_id=…&userid=…
+ *       Headers:  Content-Type: application/json + the same X-User-* headers
+ *       Body:     { text, sourceType, filename/sourceId/title, userId,
+ *                  user_id, userid, file? }
+ *
+ * WHY TWO WIRES — the production failure (`Upload failed: userId is required`):
+ *   PR #10 sent multipart; PR #11/#12 "shotgunned" userId onto query string,
+ *   form fields AND headers — still multipart. If the deployed worker parses
+ *   the body as JSON first (`await request.json()`), a multipart body parses
+ *   to `{}` and NO amount of form fields/query/header carriers ever produces
+ *   a `userId` property — the request dies at the very first guard:
+ *       `if (!body.userId) return … { error: "userId is required" }`.
+ *   The only channel that cannot be ignored by such a worker is a JSON body.
+ *   So we (a) keep the full multipart shotgun for the file-upload worker,
+ *   and (b) when the worker rejects with ANY userId-related error, retry ONCE
+ *   as JSON with every plausible userId key populated. Whatever channel the
+ *   deployed script consults, the identical verified Supabase UUID is there.
  *
  * `userId` is the Supabase auth UUID (`session.user.id`) and is REQUIRED by
- * the worker — omitting it is what produced the production
- * "Upload failed: userId is required" toast.
- *
- * SHOTGUN CONTRACT: the live worker's deployed script is not in this repo,
- * so we cannot know which channel it reads the id from (query, form field,
- * header, camelCase vs snake_case). Until a probe pins that down
- * (`node scripts/probe-digest-worker.mjs` from a machine with egress to
- * workers.dev), the id is attached to EVERY channel simultaneously. Whichever
- * the worker consults, it finds the identical UUID, so extra carriers are
- * inert duplicates — never a mismatch.
- *
- * The identity is resolved from the Supabase session BEFORE the request is
- * made, and the request is never dispatched without it.
+ * the worker. The identity is resolved from the Supabase session BEFORE any
+ * request is made, and no request is ever dispatched without it.
  */
 
 import { DASHY_DIGEST_URL } from "@/lib/chat-client";
@@ -50,6 +63,13 @@ export interface DigestUploadResult {
   raw: Record<string, unknown>;
 }
 
+/**
+ * Error thrown for every failed digest upload. `kind` distinguishes:
+ *  - `unauthenticated`: no local session (request NOT sent) or the worker
+ *    rejected the Bearer token (401/403)
+ *  - `network`: worker unreachable / aborted
+ *  - `worker`: any non-2xx response, carrying the worker's own message
+ */
 export class DigestUploadError extends Error {
   constructor(
     message: string,
@@ -59,6 +79,21 @@ export class DigestUploadError extends Error {
     super(message);
     this.name = "DigestUploadError";
   }
+}
+
+/**
+ * True when a worker error message is complaining about a missing/invalid
+ * user id (the exact wording varies across deployed script versions):
+ * "userId is required", "user_id required", "user id is required",
+ * "userId missing", "userid is required", etc.
+ */
+function isUserIdError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("user") &&
+    m.includes("id") &&
+    /required|missing|not provided|cannot be empty|invalid/.test(m)
+  );
 }
 
 /**
@@ -129,9 +164,9 @@ function cleanBodyText(text: string): string {
 }
 
 /** Pulls the worker's own error text out of a JSON or plain-text body. */
-function workerErrorMessage(
+function extractErrorText(
   payload: Record<string, unknown>,
-  fallbackText: string,
+  rawText: string,
   status: number,
   statusText: string
 ): string {
@@ -139,7 +174,12 @@ function workerErrorMessage(
     if (typeof value === "string") return value.trim();
     if (value && typeof value === "object") {
       const nested = value as Record<string, unknown>;
-      return stringValue(nested.message) || stringValue(nested.error);
+      return (
+        stringValue(nested.error) ||
+        stringValue(nested.message) ||
+        stringValue(nested.details) ||
+        stringValue(nested.error_description)
+      );
     }
     return "";
   };
@@ -147,7 +187,8 @@ function workerErrorMessage(
     stringValue(payload.error) ||
     stringValue(payload.message) ||
     stringValue(payload.details) ||
-    cleanBodyText(fallbackText).slice(0, 300) ||
+    stringValue(payload.error_description) ||
+    cleanBodyText(rawText).slice(0, 300) ||
     statusText ||
     "";
   return (
@@ -156,13 +197,254 @@ function workerErrorMessage(
   );
 }
 
+interface WorkerResponse {
+  status: number;
+  statusText: string;
+  rawText: string;
+  payload: Record<string, unknown>;
+}
+
+/** Reads a fetch Response into text + best-effort JSON, once. */
+async function readWorkerResponse(response: Response): Promise<WorkerResponse> {
+  const rawText = await response.text();
+  let payload: Record<string, unknown> = {};
+  if (rawText.trim().startsWith("{") || rawText.trim().startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(rawText);
+      if (parsed && typeof parsed === "object") {
+        payload = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Non-JSON body — the status code and raw text still tell the story.
+    }
+  }
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    rawText,
+    payload,
+  };
+}
+
+/**
+ * Builds the digest URL with EVERY userId spelling in the query string.
+ * No trailing slash: the production Worker is mounted at the configured URL
+ * itself, and a redirect can alter multipart POST handling.
+ */
+function buildDigestUrl(identity: DigestIdentity): string {
+  const qs = new URLSearchParams({
+    userId: identity.userId,
+    user_id: identity.userId,
+    userid: identity.userId,
+  });
+  return `${DASHY_DIGEST_URL.replace(/\/+$/, "")}?${qs.toString()}`;
+}
+
+/** Request headers shared by BOTH wires: Bearer auth + every userId header. */
+function authHeaders(identity: DigestIdentity): Record<string, string> {
+  return {
+    Authorization: `Bearer ${identity.accessToken}`,
+    // Carrier headers — the worker may read the id from a header. Include
+    // every common casing/spelling; identical UUID in all of them.
+    "X-User-Id": identity.userId,
+    "X-UserId": identity.userId,
+    "X-Userid": identity.userId,
+    "x-user-id": identity.userId,
+  };
+}
+
+/** All plausible userId body keys, each holding the identical UUID. */
+function userIdBodyFields(identity: DigestIdentity): Record<string, string> {
+  return {
+    userId: identity.userId,
+    user_id: identity.userId,
+    userid: identity.userId,
+  };
+}
+
+/**
+ * Wire 1 — multipart/form-data file upload. The browser sets the multipart
+ * boundary itself (we must NOT pass Content-Type here). userId rides in the
+ * query string, in THREE form fields, and in the headers.
+ */
+async function postMultipart(
+  identity: DigestIdentity,
+  file: File,
+  filename: string,
+  sourceType: string,
+  signal?: AbortSignal
+): Promise<WorkerResponse> {
+  const formData = new FormData();
+  formData.append("file", file, filename);
+  formData.append("filename", filename);
+  formData.append("sourceType", sourceType);
+  // Three form-field spellings — whichever key the worker reads, it's set.
+  formData.append("userId", identity.userId);
+  formData.append("user_id", identity.userId);
+  formData.append("userid", identity.userId);
+
+  const response = await fetch(buildDigestUrl(identity), {
+    method: "POST",
+    headers: authHeaders(identity),
+    body: formData,
+    signal,
+  });
+  return readWorkerResponse(response);
+}
+
+/**
+ * Reads a text-ish file (txt/md) client-side so it can travel over the JSON
+ * wire. Binary files (pdf/image) are sent as base64 data in the `file`
+ * field — the JSON worker either stores the raw document or ignores it, but
+ * the text/id contract fields are always present and valid.
+ */
+async function fileToJsonPayload(
+  file: File,
+  sourceType: string
+): Promise<{ text: string; file: string | null }> {
+  const isTextLike =
+    sourceType === "text" ||
+    sourceType === "markdown" ||
+    file.type.startsWith("text/") ||
+    /\.(txt|md|markdown|csv|json|log)$/i.test(file.name);
+
+  if (isTextLike) {
+    const text = await file.text();
+    if (text.trim().length > 0) return { text, file: null };
+  }
+
+  // Binary (or empty text): base64 of the whole file.
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  // Chunk to avoid call-stack overflows on large (~15 MB) files.
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  const base64 =
+    typeof btoa === "function"
+      ? btoa(binary)
+      : // Non-browser fallback (manual base64) — never reaches a Node server
+        // bundle, but keeps the module self-contained.
+        (() => {
+          const alphabet =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+          let out = "";
+          for (let i = 0; i < binary.length; i += 3) {
+            const n =
+              (binary.charCodeAt(i) << 16) |
+              (binary.charCodeAt(i + 1) << 8) |
+              binary.charCodeAt(i + 2);
+            out +=
+              alphabet[(n >> 18) & 63] +
+              alphabet[(n >> 12) & 63] +
+              (i + 1 < binary.length ? alphabet[(n >> 6) & 63] : "=") +
+              (i + 2 < binary.length ? alphabet[n & 63] : "=");
+          }
+          return out;
+        })();
+  return {
+    text:
+      binary.length > 0
+        ? `[binary file: ${file.name} (${sourceType})]`
+        : file.name,
+    file: `data:${file.type || "application/octet-stream"};base64,${base64}`,
+  };
+}
+
+/**
+ * Wire 2 — JSON body (the `request.json()` contract used by the deployed
+ * worker family). userId appears in the query string, the JSON body under
+ * three keys, and the headers. The file content travels as `text` (text
+ * files) or base64 `file` (pdf/image).
+ */
+async function postJson(
+  identity: DigestIdentity,
+  file: File,
+  filename: string,
+  sourceType: string,
+  signal?: AbortSignal
+): Promise<WorkerResponse> {
+  const { text, file: fileData } = await fileToJsonPayload(file, sourceType);
+
+  const body: Record<string, unknown> = {
+    ...userIdBodyFields(identity),
+    // Ingestion request contract (worker/ingest.ts): text + sourceType.
+    text,
+    sourceType,
+    // Common metadata spellings a deployed script may look for.
+    filename,
+    fileName: filename,
+    name: filename,
+    title: filename,
+    sourceId: filename,
+  };
+  if (fileData) body.file = fileData;
+
+  const response = await fetch(buildDigestUrl(identity), {
+    method: "POST",
+    headers: { ...authHeaders(identity), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return readWorkerResponse(response);
+}
+
+/** Maps a parsed worker response onto a result or a typed DigestUploadError. */
+function responseToResult(
+  res: WorkerResponse
+): DigestUploadResult {
+  const { status, statusText, rawText, payload } = res;
+
+  if (status === 401 || status === 403) {
+    const reported = extractErrorText(payload, rawText, status, statusText);
+    throw new DigestUploadError(
+      // Surface the worker's exact text when it is meaningful, else a clean
+      // session message — never a raw "403" blob.
+      reported && reported !== `Upload failed (HTTP ${status} ${statusText})`
+        ? reported
+        : "Your session has expired. Please sign in again.",
+      "unauthenticated",
+      status
+    );
+  }
+
+  if (status < 200 || status >= 300 || payload.success === false) {
+    throw new DigestUploadError(
+      extractErrorText(payload, rawText, status, statusText),
+      "worker",
+      status
+    );
+  }
+
+  return {
+    documentId:
+      typeof payload.documentId === "string"
+        ? payload.documentId
+        : typeof payload.memoryId === "string"
+          ? payload.memoryId
+          : undefined,
+    chunkCount:
+      typeof payload.chunkCount === "number" ? payload.chunkCount : undefined,
+    raw: payload,
+  };
+}
+
 /**
  * Uploads one file to `dashy-digest`.
  *
+ * Strategy: the multipart wire is sent first (it is the only wire that can
+ * carry a real binary file). If the worker rejects it with a userId-related
+ * error, the JSON wire is retried once — that is the one channel a
+ * `request.json()`-based worker cannot miss. Every wire carries the same
+ * verified Supabase UUID on the query string, in the body (three spellings),
+ * and in the headers.
+ *
  * @throws {DigestUploadError} `unauthenticated` when no session could be
- * resolved (the request is NOT sent), `network` when the worker is
- * unreachable, `worker` for any non-2xx response — carrying the worker's own
- * error message when it provides one.
+ * resolved (the request is NOT sent) or the token is rejected, `network`
+ * when the worker is unreachable, `worker` for any non-2xx response —
+ * carrying the worker's own error message when it provides one.
  */
 export async function uploadFileToDigest(options: {
   file: File;
@@ -186,93 +468,82 @@ export async function uploadFileToDigest(options: {
   }
 
   const sourceType = options.sourceType ?? digestSourceTypeFor(file);
+  const filename = file.name;
 
-  // ── SHOTGUN userId CARRIERS ────────────────────────────────────────────
-  // The deployed dashy-digest script is not in this repo, so `userId` is
-  // delivered on every channel a Worker can plausibly read. All carriers
-  // hold the identical, verified Supabase UUID (`identity.userId`), so no
-  // matter which one the script consults it sees the same value.
-  const userIdQS = new URLSearchParams({
-    userId: identity.userId,
-    user_id: identity.userId,
-  });
-  // Do not add a trailing slash: the production Worker is mounted at the
-  // configured URL itself, and redirects can alter multipart POST handling.
-  const digestUrl = `${DASHY_DIGEST_URL.replace(/\/+$/, "")}?${userIdQS.toString()}`;
-
-  // Carrier 1 + 2: multipart form fields (camelCase AND snake_case).
-  const formData = new FormData();
-  formData.append("file", file, file.name);
-  formData.append("filename", file.name);
-  formData.append("sourceType", sourceType);
-  formData.append("userId", identity.userId);
-  formData.append("user_id", identity.userId);
-
-  let response: Response;
-  try {
-    response = await fetch(digestUrl, {
-      method: "POST",
-      headers: {
-        // NOTE: no Content-Type here — the browser sets the multipart
-        // boundary itself.
-        Authorization: `Bearer ${identity.accessToken}`,
-        // Carrier 3 + 4: headers (kebab-case AND case-folded).
-        "X-User-Id": identity.userId,
-        "X-UserId": identity.userId,
-      },
-      body: formData,
-      signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new DigestUploadError("Upload cancelled.", "network");
+  const isAbort = (error: unknown): boolean =>
+    error instanceof Error && error.name === "AbortError";
+  const networkError = (
+    error: unknown
+  ): DigestUploadError => {
+    if (isAbort(error)) {
+      return new DigestUploadError("Upload cancelled.", "network");
     }
-    throw new DigestUploadError(
+    return new DigestUploadError(
       "Could not reach the dashy-digest worker. Check your connection and try again.",
       "network"
     );
+  };
+
+  // ── Attempt 1: multipart/form-data (file-upload worker) ────────────────
+  let multipart: WorkerResponse;
+  try {
+    multipart = await postMultipart(
+      identity,
+      file,
+      filename,
+      sourceType,
+      signal
+    );
+  } catch (error) {
+    throw networkError(error);
   }
 
-  const rawText = await response.text();
-  let payload: Record<string, unknown> = {};
-  if (rawText.trim().startsWith("{")) {
+  // Success on the multipart wire.
+  if (
+    multipart.status >= 200 &&
+    multipart.status < 300 &&
+    multipart.payload.success !== false
+  ) {
+    return responseToResult(multipart);
+  }
+
+  // Auth failures are final on BOTH wires (same Bearer token) — don't
+  // disguise a 401/403 as a "userId is required" retry.
+  if (multipart.status === 401 || multipart.status === 403) {
+    return responseToResult(multipart);
+  }
+
+  const multipartErrorText = extractErrorText(
+    multipart.payload,
+    multipart.rawText,
+    multipart.status,
+    multipart.statusText
+  );
+
+  // ── Attempt 2: JSON wire — ONLY when the worker complained about userId.
+  // A `request.json()` worker rejects multipart with exactly this class of
+  // error before it ever looks at the file; JSON is the wire it cannot miss.
+  if (isUserIdError(multipartErrorText)) {
+    let json: WorkerResponse;
     try {
-      payload = JSON.parse(rawText) as Record<string, unknown>;
-    } catch {
-      // Non-JSON body — the status code and raw text still tell the story.
+      json = await postJson(identity, file, filename, sourceType, signal);
+    } catch (error) {
+      throw networkError(error);
+    }
+
+    if (json.status >= 200 && json.status < 300 && json.payload.success !== false) {
+      return responseToResult(json);
+    }
+    // Prefer the JSON wire's error message (it reflects the retry), except
+    // for auth errors which are authoritative.
+    if (json.status === 401 || json.status === 403 || !isUserIdError(
+      extractErrorText(json.payload, json.rawText, json.status, json.statusText)
+    )) {
+      return responseToResult(json);
     }
   }
 
-  if (response.status === 401 || response.status === 403) {
-    const reported =
-      (typeof payload.error === "string" && payload.error) ||
-      (typeof payload.message === "string" && payload.message) ||
-      "";
-    throw new DigestUploadError(
-      reported || "Your session has expired. Please sign in again.",
-      "unauthenticated",
-      response.status
-    );
-  }
-
-  if (!response.ok || payload.success === false) {
-    throw new DigestUploadError(
-      workerErrorMessage(
-        payload,
-        rawText,
-        response.status,
-        response.statusText
-      ),
-      "worker",
-      response.status
-    );
-  }
-
-  return {
-    documentId:
-      typeof payload.documentId === "string" ? payload.documentId : undefined,
-    chunkCount:
-      typeof payload.chunkCount === "number" ? payload.chunkCount : undefined,
-    raw: payload,
-  };
+  // Not a userId problem (or JSON also failed on userId) — surface the
+  // multipart worker's clean error message.
+  return responseToResult(multipart);
 }
