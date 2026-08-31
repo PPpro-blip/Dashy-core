@@ -40,6 +40,19 @@ import {
   MAX_FILE_CONTENT_CHARS,
   sanitizeFiles,
 } from "@/lib/dcode-sanitize";
+import {
+  bytesToDataUrl,
+  dataUrlByteSize,
+  extensionWithDot,
+  formatBytes,
+  isBinaryPath,
+  isDataUrl,
+  isImagePath,
+  isPreviewableImage,
+  mimeForBinaryExt,
+  readBlobAsDataUrl,
+  readBlobAsText,
+} from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
 import { useToast } from "@/components/Toast";
@@ -51,8 +64,10 @@ import {
   FolderIcon,
   GithubIcon,
   GlobeIcon,
+  ImageIcon,
   LockIcon,
   LoaderIcon,
+  PaperclipIcon,
   PenIcon,
   PlusIcon,
   ShareIcon,
@@ -95,6 +110,12 @@ function fileIconFor(
   name: string
 ): { Icon: ComponentType<{ className?: string }>; color: string } {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  if (["png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "svg"].includes(ext)) {
+    return { Icon: ImageIcon, color: "text-fuchsia-300" };
+  }
+  if (["woff", "woff2", "ttf", "otf", "eot", "pdf"].includes(ext)) {
+    return { Icon: FileTextIcon, color: "text-amber-300" };
+  }
   if (["ts", "tsx", "js", "jsx"].includes(ext)) {
     return { Icon: CodeIcon, color: "text-cyan-400" };
   }
@@ -107,6 +128,14 @@ function fileIconFor(
   return { Icon: FileTextIcon, color: "text-zinc-400" };
 }
 
+/**
+ * Import caps. Files live inline in one jsonb row, so a repo import stays
+ * within a safe envelope: a file cap, a per-text-file cap (sanitizer), and
+ * a tighter per-BINARY cap because Base64 inflates ~33%.
+ */
+const MAX_IMPORT_FILES = 120;
+const MAX_BINARY_BYTES = 350 * 1024; // ~350 KB raw → ~467 KB data URL
+
 function parseGithubRepo(input: string): { owner: string; repo: string } | null {
   const value = input.trim().replace(/\/$/, "").replace(/\.git$/, "");
   const urlMatch = value.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/);
@@ -116,26 +145,51 @@ function parseGithubRepo(input: string): { owner: string; repo: string } | null 
   return null;
 }
 
-/** Lists the signed-in user's GitHub repos when a provider token is available. */
-async function listGitHubRepos(): Promise<GithubRepo[]> {
+/**
+ * Resolves the GitHub OAuth provider token for the current Supabase session,
+ * when present. Used to raise the GitHub API rate limit (60/hr anonymous)
+ * and to authorize `/user/repos`.
+ */
+async function githubProviderToken(): Promise<string | null> {
   const supabase = createClient();
   const {
     data: { session },
   } = await supabase.auth.getSession();
-  const providerToken = (session as { provider_token?: string | null } | null)
+  const token = (session as { provider_token?: string | null } | null)
     ?.provider_token;
+  return typeof token === "string" && token ? token : null;
+}
+
+function githubHeaders(providerToken: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
   };
   if (providerToken) headers.Authorization = `Bearer ${providerToken}`;
+  return headers;
+}
 
+/**
+ * Lists the signed-in user's GitHub repositories. When authenticated via
+ * GitHub OAuth the provider token authorizes `/user/repos`; otherwise the
+ * anonymous call 401s and the modal falls back to a public-repo URL input.
+ */
+async function listGitHubRepos(): Promise<GithubRepo[]> {
+  const providerToken = await githubProviderToken();
   const res = await fetch(
-    "https://api.github.com/user/repos?per_page=60&sort=updated",
-    { headers }
+    "https://api.github.com/user/repos?sort=updated&per_page=30&affiliation=owner,collaborator",
+    { headers: githubHeaders(providerToken), cache: "no-store" }
   );
   if (res.status === 401 || res.status === 403) {
     throw new Error(
-      "GitHub token is not available. Paste a repo URL to import instead."
+      providerToken
+        ? "GitHub token was rejected — re-connect GitHub or paste a repo URL to import."
+        : "GitHub repo listing needs a GitHub sign-in — paste any public repo URL to import instead."
+    );
+  }
+  if (res.status === 429) {
+    throw new Error(
+      "GitHub rate limit reached. Wait a moment or paste a repo URL to import."
     );
   }
   if (!res.ok) {
@@ -145,22 +199,26 @@ async function listGitHubRepos(): Promise<GithubRepo[]> {
   return Array.isArray(data) ? (data as GithubRepo[]) : [];
 }
 
-/** Result of a repo import: kept files + how many were hard-blocked. */
+/** Result of a repo import: kept files + how many were skipped. */
 interface GithubImportResult {
   files: DCodeFile[];
-  /** Binaries, media, lockfiles and generated output that were skipped. */
+  /** Archives, lockfiles, generated output and oversize files skipped. */
   skipped: number;
+  /** Binary assets encoded as Base64 data URLs (previews). */
+  binaries: number;
+  /** Repo display name ("owner/repo") for the project title on fresh drafts. */
+  repoName: string;
 }
 
 /**
- * Basic scaffold importer: resolves a public GitHub repo, walks its tree and
- * pulls up to 60 non-generated source files into D-Code. D-Code stores files
- * as names (a project has no nested folders), so deeply nested paths collapse
- * to their basename.
+ * Repository importer: resolves a public GitHub repo, walks its default
+ * branch tree and pulls source files into D-Code.
  *
- * Binary/media/lockfile paths are hard-blocked here (`isBlockedPath`) — they
- * can never be represented in the jsonb `files` column, and one of them is
- * enough to make every later save of the project fail.
+ * Text files come in as-is; binary assets (png/jpg/gif/ico/webp/bmp/woff/
+ * woff2/ttf/otf/eot/pdf) are fetched as bytes and encoded as Base64 data
+ * URLs — pure ASCII, zero NUL bytes, jsonb-safe, and rendered by the editor
+ * preview pane. Archives, executables, audio/video, lockfiles and generated
+ * output are skipped (`isBlockedPath`).
  */
 async function importGitHubRepository(
   url: string
@@ -172,13 +230,16 @@ async function importGitHubRepository(
     );
   }
   const { owner, repo } = parsed;
+  const providerToken = await githubProviderToken();
 
   const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-    headers: { Accept: "application/vnd.github+json" },
+    headers: githubHeaders(providerToken),
   });
   if (!repoRes.ok) {
     throw new Error(
-      `GitHub repo not found or not accessible (HTTP ${repoRes.status}).`
+      repoRes.status === 404
+        ? `GitHub repo "${owner}/${repo}" not found. Check the URL.`
+        : `GitHub repo not accessible (HTTP ${repoRes.status}).`
     );
   }
   const repoInfo = (await repoRes.json()) as { default_branch?: string };
@@ -186,7 +247,7 @@ async function importGitHubRepository(
 
   const treeRes = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
-    { headers: { Accept: "application/vnd.github+json" } }
+    { headers: githubHeaders(providerToken) }
   );
   if (!treeRes.ok) {
     throw new Error(
@@ -199,45 +260,76 @@ async function importGitHubRepository(
 
   const blobs = (tree.tree ?? [])
     .filter((entry) => entry.type === "blob" && entry.path)
-    .map((entry) => entry.path as string);
+    .map((entry) => ({
+      path: entry.path as string,
+      size: typeof entry.size === "number" ? entry.size : 0,
+    }))
+    // Sanitize path characters and collapse to the file basename — D-Code
+    // files are a flat list (project has no nested folders).
+    .filter(({ path }) => /^[a-zA-Z0-9_@\-\.\(\)\[\]\/]+$/.test(path))
+    .slice(0, MAX_IMPORT_FILES * 2);
 
-  // Hard block #1 — binaries, media, fonts, archives, source maps, lockfiles
-  // and generated output never enter files[] (they poison the jsonb row with
-  // "unsupported Unicode escape sequence" the moment the project is saved).
-  let skipped = blobs.filter((path) => isBlockedPath(path)).length;
-
-  const paths = blobs
-    .filter((path) => /^[a-zA-Z0-9_\-\.\/]+$/.test(path))
-    .filter((path) => !isBlockedPath(path))
-    .slice(0, 60);
-
-  if (paths.length === 0) {
-    throw new Error(
-      skipped > 0
-        ? "This repository only contains binary/media files, which D-Code can't store yet."
-        : "No importable source files found in this repository."
-    );
-  }
-
+  let skipped = 0;
+  let binaries = 0;
+  const seenNames = new Set<string>();
   const files: DCodeFile[] = [];
-  for (const path of paths) {
+
+  for (const { path, size } of blobs) {
+    if (files.length >= MAX_IMPORT_FILES) break;
     const name = path.split("/").pop() ?? path;
-    // Hard block #2 — the basename can be blocked even when the path passed.
-    if (isBlockedPath(name)) {
+    const lower = name.toLowerCase();
+    // Generated output / VCS / archives / lockfiles never enter files[].
+    if (isBlockedPath(path)) {
       skipped += 1;
       continue;
     }
-    const rawRes = await fetch(
-      `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
-    );
+    if (seenNames.has(lower)) {
+      skipped += 1;
+      continue;
+    }
+
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
+
+    if (isBinaryPath(name)) {
+      // Skip oversized binaries before downloading — Base64 inflates ~33%.
+      if (size && size > MAX_BINARY_BYTES) {
+        skipped += 1;
+        continue;
+      }
+      const blobRes = await fetch(rawUrl);
+      if (!blobRes.ok) continue;
+      const bytes = new Uint8Array(await blobRes.arrayBuffer());
+      if (bytes.length > MAX_BINARY_BYTES) {
+        skipped += 1;
+        continue;
+      }
+      seenNames.add(lower);
+      binaries += 1;
+      files.push({
+        id: newId(),
+        name,
+        language: languageFromFilename(name),
+        content: bytesToDataUrl(
+          bytes,
+          mimeForBinaryExt(extensionWithDot(name))
+        ),
+      });
+      continue;
+    }
+
+    const rawRes = await fetch(rawUrl);
     if (!rawRes.ok) continue;
     const content = await rawRes.text();
-    // Hard block #3 — content sniff catches mislabeled / renamed binaries.
+    // Content sniff catches mislabeled / renamed binaries (NUL bytes).
     if (containsBinaryMarkers(content)) {
       skipped += 1;
       continue;
     }
-    if (content.length > MAX_FILE_CONTENT_CHARS) continue;
+    if (content.length > MAX_FILE_CONTENT_CHARS) {
+      skipped += 1;
+      continue;
+    }
+    seenNames.add(lower);
     files.push({
       id: newId(),
       name,
@@ -247,9 +339,112 @@ async function importGitHubRepository(
   }
 
   if (files.length === 0) {
-    throw new Error("Could not fetch any raw files from this repository.");
+    throw new Error(
+      skipped > 0
+        ? "No importable files found — this repository only contains archives, generated output or oversized media."
+        : "No importable source files found in this repository."
+    );
   }
-  return { files, skipped };
+  return { files, skipped, binaries, repoName: repo };
+}
+
+/**
+ * Editor-area preview for binary assets. Raster images render in a sleek
+ * centered frame with live dimensions + file size; SVGs (stored as text)
+ * render through a blob data URL; other binary assets (fonts, PDFs) show a
+ * download card with the encoded size.
+ */
+function BinaryAssetPreview({ file }: { file: DCodeFile }) {
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  const size = file.content.startsWith("data:")
+    ? dataUrlByteSize(file.content)
+    : file.content.length;
+  const isImage = isImagePath(file.name) || file.content.startsWith("data:image/");
+  const svgBlobSrc = useMemo(() => {
+    if (!file.name.toLowerCase().endsWith(".svg") || file.content.startsWith("data:")) {
+      return null;
+    }
+    try {
+      return URL.createObjectURL(
+        new Blob([file.content], { type: "image/svg+xml" })
+      );
+    } catch {
+      return null;
+    }
+  }, [file.name, file.content]);
+  useEffect(() => {
+    if (!svgBlobSrc) return;
+    return () => URL.revokeObjectURL(svgBlobSrc);
+  }, [svgBlobSrc]);
+
+  const imgSrc = file.content.startsWith("data:image/")
+    ? file.content
+    : svgBlobSrc;
+
+  return (
+    <div
+      className="flex h-full w-full flex-col items-center justify-center overflow-auto p-6"
+      style={{
+        backgroundImage:
+          "linear-gradient(45deg, rgba(255,255,255,0.03) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.03) 75%), linear-gradient(45deg, rgba(255,255,255,0.03) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.03) 75%)",
+        backgroundSize: "24px 24px",
+        backgroundPosition: "0 0, 12px 12px",
+      }}
+    >
+      {isImage && imgSrc ? (
+        <>
+          <div className="flex max-h-[70%] max-w-full items-center justify-center rounded-xl border border-white/[0.08] bg-[#0a0e1a]/80 p-4 shadow-2xl shadow-black/50">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={imgSrc}
+              alt={file.name}
+              onLoad={(e) =>
+                setDims({
+                  w: e.currentTarget.naturalWidth,
+                  h: e.currentTarget.naturalHeight,
+                })
+              }
+              className="max-h-[60vh] max-w-full object-contain"
+            />
+          </div>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-[#0d1220]/90 px-4 py-2 font-mono text-[11px] text-zinc-400">
+            <ImageIcon className="h-3.5 w-3.5 text-fuchsia-300" />
+            <span className="text-zinc-200">{file.name}</span>
+            {dims && (
+              <span className="text-zinc-500">
+                · {dims.w}×{dims.h}
+              </span>
+            )}
+            <span className="text-zinc-500">· {formatBytes(size)}</span>
+            <span className="rounded border border-fuchsia-400/30 bg-fuchsia-400/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300">
+              Base64
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="w-full max-w-sm rounded-2xl border border-white/[0.08] bg-[#0d1220] p-6 text-center">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl border border-amber-400/30 bg-amber-400/10">
+            <FileTextIcon className="h-7 w-7 text-amber-300" />
+          </div>
+          <h3 className="mt-4 break-all font-mono text-sm font-semibold text-white">
+            {file.name}
+          </h3>
+          <p className="mt-1.5 font-mono text-[11px] text-zinc-500">
+            Binary asset · {formatBytes(size)} · Base64 encoded
+          </p>
+          {file.content.startsWith("data:") && (
+            <a
+              href={file.content}
+              download={file.name}
+              className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3.5 py-2 text-xs font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
+            >
+              Download asset
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorkspaceProps) {
@@ -315,14 +510,17 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   /**
    * Ingest guard for seed state (chat hand-off, an old project row, a draft
-   * built elsewhere). Anything blocked is dropped from `files[]` before it
-   * can reach a save, and the user is told what was removed instead of
-   * watching a mystery save failure.
+   * built elsewhere). Anything blocked — or a binary-named file whose
+   * content was never encoded as a data URL — is dropped from `files[]`
+   * before it can reach a save, and the user is told what was removed
+   * instead of watching a mystery save failure.
    */
   useEffect(() => {
-    const blocked = files.filter((f) => isBlockedPath(f.name));
+    const isBad = (f: DCodeFile) =>
+      isBlockedPath(f.name) || (isBinaryPath(f.name) && !isDataUrl(f.content));
+    const blocked = files.filter(isBad);
     if (blocked.length > 0) {
-      setFiles((prev) => prev.filter((f) => !isBlockedPath(f.name)));
+      setFiles((prev) => prev.filter((f) => !isBad(f)));
       toast.show({
         type: "info",
         title: `${blocked.length} file${blocked.length === 1 ? "" : "s"} skipped`,
@@ -669,6 +867,14 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       toast.show({ type: "error", title: "Unsupported file", message: BLOCKED_FILE_MESSAGE });
       return;
     }
+    if (isBinaryPath(name)) {
+      toast.show({
+        type: "error",
+        title: "Binary files can't be created by hand",
+        message: "Import images/fonts via “Upload” or “Connect GitHub” — they’re stored as Base64 previews.",
+      });
+      return;
+    }
     if (files.some((f) => f.name.toLowerCase() === name.toLowerCase())) {
       toast.show({
         type: "error",
@@ -717,6 +923,14 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     const target = files.find((f) => f.id === id);
     if (!target) {
       cancelRename();
+      return;
+    }
+    if (isBinaryPath(name) && !isBinaryPath(target.name)) {
+      toast.show({
+        type: "error",
+        title: "Binary files can't be created by hand",
+        message: "Images/fonts are imported via “Upload” or “Connect GitHub” as Base64 previews.",
+      });
       return;
     }
     if (name.toLowerCase() === target.name.toLowerCase()) {
@@ -771,6 +985,125 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       }, 200);
     },
     [activeFileId, files.length, markDirty, toast]
+  );
+
+  /* ----------------------------- file / folder upload --------------------- */
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
+
+  /**
+   * Reads files picked from disk (single files or an entire folder upload)
+   * into D-Code. Text files are read as UTF-8; binary assets are encoded as
+   * Base64 data URLs so images/fonts/PDFs import safely and preview in the
+   * editor. Archives/executables and generated output are skipped.
+   */
+  const handleImportFiles = useCallback(
+    async (picked: FileList | File[]) => {
+      const list = Array.from(picked);
+      if (list.length === 0) return;
+      setUploadingFiles(true);
+      try {
+        const added: DCodeFile[] = [];
+        let skipped = 0;
+        let binaries = 0;
+        for (const file of list) {
+          if (added.length >= MAX_IMPORT_FILES) {
+            skipped += 1;
+            continue;
+          }
+          // Folder uploads carry a relative path; flat files have just a name.
+          const relPath =
+            (file as File & { webkitRelativePath?: string }).webkitRelativePath ||
+            file.name;
+          const name = relPath.split("/").pop() ?? file.name;
+          if (isBlockedPath(relPath) || isBlockedPath(name)) {
+            skipped += 1;
+            continue;
+          }
+          if (isBinaryPath(name)) {
+            if (file.size > MAX_BINARY_BYTES) {
+              skipped += 1;
+              continue;
+            }
+            const dataUrl = await readBlobAsDataUrl(file);
+            added.push({
+              id: newId(),
+              name,
+              language: languageFromFilename(name),
+              content: dataUrl,
+            });
+            binaries += 1;
+          } else {
+            if (file.size > MAX_FILE_CONTENT_CHARS) {
+              skipped += 1;
+              continue;
+            }
+            const text = await readBlobAsText(file);
+            if (containsBinaryMarkers(text)) {
+              skipped += 1;
+              continue;
+            }
+            added.push({
+              id: newId(),
+              name,
+              language: languageFromFilename(name),
+              content: cleanTextContent(text),
+            });
+          }
+        }
+
+        // Final gate before the files touch state: same sanitizer as on save.
+        const imported = sanitizeFiles(added);
+        if (imported.length === 0) {
+          toast.show({
+            type: "error",
+            title: "Nothing to import",
+            message: skipped > 0
+              ? `${skipped} file${skipped === 1 ? "" : "s"} skipped (unsupported or too large).`
+              : "No readable files were found in that selection.",
+          });
+          return;
+        }
+        setFiles((prev) => {
+          const existing = new Set(prev.map((f) => f.name.toLowerCase()));
+          const next = [...prev];
+          for (const file of imported) {
+            if (!existing.has(file.name.toLowerCase())) {
+              next.push(file);
+              existing.add(file.name.toLowerCase());
+            } else {
+              skipped += 1;
+            }
+          }
+          return next;
+        });
+        setActiveFileId(imported[0]?.id ?? "");
+        markDirty();
+        const notes = [
+          `${imported.length} file${imported.length === 1 ? "" : "s"} imported`,
+          binaries > 0 ? `${binaries} as Base64 image${binaries === 1 ? "" : "s"}` : "",
+          skipped > 0 ? `${skipped} skipped` : "",
+        ].filter(Boolean);
+        toast.show({
+          type: "success",
+          title: "Files added to project",
+          message: notes.join(" · ") + ".",
+        });
+      } catch (error) {
+        toast.show({
+          type: "error",
+          title: "Upload failed",
+          message: error instanceof Error ? error.message : "Could not read those files.",
+        });
+      } finally {
+        setUploadingFiles(false);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        if (folderInputRef.current) folderInputRef.current.value = "";
+      }
+    },
+    [markDirty, toast]
   );
 
   /* --------------------------------- share -------------------------------- */
@@ -848,6 +1181,19 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     setGithubRepoUrl("");
     setGithubRepos([]);
     setGithubModalOpen(true);
+    // Signed in via GitHub? Fetch the repo browser immediately so the modal
+    // opens on a populated list instead of a bare URL field.
+    void (async () => {
+      setListingRepos(true);
+      try {
+        const repos = await listGitHubRepos();
+        setGithubRepos(repos);
+      } catch {
+        // Listing is optional — the public-URL import path always works.
+      } finally {
+        setListingRepos(false);
+      }
+    })();
   }, []);
 
   const closeGitHubModal = useCallback(() => {
@@ -882,35 +1228,71 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       try {
         const result = await importGitHubRepository(repoUrl);
         // Final gate before the files touch state: same sanitizer that runs
-        // on save, so nothing un-storable can slip in through any import path.
+        // on save, so nothing un-storable can slip in through any import path
+        // (binaries survive only as Base64 data URLs).
         const imported = sanitizeFiles(result.files);
-        setFiles((prev) => {
-          const existing = new Set(prev.map((f) => f.name.toLowerCase()));
-          const next = [...prev];
-          for (const file of imported) {
-            if (!existing.has(file.name.toLowerCase())) {
-              next.push(file);
-              existing.add(file.name.toLowerCase());
-            }
+
+        // Merge deterministically (outside setState) so the same snapshot can
+        // be persisted straight away for a fresh draft.
+        const current = latestRef.current;
+        const merged = [...current.files];
+        const existing = new Set(merged.map((f) => f.name.toLowerCase()));
+        let duplicates = 0;
+        for (const file of imported) {
+          if (existing.has(file.name.toLowerCase())) {
+            duplicates += 1;
+          } else {
+            merged.push(file);
+            existing.add(file.name.toLowerCase());
           }
-          return next;
-        });
-        setActiveFileId(imported[0]?.id ?? "");
-        markDirty();
-        const skippedNote =
-          result.skipped > 0
-            ? ` ${result.skipped} binary/lock file${
-                result.skipped === 1 ? "" : "s"
-              } skipped.`
-            : "";
+        }
+        const firstAdded =
+          imported.find((f) => !current.files.some((g) => g.id === f.id)) ??
+          imported[0];
+
+        const isDraft = !current.projectId;
+        const newTitle = isDraft
+          ? result.repoName.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+          : current.title;
+
+        setFiles(merged);
+        setActiveFileId(firstAdded?.id ?? "");
+        if (isDraft) setTitle(newTitle);
+        // Keep the debounce/ref snapshot in sync so an immediate persist
+        // (below) writes exactly what the user sees.
+        latestRef.current = {
+          projectId: current.projectId,
+          title: isDraft ? newTitle : current.title,
+          files: merged,
+        };
+
+        const notes = [
+          `${imported.length - duplicates} file${
+            imported.length - duplicates === 1 ? "" : "s"
+          } added`,
+          result.binaries > 0
+            ? `${result.binaries} image/asset${result.binaries === 1 ? "" : "s"} as Base64`
+            : "",
+          result.skipped + duplicates > 0
+            ? `${result.skipped + duplicates} skipped`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
         toast.show({
           type: "success",
-          title: "GitHub repo imported",
-          message: `${imported.length} file${
-            imported.length === 1 ? "" : "s"
-          } added to this project.${skippedNote}`,
+          title: isDraft ? `Imported ${result.repoName}` : "GitHub repo imported",
+          message: `${notes}.`,
         });
         closeGitHubModal();
+
+        // A fresh scratch workspace becomes a real D-Code project right away;
+        // an existing project picks the change up via autosave.
+        if (isDraft) {
+          await persist("manual");
+        } else {
+          markDirty();
+        }
       } catch (error) {
         setGithubError(
           error instanceof Error
@@ -921,7 +1303,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         setImportingRepo(false);
       }
     },
-    [closeGitHubModal, importingRepo, markDirty, toast]
+    [closeGitHubModal, importingRepo, markDirty, persist, toast]
   );
 
   /* ------------------------------ save status ----------------------------- */
@@ -1238,14 +1620,64 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   </div>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => setAddingFile(true)}
-                  className="flex w-full items-center gap-2 rounded-lg border border-dashed border-white/[0.10] px-2.5 py-2 text-[12px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
-                >
-                  <PlusIcon className="h-3.5 w-3.5" />
-                  New file
-                </button>
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setAddingFile(true)}
+                    className="flex w-full items-center gap-2 rounded-lg border border-dashed border-white/[0.10] px-2.5 py-2 text-[12px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                  >
+                    <PlusIcon className="h-3.5 w-3.5" />
+                    New file
+                  </button>
+                  {!readOnly && (
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploadingFiles}
+                        title="Upload files — images import as Base64 previews"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
+                      >
+                        {uploadingFiles ? (
+                          <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <PaperclipIcon className="h-3.5 w-3.5" />
+                        )}
+                        Upload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => folderInputRef.current?.click()}
+                        disabled={uploadingFiles}
+                        title="Upload an entire folder (images, fonts and source files)"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
+                      >
+                        <FolderIcon className="h-3.5 w-3.5" />
+                        Folder
+                      </button>
+                    </div>
+                  )}
+                  {/* Hidden inputs: multiple files, or a whole folder. */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      if (e.target.files) void handleImportFiles(e.target.files);
+                    }}
+                  />
+                  <input
+                    ref={folderInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                    onChange={(e) => {
+                      if (e.target.files) void handleImportFiles(e.target.files);
+                    }}
+                  />
+                </div>
               )}
             </div>
           )}
@@ -1274,16 +1706,20 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             })}
           </div>
 
-          {/* Monaco */}
+          {/* Monaco (or binary asset preview for images/fonts) */}
           <div className="min-h-0 flex-1">
             {activeFile ? (
-              <MonacoEditor
-                key={`${activeFile.id}:${activeFile.language}`}
-                value={activeFile.content}
-                language={activeFile.language}
-                onChange={readOnly ? undefined : updateActiveContent}
-                readOnly={readOnly}
-              />
+              isPreviewableImage(activeFile.name, activeFile.content) ? (
+                <BinaryAssetPreview file={activeFile} />
+              ) : (
+                <MonacoEditor
+                  key={`${activeFile.id}:${activeFile.language}`}
+                  value={activeFile.content}
+                  language={activeFile.language}
+                  onChange={readOnly ? undefined : updateActiveContent}
+                  readOnly={readOnly}
+                />
+              )
             ) : (
               <div className="flex h-full flex-col items-center justify-center px-6 text-center">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-400/10 shadow-2xl shadow-cyan-500/10">
@@ -1406,7 +1842,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   </button>
                 </div>
                 <p className="mt-1.5 text-[11px] text-zinc-600">
-                  Paste any public repo. Up to 60 source files are pulled in.
+                  Paste any public repo (e.g. https://github.com/PPpro-blip/Dashy-core).
+                  Source files plus up to {MAX_IMPORT_FILES} — images and fonts come in as
+                  Base64 previews.
                 </p>
               </div>
 
@@ -1434,9 +1872,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   </button>
                 </div>
 
+                {listingRepos && githubRepos.length === 0 && (
+                  <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-black/20 px-4 py-3 text-xs text-zinc-500">
+                    <LoaderIcon className="h-3.5 w-3.5 animate-spin text-cyan-400" />
+                    Fetching your repositories from GitHub…
+                  </div>
+                )}
+
                 {githubRepos.length > 0 && (
                   <ul className="mt-3 max-h-52 overflow-y-auto rounded-xl border border-white/[0.06] bg-black/20">
-                    {githubRepos.slice(0, 20).map((repo) => (
+                    {githubRepos.map((repo) => (
                       <li key={repo.full_name}>
                         <button
                           type="button"

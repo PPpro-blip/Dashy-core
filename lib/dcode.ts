@@ -21,6 +21,7 @@ import {
   sanitizeFiles,
   toSafeJsonPayload,
 } from "@/lib/dcode-sanitize";
+import { isBinaryPath, isDataUrl } from "@/lib/dcode-binary";
 
 // Re-exported so D-Code UI code has one import site for every ingest guard.
 export {
@@ -34,6 +35,23 @@ export {
   sanitizeFiles,
   toSafeJsonPayload,
 } from "@/lib/dcode-sanitize";
+
+// Re-exported binary helpers (Base64 data-URL assets) for the workspace UI.
+export {
+  BINARY_EXTS,
+  bytesToDataUrl,
+  dataUrlByteSize,
+  extensionWithDot,
+  formatBytes,
+  isBinaryPath,
+  isDataUrl,
+  isImageDataUrl,
+  isImagePath,
+  isPreviewableImage,
+  mimeForBinaryExt,
+  readBlobAsDataUrl,
+  readBlobAsText,
+} from "@/lib/dcode-binary";
 
 /* ---------------------------------------------------------------------- */
 /* Types                                                                   */
@@ -61,9 +79,9 @@ export interface DCodeProject {
   updatedAt: string;
   /**
    * Names of stored files that were dropped on read because they are
-   * binary/media/lockfiles. Populated so the UI can tell the user why a file
-   * they imported earlier is no longer listed (and why the next save heals
-   * the row). Never persisted.
+   * archives/executables/lockfiles or raw (non-encoded) binaries. Populated
+   * so the UI can tell the user why a file they imported earlier is no
+   * longer listed (and why the next save heals the row). Never persisted.
    */
   skippedFiles?: string[];
 }
@@ -286,10 +304,11 @@ export function starterProjectDraft(language = "typescript"): DCodeProjectDraft 
 
 /**
  * Sanitizes a file array before it is persisted into the postgres jsonb
- * column: hard-blocks binary/media/lockfile paths, strips NUL bytes, BOM,
- * lone surrogates and non-characters, applies per-file/project size caps and
+ * column: hard-blocks archive/executable/media paths, keeps binary assets
+ * only when encoded as Base64 data URLs, strips NUL bytes, BOM, lone
+ * surrogates and non-characters, applies per-file/project size caps and
  * finishes with a full JSON round-trip. A single bad character in an editor
- * buffer — or one imported logo.png — can therefore never poison the row.
+ * buffer can therefore never poison the row.
  *
  * Implemented in `lib/dcode-sanitize` so the exact same gate is reused by
  * every import path in the workspace UI.
@@ -299,10 +318,11 @@ function safeFilesPayload(files: DCodeFile[]): DCodeFile[] {
 }
 
 /**
- * Normalizes the jsonb array into DCodeFile[] and hard-blocks anything that
- * must never live in that column (binaries, media, lockfiles, generated
- * output). Returns the kept files plus the names that were dropped so the
- * workspace can explain the removal instead of hiding it.
+ * Normalizes the jsonb array into DCodeFile[]. Binary assets are kept when
+ * stored as Base64 data URLs (images/fonts/PDFs) and skipped only when their
+ * raw bytes would poison the column — alongside blocked paths (archives,
+ * executables, lockfiles, generated output). Returns the kept files plus the
+ * names that were dropped so the workspace can explain the removal.
  */
 function coerceFiles(raw: unknown): { files: DCodeFile[]; skipped: string[] } {
   if (!Array.isArray(raw)) return { files: [], skipped: [] };
@@ -317,6 +337,13 @@ function coerceFiles(raw: unknown): { files: DCodeFile[]; skipped: string[] } {
       skipped.push(name);
       continue;
     }
+    const content = typeof f.content === "string" ? f.content : "";
+    // A binary-named file only survives as an encoded data URL — a raw
+    // binary in the row would contain NULs and break the next save.
+    if (isBinaryPath(name) && !isDataUrl(content)) {
+      skipped.push(name);
+      continue;
+    }
     files.push({
       id: typeof f.id === "string" ? f.id : newId(),
       name: cleanTextContent(name).slice(0, MAX_PATH_CHARS),
@@ -324,7 +351,7 @@ function coerceFiles(raw: unknown): { files: DCodeFile[]; skipped: string[] } {
         typeof f.language === "string" && f.language
           ? f.language
           : languageFromFilename(name),
-      content: cleanTextContent(f.content).slice(0, MAX_FILE_CONTENT_CHARS),
+      content: content.slice(0, MAX_FILE_CONTENT_CHARS),
     });
   }
   return { files, skipped };
