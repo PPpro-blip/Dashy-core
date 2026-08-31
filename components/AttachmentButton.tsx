@@ -7,7 +7,15 @@
  * the `dashy-digest` worker via multipart FormData:
  *
  *   POST https://dashy-digest.kamleshprathampandey.workers.dev
- *   FormData: { file, userId, filename }
+ *   FormData: { file, userId, filename, sourceType }
+ *   Header:   Authorization: Bearer <supabase access token>
+ *
+ * `userId` is REQUIRED by the worker (it scopes the indexed memory to the
+ * signed-in user). It is resolved here — not left to the caller — through
+ * the shared `getDashySession()` helper, so both the chat composer and the
+ * Knowledge page send it. When no session can be resolved we abort before
+ * hitting the network with a clean "Please log in to upload files." toast
+ * instead of letting the worker answer `userId is required`.
  *
  * Progress is surfaced through the toast system:
  *   info "Uploading …" → success "Document indexed to memory ✓" (or error).
@@ -17,7 +25,7 @@ import { useRef, useState } from "react";
 import { DASHY_DIGEST_URL } from "@/lib/chat-client";
 import { useToast } from "@/components/Toast";
 import { LoaderIcon, PaperclipIcon } from "@/components/icons";
-import { createClient } from "@/lib/supabase/client";
+import { getDashySession } from "@/lib/auth-session";
 
 const ACCEPT =
   "application/pdf,.pdf,text/plain,.txt,text/markdown,text/x-markdown,.md,.markdown,image/png,.png,image/jpeg,.jpg,.jpeg";
@@ -46,6 +54,11 @@ function isSupported(file: File): boolean {
 }
 
 interface AttachmentButtonProps {
+  /**
+   * Optional hint from the parent (e.g. the chat page already loaded it).
+   * It is only a fallback — the component always resolves the live session
+   * itself so an upload can never go out without a `userId`.
+   */
   userId?: string | null;
   disabled?: boolean;
   className?: string;
@@ -88,29 +101,17 @@ export function AttachmentButton({
       return;
     }
 
-    let uploadUserId = userId ?? null;
-    let token: string | undefined;
+    // Resolve the signed-in session BEFORE touching the network: the worker
+    // rejects any upload without `userId`, so a failed lookup must abort
+    // here with an actionable message rather than produce a 400 toast.
+    const session = await getDashySession();
+    const uploadUserId = session?.userId ?? userId ?? null;
+    const token = session?.accessToken ?? "";
 
-    try {
-      const supabase = createClient();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      token = session?.access_token;
-      if (!uploadUserId) {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        uploadUserId = user?.id ?? null;
-      }
-    } catch {
-      // Auth lookup is best-effort — the worker validates the token anyway.
-    }
-
-    if (!token) {
+    if (!uploadUserId || !token) {
       toast.error(
-        "Not signed in",
-        "Please sign in again before uploading documents."
+        "Please log in to upload files.",
+        "Your session wasn't found — sign in again, then attach the document."
       );
       return;
     }
@@ -127,7 +128,8 @@ export function AttachmentButton({
       formData.append("file", file);
       formData.append("filename", file.name);
       formData.append("sourceType", sourceTypeFor(file));
-      if (uploadUserId) formData.append("userId", uploadUserId);
+      // Always present — the guard above guarantees a resolved session.
+      formData.append("userId", uploadUserId);
 
       const response = await fetch(DASHY_DIGEST_URL.replace(/\/$/, ""), {
         method: "POST",
@@ -144,11 +146,16 @@ export function AttachmentButton({
         // Non-JSON response body — status code still tells the story.
       }
 
+      if (response.status === 401 || response.status === 403) {
+        throw new Error("Your session has expired. Please sign in again.");
+      }
+
       if (!response.ok) {
-        const message =
-          typeof payload.error === "string" && payload.error.length > 0
-            ? payload.error
-            : `Upload failed (HTTP ${response.status})`;
+        // Surface the worker's own message when it provides one.
+        const workerMessage = ["error", "message", "detail"]
+          .map((key) => payload[key])
+          .find((value): value is string => typeof value === "string" && value.length > 0);
+        const message = workerMessage ?? `Upload failed (HTTP ${response.status})`;
         throw new Error(message);
       }
 
