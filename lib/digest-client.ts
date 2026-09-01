@@ -9,20 +9,18 @@
  *
  * WIRES (proven contract family — both are sent; the worker answers one):
  *
- *  1. MULTIPART (file upload) — the MOST basic CORS-safe request:
- *       POST {BASE_URL}?userId=<supabase UUID>
- *       Mode:     cors
- *       Headers:  ONLY Authorization: Bearer <supabase access token>
- *                 (no Content-Type — the browser sets the multipart boundary;
- *                  no custom X-* headers → no CORS preflight)
+ *  1. MULTIPART (file upload):
+ *       POST {DASHY_DIGEST_URL}?userId=…&user_id=…&userid=…
+ *       Auth:     Authorization: Bearer <supabase access token>
+ *       Headers:  X-User-Id / X-UserId / x-userid
  *       Body:     multipart/form-data — file, filename, sourceType,
  *                 userId, user_id, userid
  *
  *  2. JSON (text ingest / the worker/ingest.ts body contract used by the
  *     deployed `dashy-digest` script — this is the family BOTH workers in
  *     the `PPpro-blip/dashy` repo use: `await request.json()`):
- *       POST {BASE_URL}?userId=<supabase UUID>
- *       Headers:  Content-Type: application/json + Authorization: Bearer …
+ *       POST {DASHY_DIGEST_URL}?userId=…&user_id=…&userid=…
+ *       Headers:  Content-Type: application/json + the same X-User-* headers
  *       Body:     { text, sourceType, filename/sourceId/title, userId,
  *                  user_id, userid, file? }
  *
@@ -44,18 +42,8 @@
  * request is made, and no request is ever dispatched without it.
  */
 
+import { DASHY_DIGEST_URL } from "@/lib/chat-client";
 import { createClient } from "@/lib/supabase/client";
-
-/**
- * Digest worker base URL — HARDCODED FALLBACK.
- * The env var is honored when present, but if it is ever missing/empty the
- * request must still go to the real production worker instead of dying with
- * a "Could not reach worker" error. This is the deployed `dashy-digest`
- * Cloudflare Worker endpoint.
- */
-const BASE_URL =
-  process.env.NEXT_PUBLIC_DASHY_DIGEST_URL ||
-  "https://dashy-digest.kamleshprathampandey.workers.dev";
 
 /** Message shown when the visitor has no usable Supabase session. */
 export const DIGEST_LOGIN_REQUIRED_MESSAGE = "Please log in to upload files.";
@@ -239,25 +227,30 @@ async function readWorkerResponse(response: Response): Promise<WorkerResponse> {
 }
 
 /**
- * Builds the digest URL using the `URL` object, which handles slashes and
- * query params correctly. The worker authenticates via the Bearer token and
- * reads `userId` from the query string, the body and the headers; here we
- * always put the verified Supabase UUID on the query string as `userId`.
+ * Builds the digest URL with EVERY userId spelling in the query string.
+ * No trailing slash: the production Worker is mounted at the configured URL
+ * itself, and a redirect can alter multipart POST handling.
  */
 function buildDigestUrl(identity: DigestIdentity): string {
-  const url = new URL(BASE_URL);
-  url.searchParams.append("userId", identity.userId);
-  return url.toString();
+  const qs = new URLSearchParams({
+    userId: identity.userId,
+    user_id: identity.userId,
+    userid: identity.userId,
+  });
+  return `${DASHY_DIGEST_URL.replace(/\/+$/, "")}?${qs.toString()}`;
 }
 
-/**
- * Request headers for BOTH wires. Deliberately MINIMAL: only the Bearer
- * token. No custom `X-*` headers and no Content-Type here — letting the
- * browser set the header avoids triggering a CORS preflight for the
- * multipart upload (JSON wire adds its own Content-Type below).
- */
+/** Request headers shared by BOTH wires: Bearer auth + every userId header. */
 function authHeaders(identity: DigestIdentity): Record<string, string> {
-  return { Authorization: `Bearer ${identity.accessToken}` };
+  return {
+    Authorization: `Bearer ${identity.accessToken}`,
+    // Carrier headers — the worker may read the id from a header. Include
+    // every common casing/spelling; identical UUID in all of them.
+    "X-User-Id": identity.userId,
+    "X-UserId": identity.userId,
+    "X-Userid": identity.userId,
+    "x-user-id": identity.userId,
+  };
 }
 
 /** All plausible userId body keys, each holding the identical UUID. */
@@ -290,14 +283,8 @@ async function postMultipart(
   formData.append("user_id", identity.userId);
   formData.append("userid", identity.userId);
 
-  // MOST BASIC request possible to bypass CORS preflight:
-  //  - Method: POST
-  //  - Mode:   cors
-  //  - Headers: ONLY Authorization (no Content-Type — the browser sets the
-  //    multipart boundary itself; no custom X-* headers).
   const response = await fetch(buildDigestUrl(identity), {
     method: "POST",
-    mode: "cors",
     headers: authHeaders(identity),
     body: formData,
     signal,
@@ -451,8 +438,8 @@ function responseToResult(
  * carry a real binary file). If the worker rejects it with a userId-related
  * error, the JSON wire is retried once — that is the one channel a
  * `request.json()`-based worker cannot miss. Every wire carries the same
- * verified Supabase UUID on the query string and in the body (three
- * spellings); the Bearer token authenticates every request.
+ * verified Supabase UUID on the query string, in the body (three spellings),
+ * and in the headers.
  *
  * @throws {DigestUploadError} `unauthenticated` when no session could be
  * resolved (the request is NOT sent) or the token is rejected, `network`
@@ -491,16 +478,8 @@ export async function uploadFileToDigest(options: {
     if (isAbort(error)) {
       return new DigestUploadError("Upload cancelled.", "network");
     }
-    // AGGRESSIVE: surface the EXACT underlying error (e.g. "Failed to fetch",
-    // a CORS TypeError, a timeout) instead of hiding it behind a generic
-    // "Could not reach worker" message. `AttachmentButton` shows this message
-    // verbatim in the error toast.
-    const detail =
-      error instanceof Error && error.message
-        ? error.message
-        : "Check DevTools Console";
     return new DigestUploadError(
-      `Connection Error: ${detail}`,
+      "Could not reach the dashy-digest worker. Check your connection and try again.",
       "network"
     );
   };
@@ -515,11 +494,8 @@ export async function uploadFileToDigest(options: {
       sourceType,
       signal
     );
-  } catch (err) {
-    // AGGRESSIVE LOGGING — always capture the raw error in the console so a
-    // developer can see the real cause even when the toast text is truncated.
-    console.error("CRITICAL UPLOAD ERROR:", err);
-    throw networkError(err);
+  } catch (error) {
+    throw networkError(error);
   }
 
   // Success on the multipart wire.
@@ -551,10 +527,8 @@ export async function uploadFileToDigest(options: {
     let json: WorkerResponse;
     try {
       json = await postJson(identity, file, filename, sourceType, signal);
-    } catch (err) {
-      // AGGRESSIVE LOGGING — same capture as the multipart attempt above.
-      console.error("CRITICAL UPLOAD ERROR:", err);
-      throw networkError(err);
+    } catch (error) {
+      throw networkError(error);
     }
 
     if (json.status >= 200 && json.status < 300 && json.payload.success !== false) {
