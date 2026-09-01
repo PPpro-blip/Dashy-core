@@ -21,6 +21,7 @@ import {
 } from "@/lib/share-intents";
 import { copyText } from "@/lib/clipboard";
 import { ShareComposer } from "@/components/share/ShareComposer";
+import { ShareQr } from "@/components/share/ShareQr";
 import { useToast } from "@/components/Toast";
 import {
   CopyIcon,
@@ -188,7 +189,7 @@ export function ShareHub({ onClose, project, shareUrl }: ShareHubProps) {
           </div>
 
           {/* Quick actions */}
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
               onClick={() => void handleCopyLink()}
@@ -215,25 +216,14 @@ export function ShareHub({ onClose, project, shareUrl }: ShareHubProps) {
               )}
               <span className="text-[11px] font-medium">Share via device</span>
             </button>
-            <a
-              href={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(
-                url
-              )}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open QR code"
-              className="flex min-h-12 flex-col items-center justify-center gap-1 rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(
-                  url
-                )}`}
-                alt="QR code"
-                className="h-9 w-9 rounded"
-              />
-              <span className="text-[11px] font-medium">QR code</span>
-            </a>
+          </div>
+
+          {/* QR code */}
+          <div className="flex flex-col items-center rounded-xl border border-white/[0.08] bg-white/[0.02] p-3">
+            <ShareQr value={url} />
+            <p className="mt-2 text-[11px] text-zinc-500">
+              Scan to open this public project
+            </p>
           </div>
 
           {/* App grid — each tile opens that app's composer. */}
