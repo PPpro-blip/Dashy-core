@@ -54,13 +54,40 @@ import {
   readBlobAsText,
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
-import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import { MonacoEditor, type DCodeMonacoEditor } from "@/components/dcode/MonacoEditor";
+import { ActivityBar, type SideView } from "@/components/dcode/ActivityBar";
+import {
+  CommandPalette,
+  QuickPickModal,
+} from "@/components/dcode/CommandPalette";
+import { SourceControlPanel } from "@/components/dcode/SourceControlPanel";
+import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import { AiOutputPanel, type AiOutputState } from "@/components/dcode/AiOutputPanel";
 import { ShareHub } from "@/components/share/ShareHub";
 import { useToast } from "@/components/Toast";
+import {
+  activateEnabledExtensions,
+  commandRegistry,
+  COMMANDS_CHANGED_EVENT,
+  deactivateAllExtensions,
+  getEnabledExtensionIdsCached,
+  setExtensionEnabled,
+  type CommandDefinition,
+} from "@/lib/dcode/extensions/runtime";
+import { BUILTIN_EXTENSIONS } from "@/lib/dcode/extensions/registry";
+import { formatText } from "@/lib/dcode/extensions/format";
+import { getFormatOnSave, getStoredTheme } from "@/lib/dcode/extensions/storage";
+import type {
+  DCodeExtensionUi,
+  DCodeWorkspaceApi,
+  QuickPickItem,
+} from "@/lib/dcode/extensions/types";
+import type { GithubBind } from "@/lib/dcode/github";
 import {
   BracesIcon,
   CheckIcon,
   CodeIcon,
+  CommandIcon,
   FileTextIcon,
   FolderIcon,
   GithubIcon,
@@ -491,6 +518,37 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  /* ------------------- IDE chrome (activity bar / palette) -------------- */
+
+  const [sideView, setSideView] = useState<SideView>("explorer");
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteCommands, setPaletteCommands] = useState<CommandDefinition[]>([]);
+  const [quickPick, setQuickPick] = useState<{
+    title: string;
+    items: QuickPickItem[];
+    resolve: (item: QuickPickItem | null) => void;
+  } | null>(null);
+  const [enabledExtensions, setEnabledExtensions] = useState<string[]>(() =>
+    getEnabledExtensionIdsCached()
+  );
+  const [themeId, setThemeId] = useState<string>(() =>
+    getEnabledExtensionIdsCached().includes("dashy.themes")
+      ? getStoredTheme()
+      : "dcode-obsidian"
+  );
+  const [aiOutput, setAiOutput] = useState<AiOutputState | null>(null);
+  const [commitFocusSignal, setCommitFocusSignal] = useState(0);
+  const [githubBind, setGithubBind] = useState<GithubBind | null>(
+    project?.githubRepoFullName
+      ? {
+          fullName: project.githubRepoFullName,
+          defaultBranch: project.githubDefaultBranch ?? "main",
+          lastSyncedSha: project.githubLastSyncedSha,
+        }
+      : null
+  );
+
   /**
    * Latest content seen from the Monaco editor for the ACTIVE file. Monaco
    * reports changes asynchronously; keeping the newest buffer here lets us
@@ -505,10 +563,26 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     latestRef.current = { projectId, title, files };
   }, [projectId, title, files]);
 
+  /** Live Monaco instance of the active editor (extensions / commands). */
+  const monacoRef = useRef<DCodeMonacoEditor | null>(null);
+  /** Streaming sink for DashyAI output (append without stale closures). */
+  const aiContentRef = useRef("");
+  /** Extension host handles (workspace api + ui). */
+  const workspaceApiRef = useRef<DCodeWorkspaceApi | null>(null);
+  const extensionUiRef = useRef<DCodeExtensionUi | null>(null);
+  const enabledExtensionsRef = useRef(enabledExtensions);
+  enabledExtensionsRef.current = enabledExtensions;
+
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
     [files, activeFileId]
   );
+
+  /** Active file snapshot for late-bound command handlers. */
+  const activeFileRef = useRef<DCodeFile | null>(null);
+  useEffect(() => {
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
 
   /**
    * Ingest guard for seed state (chat hand-off, an old project row, a draft
@@ -613,6 +687,26 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       const { projectId: id, title: t, files: rawFiles } = latestRef.current;
       if (readOnly) return;
 
+      // Optional "Format on Save" (dashy.prettier, off by default): format
+      // the pending Monaco buffer in place before the snapshot is built.
+      if (getFormatOnSave() && editorBufferRef.current) {
+        const pending = editorBufferRef.current;
+        const pendingFile = rawFiles.find((f) => f.id === pending.fileId);
+        if (pendingFile && !isPreviewableImage(pendingFile.name, pendingFile.content)) {
+          try {
+            const formatted = await formatText(pendingFile.name, pending.content);
+            if (formatted.ok && formatted.text) {
+              editorBufferRef.current = {
+                fileId: pending.fileId,
+                content: formatted.text,
+              };
+            }
+          } catch {
+            // Formatting must never block a save — save the raw buffer.
+          }
+        }
+      }
+
       // Flush any pending Monaco buffer into the snapshot being persisted so
       // an edit made in the last few milliseconds is never dropped.
       const buffer = editorBufferRef.current;
@@ -711,6 +805,25 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       ) {
         event.preventDefault();
         setTerminalOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [readOnly]);
+
+  /* Ctrl/Cmd+Shift+P opens the Command Palette; Ctrl/Cmd+B toggles the
+     sidebar (VS Code muscle memory). */
+  useEffect(() => {
+    if (readOnly) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarVisible((visible) => !visible);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1302,6 +1415,329 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     [closeGitHubModal, importingRepo, markDirty, persist, toast]
   );
 
+  /* --------------------------- extension host ---------------------------- */
+
+  /**
+   * Formats the active file with Prettier (dashy.prettier). Flushes the
+   * Monaco buffer first so the format always sees the latest text.
+   */
+  const formatActiveFile = useCallback(async (): Promise<boolean> => {
+    const file = activeFileRef.current;
+    if (!file) return false;
+    if (isPreviewableImage(file.name, file.content)) {
+      toast.show({
+        type: "error",
+        title: "Can't format this file",
+        message: "Binary assets are previews — there is no text to format.",
+      });
+      return false;
+    }
+    flushActiveBuffer();
+    const current = latestRef.current.files.find((f) => f.id === file.id);
+    const source = current ?? file;
+    const result = await formatText(source.name, source.content);
+    if (!result.ok) {
+      toast.show({
+        type: "error",
+        title: "Format failed",
+        message: result.error ?? "Prettier could not format this file.",
+      });
+      return false;
+    }
+    if (!result.text) return false;
+    if (result.text === source.content) {
+      toast.show({ type: "info", title: "Document is already formatted" });
+      return true;
+    }
+    updateActiveContent(result.text);
+    toast.show({
+      type: "success",
+      title: "Formatted with Prettier",
+      message: `${source.name} — ${result.text.length} chars`,
+    });
+    return true;
+  }, [flushActiveBuffer, toast, updateActiveContent]);
+
+  /**
+   * Late-bound handles so the extension host (mounted once) always calls
+   * the freshest implementations instead of first-render closures.
+   */
+  const selectFileRef = useRef<(fileId: string) => void>(() => {});
+  selectFileRef.current = handleSelectFile;
+  const formatActiveFileRef = useRef<() => Promise<boolean>>(async () => false);
+  formatActiveFileRef.current = formatActiveFile;
+
+  /** Persists the repo bind (or null = unbind) on the project row. */
+  const handleGithubBind = useCallback(
+    async (bind: GithubBind | null): Promise<void> => {
+      if (readOnly) return;
+      const id = latestRef.current.projectId;
+      if (!id) {
+        toast.show({
+          type: "info",
+          title: "Save first, then bind",
+          message: "Save this project (Ctrl+S), then bind a repository.",
+        });
+        return;
+      }
+      setGithubBind(bind);
+      try {
+        await updateProject(id, {
+          github: bind
+            ? {
+                fullName: bind.fullName,
+                defaultBranch: bind.defaultBranch,
+                lastSyncedSha: bind.lastSyncedSha ?? null,
+              }
+            : { fullName: null, defaultBranch: null, lastSyncedSha: null },
+        });
+      } catch (error) {
+        toast.show({
+          type: "error",
+          title: "Could not save the repository binding",
+          message: error instanceof Error ? error.message : "Please try again.",
+        });
+      }
+    },
+    [readOnly, toast]
+  );
+
+  /** Replaces workspace files with a pulled GitHub snapshot. */
+  const handleGithubPull = useCallback(
+    (pulled: DCodeFile[], syncedSha: string) => {
+      flushActiveBuffer();
+      editorBufferRef.current = null;
+      setFiles(pulled);
+      setActiveFileId(pulled[0]?.id ?? "");
+      latestRef.current = { ...latestRef.current, files: pulled };
+      setGithubBind((prev) =>
+        prev ? { ...prev, lastSyncedSha: syncedSha } : prev
+      );
+      markDirty();
+      const id = latestRef.current.projectId;
+      if (id) {
+        void updateProject(id, { github: { lastSyncedSha: syncedSha } }).catch(
+          () => {
+            // Bind sha is best-effort — the pull itself is already saved.
+          }
+        );
+      }
+    },
+    [flushActiveBuffer, markDirty]
+  );
+
+  /** Kicks off the GitHub OAuth flow with repo scope, returning to D-Code. */
+  const connectGithub = useCallback(() => {
+    const supabase = createClient();
+    const origin = window.location.origin;
+    const next = window.location.pathname;
+    void supabase.auth.signInWithOAuth({
+      provider: "github",
+      options: {
+        redirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}`,
+        // repo scope is required for the Git Data API push path.
+        scopes: "read:user user:email repo",
+      },
+    });
+  }, []);
+
+  /* Command Palette: subscribe to the shared registry and run commands. */
+  useEffect(() => {
+    const sync = () => setPaletteCommands(commandRegistry.getAll());
+    sync();
+    window.addEventListener(COMMANDS_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(COMMANDS_CHANGED_EVENT, sync);
+  }, []);
+
+  /** Toggle an extension live: activate/deactivate + persist + commands. */
+  const toggleExtension = useCallback(
+    async (id: string, enabled: boolean) => {
+      const api = workspaceApiRef.current;
+      const ui = extensionUiRef.current;
+      if (!api || !ui) return;
+      setEnabledExtensions((prev) =>
+        enabled ? [...new Set([...prev, id])] : prev.filter((x) => x !== id)
+      );
+      try {
+        await setExtensionEnabled(id, enabled, api, ui);
+        const manifest = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id)?.manifest;
+        toast.show({
+          type: "success",
+          title: `${manifest?.name ?? id} ${enabled ? "enabled" : "disabled"}`,
+          message: enabled
+            ? "Its commands are now in the Command Palette."
+            : "Its commands were removed from the Command Palette.",
+        });
+      } catch (error) {
+        toast.show({
+          type: "error",
+          title: "Extension toggle failed",
+          message: error instanceof Error ? error.message : "Please try again.",
+        });
+      }
+    },
+    [toast]
+  );
+
+  /** Mounts the extension host once per workspace (skip read-only view). */
+  useEffect(() => {
+    if (readOnly) return;
+
+    const api: DCodeWorkspaceApi = {
+      getActiveFile: () => activeFileRef.current,
+      getFiles: () => latestRef.current.files,
+      getSelectedText: () => {
+        const editor = monacoRef.current;
+        if (!editor) return null;
+        const model = editor.getModel();
+        const selection = editor.getSelection();
+        if (!model || !selection) return null;
+        return model.getValueInRange(selection);
+      },
+      openFile: (fileId) => selectFileRef.current(fileId),
+      applyTheme: (themeIdValue) => setThemeId(themeIdValue),
+      formatActiveFile: () => formatActiveFileRef.current(),
+      getUserId: async () => {
+        try {
+          const {
+            data: { user },
+          } = await createClient().auth.getUser();
+          return user?.id ?? null;
+        } catch {
+          return null;
+        }
+      },
+      showAiOutput: (title) => {
+        aiContentRef.current = "";
+        setAiOutput({ title, content: "", running: true });
+      },
+      appendAiOutput: (text) => {
+        aiContentRef.current += text;
+        const full = aiContentRef.current;
+        setAiOutput((prev) =>
+          prev
+            ? { ...prev, content: full }
+            : { title: "DashyAI", content: full, running: true }
+        );
+      },
+      finishAiOutput: () =>
+        setAiOutput((prev) => (prev ? { ...prev, running: false } : prev)),
+      saveActiveFile: async () => {
+        await persistRef.current("manual");
+      },
+    };
+    workspaceApiRef.current = api;
+
+    const ui: DCodeExtensionUi = {
+      showQuickPick: <T extends QuickPickItem>(items: T[], title?: string) =>
+        new Promise<T | null>((resolve) => {
+          setQuickPick({
+            title: title ?? "Select…",
+            items: items as QuickPickItem[],
+            resolve: (item) => resolve((item as T | null) ?? null),
+          });
+        }),
+      notify: (message) =>
+        toast.show({ type: "info", title: message }),
+    };
+    extensionUiRef.current = ui;
+
+    /* Core D-Code commands (always present). */
+    const coreCommands: CommandDefinition[] = [
+      {
+        id: "dcode.file.save",
+        title: "Save",
+        category: "File",
+        handler: () => void persistRef.current("manual"),
+      },
+      {
+        id: "dcode.file.saveAll",
+        title: "Save All",
+        category: "File",
+        handler: () => void persistRef.current("manual"),
+      },
+      {
+        id: "dcode.view.toggleTerminal",
+        title: "Toggle Terminal",
+        category: "View",
+        handler: () => setTerminalOpen((open) => !open),
+      },
+      {
+        id: "dcode.view.toggleSidebar",
+        title: "Toggle Sidebar",
+        category: "View",
+        handler: () => setSidebarVisible((visible) => !visible),
+      },
+      {
+        id: "dcode.explorer.focus",
+        title: "Focus Explorer",
+        category: "View",
+        handler: () => {
+          setSidebarVisible(true);
+          setSideView("explorer");
+        },
+      },
+      {
+        id: "dcode.scm.focus",
+        title: "Focus Source Control",
+        category: "Source Control",
+        handler: () => {
+          setSidebarVisible(true);
+          setSideView("scm");
+        },
+      },
+      {
+        id: "dcode.scm.commit",
+        title: "Commit",
+        category: "Source Control",
+        handler: () => {
+          setSidebarVisible(true);
+          setSideView("scm");
+          setCommitFocusSignal((n) => n + 1);
+        },
+      },
+      {
+        id: "dcode.extensions.focus",
+        title: "Focus Extensions",
+        category: "Extensions",
+        handler: () => {
+          setSidebarVisible(true);
+          setSideView("extensions");
+        },
+      },
+      {
+        id: "dcode.extensions.toggle",
+        title: "Enable/Disable Extension…",
+        category: "Extensions",
+        handler: async () => {
+          const items = BUILTIN_EXTENSIONS.map((ext) => ({
+            id: ext.manifest.id,
+            label: ext.manifest.name,
+            description: enabledExtensionsRef.current.includes(ext.manifest.id)
+              ? "Enabled — pick to disable"
+              : "Disabled — pick to enable",
+          }));
+          const picked = await ui.showQuickPick(items, "Toggle Extension");
+          if (picked) {
+            const willEnable = !enabledExtensionsRef.current.includes(picked.id);
+            await toggleExtension(picked.id, willEnable);
+          }
+        },
+      },
+    ];
+    for (const command of coreCommands) commandRegistry.register(command);
+
+    void activateEnabledExtensions(api, ui);
+
+    return () => {
+      for (const command of coreCommands) commandRegistry.unregister(command.id);
+      void deactivateAllExtensions();
+      workspaceApiRef.current = null;
+      extensionUiRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly]);
+
   /* ------------------------------ save status ----------------------------- */
 
   const statusLabel = () => {
@@ -1409,6 +1845,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             <>
               <button
                 type="button"
+                onClick={() => setPaletteOpen(true)}
+                title="Command Palette (Ctrl+Shift+P)"
+                aria-label="Command Palette"
+                className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+              >
+                <CommandIcon className="h-3.5 w-3.5 text-cyan-400" />
+                Command Palette
+              </button>
+              <button
+                type="button"
                 onClick={() => setTerminalOpen((open) => !open)}
                 title="Toggle terminal (Ctrl + `)"
                 aria-label="Toggle terminal"
@@ -1477,7 +1923,45 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       <div className="flex min-h-0 flex-1 flex-col">
         {/* Split: editor body gets 70% (flex-7) when the terminal is open,
             otherwise it fills the whole remaining column. */}
-        <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
+        <div
+          className={`flex min-h-0 ${
+            terminalOpen || aiOutput ? "flex-[7]" : "flex-1"
+          }`}
+        >
+        {/* Activity bar (Explorer / Source Control / Extensions) */}
+        {!readOnly && sidebarVisible && (
+          <ActivityBar
+            view={sideView}
+            onSelect={setSideView}
+            scmChangeCount={0}
+            enabledExtensionCount={enabledExtensions.length}
+          />
+        )}
+
+        {sidebarVisible &&
+          (!readOnly && sideView !== "explorer" ? (
+            /* Source Control / Extensions panels swap in without touching
+               the file tree (which is only mounted for Explorer). */
+            <div className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+              {sideView === "scm" ? (
+                <SourceControlPanel
+                  files={files}
+                  bind={githubBind}
+                  connected={githubConnected}
+                  onConnect={connectGithub}
+                  onBind={handleGithubBind}
+                  onPull={handleGithubPull}
+                  commitFocusSignal={commitFocusSignal}
+                />
+              ) : (
+                <ExtensionsPanel
+                  enabled={enabledExtensions}
+                  onToggle={(id, enabled) => void toggleExtension(id, enabled)}
+                />
+              )}
+            </div>
+          ) : (
+        <>
         {/* File tree */}
         <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
           <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
@@ -1678,6 +2162,8 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           )}
         </aside>
+        </>
+        ))}
 
         {/* Editor column */}
         <div className="flex min-w-0 flex-1 flex-col">
@@ -1714,6 +2200,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   language={activeFile.language}
                   onChange={readOnly ? undefined : updateActiveContent}
                   readOnly={readOnly}
+                  theme={themeId}
+                  onEditorReady={(editor) => {
+                    monacoRef.current = editor;
+                  }}
                 />
               )
             ) : (
@@ -1763,7 +2253,41 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             className="flex-[3] min-h-0"
           />
         )}
+
+        {/* DashyAI output drawer (Explain / Refactor results) */}
+        {aiOutput && (
+          <AiOutputPanel
+            output={aiOutput}
+            onClose={() => setAiOutput(null)}
+          />
+        )}
       </div>
+
+      {/* Command Palette */}
+      {!readOnly && (
+        <CommandPalette
+          open={paletteOpen}
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+          onRun={(command) => {
+            setPaletteOpen(false);
+            void commandRegistry.execute(command.id);
+          }}
+        />
+      )}
+
+      {/* Generic quick pick (themes, extension toggles, …) */}
+      {quickPick && (
+        <QuickPickModal
+          title={quickPick.title}
+          items={quickPick.items}
+          onSelect={(item) => {
+            const resolve = quickPick.resolve;
+            setQuickPick(null);
+            resolve(item);
+          }}
+        />
+      )}
 
       {/* GitHub connect / import modal */}
       {githubModalOpen && (
