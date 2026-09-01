@@ -55,6 +55,7 @@ import {
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import { ShareHub } from "@/components/share/ShareHub";
 import { useToast } from "@/components/Toast";
 import {
   BracesIcon,
@@ -472,6 +473,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     project ? new Date(project.updatedAt) : null
   );
   const [savingShare, setSavingShare] = useState(false);
+  const [shareHubOpen, setShareHubOpen] = useState(false);
   const [newFileName, setNewFileName] = useState("");
   const [addingFile, setAddingFile] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
@@ -1113,7 +1115,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     return `${window.location.origin}/d-code/share/${shareSlug}`;
   }, [shareSlug]);
 
-  const handleShare = useCallback(async () => {
+  /**
+   * Opens the Share Hub. Ensures the project is saved and public first (so a
+   * share URL exists), then shows the hub — where the user picks an app and
+   * refines the share in a per-app composer before anything is shared.
+   */
+  const openShareHub = useCallback(async () => {
     if (savingShare) return;
     setSavingShare(true);
     try {
@@ -1128,11 +1135,8 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         const updated = await toggleProjectPublic(id, true);
         setIsPublic(true);
         setShareSlug(updated.shareSlug);
-        router.push(`/d-code/share/${updated.shareSlug}`);
-        return;
-      } else if (shareSlug) {
-        router.push(`/d-code/share/${shareSlug}`);
       }
+      setShareHubOpen(true);
     } catch (error) {
       toast.show({
         type: "error",
@@ -1142,7 +1146,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, router, savingShare, shareSlug, toast]);
+  }, [isPublic, persist, savingShare, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;
@@ -1450,10 +1454,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
               )}
               <button
                 type="button"
-                onClick={() => void handleShare()}
+                onClick={() => void openShareHub()}
                 disabled={savingShare}
-                title={isPublic ? "Copy public link" : "Share — make public & copy link"}
-                aria-label={isPublic ? "Copy public link" : "Share project"}
+                title={isPublic ? "Open share hub" : "Share — make public & open share hub"}
+                aria-label="Share project"
                 className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
                 {savingShare ? (
@@ -1463,7 +1467,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 ) : (
                   <ShareIcon className="h-3 w-3" />
                 )}
-                {isPublic ? "Copy link" : "Share"}
+                Share
               </button>
             </>
           )}
@@ -1918,6 +1922,19 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           </div>
         </>
+      )}
+
+      {/* Per-app Share Hub / Composer */}
+      {shareHubOpen && (
+        <ShareHub
+          onClose={() => setShareHubOpen(false)}
+          project={{
+            id: projectId ?? "",
+            title,
+            files,
+          }}
+          shareUrl={shareUrl}
+        />
       )}
     </div>
   );
