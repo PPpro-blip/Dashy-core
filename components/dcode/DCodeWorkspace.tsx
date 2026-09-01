@@ -1128,18 +1128,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         const updated = await toggleProjectPublic(id, true);
         setIsPublic(true);
         setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
-        await navigator.clipboard.writeText(url);
-        toast.show({
-          type: "success",
-          title: "Public link copied",
-          message: "Anyone with the link can view this project.",
-        });
+        router.push(`/d-code/share/${updated.shareSlug}`);
+        return;
       } else if (shareSlug) {
-        await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
-        );
-        toast.show({ type: "success", title: "Link copied" });
+        router.push(`/d-code/share/${shareSlug}`);
       }
     } catch (error) {
       toast.show({
@@ -1150,7 +1142,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, savingShare, shareSlug, toast]);
+  }, [isPublic, persist, router, savingShare, shareSlug, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;

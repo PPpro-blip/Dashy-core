@@ -14,7 +14,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { useParams } from "next/navigation";
 import { getProjectByShareSlug, type DCodeProject } from "@/lib/dcode";
-import { DCodeWorkspace } from "@/components/dcode/DCodeWorkspace";
+import { ShareHub } from "@/components/share/ShareHub";
 import { CodeIcon, GlobeIcon, LoaderIcon } from "@/components/icons";
 
 interface LoadState {
@@ -110,7 +110,12 @@ export default function DCodeSharePage() {
             </div>
           </div>
         ) : (
-          <DCodeWorkspace project={state.project} readOnly />
+          <ShareHub
+            title={state.project.title}
+            description={state.project.description}
+            url={`${typeof window !== "undefined" ? window.location.origin : ""}/d-code/share/${state.project.shareSlug ?? shareSlug}`}
+            fileCount={state.project.files.length}
+          />
         )}
       </main>
     </div>
