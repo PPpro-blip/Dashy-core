@@ -78,6 +78,13 @@ export interface DCodeProject {
   createdAt: string;
   updatedAt: string;
   /**
+   * Source Control repo binding (see migration 20260901000000). All three
+   * are null until the user binds this project to a GitHub repository.
+   */
+  githubRepoFullName: string | null;
+  githubDefaultBranch: string | null;
+  githubLastSyncedSha: string | null;
+  /**
    * Names of stored files that were dropped on read because they are
    * archives/executables/lockfiles or raw (non-encoded) binaries. Populated
    * so the UI can tell the user why a file they imported earlier is no
@@ -93,6 +100,13 @@ export interface DCodeProjectDraft {
   files: DCodeFile[];
 }
 
+/** GitHub repo binding written to the project row (nullable columns). */
+export interface DCodeGithubBind {
+  fullName?: string | null;
+  defaultBranch?: string | null;
+  lastSyncedSha?: string | null;
+}
+
 /** Patch accepted by updateProject — only provided fields change. */
 export interface DCodeProjectPatch {
   title?: string;
@@ -100,6 +114,8 @@ export interface DCodeProjectPatch {
   language?: string;
   files?: DCodeFile[];
   isPublic?: boolean;
+  /** Source Control binding — only provided sub-fields change. */
+  github?: DCodeGithubBind;
 }
 
 interface DCodeProjectRow {
@@ -111,6 +127,9 @@ interface DCodeProjectRow {
   files: unknown;
   is_public: boolean;
   share_slug: string | null;
+  github_repo_full_name: string | null;
+  github_default_branch: string | null;
+  github_last_synced_sha: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -368,6 +387,9 @@ function rowToProject(row: DCodeProjectRow): DCodeProject {
     files,
     isPublic: row.is_public,
     shareSlug: row.share_slug ?? null,
+    githubRepoFullName: row.github_repo_full_name ?? null,
+    githubDefaultBranch: row.github_default_branch ?? null,
+    githubLastSyncedSha: row.github_last_synced_sha ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(skipped.length > 0 ? { skippedFiles: skipped } : {}),
@@ -505,6 +527,16 @@ export async function updateProject(
   if (patch.language !== undefined) payload.language = patch.language;
   if (patch.files !== undefined) payload.files = safeFilesPayload(patch.files);
   if (patch.isPublic !== undefined) payload.is_public = patch.isPublic;
+  // Source Control binding — nullable columns, only sub-fields provided
+  // are written (a null value is a real "unbind").
+  if (patch.github !== undefined) {
+    if (patch.github.fullName !== undefined)
+      payload.github_repo_full_name = patch.github.fullName;
+    if (patch.github.defaultBranch !== undefined)
+      payload.github_default_branch = patch.github.defaultBranch;
+    if (patch.github.lastSyncedSha !== undefined)
+      payload.github_last_synced_sha = patch.github.lastSyncedSha;
+  }
 
   const { data, error } = await supabase
     .from("dcode_projects")
