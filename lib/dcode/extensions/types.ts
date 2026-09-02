@@ -3,20 +3,23 @@
  *
  * Dashy Extensions are the CURATED, web-safe extension format for D-Code.
  * They are NOT VS Code .vsix packages and there is no Microsoft Marketplace
- * integration. v1 ships a code-first built-in registry
- * (lib/dcode/extensions/registry.ts) with first-party extensions; a
- * community marketplace table is explicitly out of scope.
+ * (or Open VSX) integration — a real .vsix is a Node/desktop artifact and
+ * cannot run inside a browser tab. Extensions here are plain in-process JS
+ * modules that we control, exporting a manifest plus
+ * activate(context)/deactivate() — the same lifecycle idea as VS Code, but:
  *
- * An extension is a plain module exporting a manifest plus
- * activate(context)/deactivate() — the same lifecycle idea as VS Code,
- * but the entire runtime is in-process JS that we control:
- *
- *   - no arbitrary host access (no shell, no file system)
+ *   - no arbitrary host access (no real shell, no host file system, no RCE)
  *   - everything an extension can do goes through ExtensionContext
  *   - a crash in activate() is caught and never takes the IDE down
  */
 
+import type { Monaco, OnMount } from "@monaco-editor/react";
 import type { DCodeFile } from "@/lib/dcode";
+
+/** The live Monaco editor instance handed over on mount. */
+export type DCodeEditorInstance = Parameters<OnMount>[0];
+/** The live Monaco namespace handed over on mount. */
+export type DCodeMonacoNamespace = Monaco;
 
 /** A command contributed by an extension (shown in the Command Palette). */
 export interface ExtensionCommandContribution {
@@ -45,6 +48,8 @@ export interface ExtensionManifest {
   version: string;
   description: string;
   author: string;
+  /** Optional short emoji/glyph used as a card icon in Discover. */
+  icon?: string;
   categories?: string[];
   contributes?: ExtensionContributes;
   /** e.g. ["*"] — reserved for future lazy activation. */
@@ -87,6 +92,26 @@ export interface DCodeWorkspaceApi {
   finishAiOutput(): void;
   /** Flushes the active buffer through the existing save helper. */
   saveActiveFile(): Promise<void>;
+
+  /* ---- write access (agent / pair-coder apply) ---- */
+
+  /**
+   * Creates or overwrites a project file by name and opens it in Monaco.
+   * Returns the file id. This drives the existing autosave path — the
+   * Base64 binary/save gate is untouched.
+   */
+  writeFile(name: string, content: string, language?: string): string;
+  /** Replaces the active editor's current selection (Pair Coder apply). */
+  replaceSelection(text: string): boolean;
+  /** Replaces the entire active file buffer. */
+  setActiveFileContent(content: string): void;
+
+  /* ---- live Monaco access (autocomplete provider) ---- */
+
+  /** The live Monaco namespace once the editor mounted (else null). */
+  getMonaco(): DCodeMonacoNamespace | null;
+  /** The live editor instance once mounted (else null). */
+  getEditor(): DCodeEditorInstance | null;
 }
 
 /** UI affordances the host provides to extensions. */
@@ -101,6 +126,11 @@ export interface DCodeExtensionUi {
   ): Promise<T | null>;
   /** Small info toast. */
   notify(message: string): void;
+  /**
+   * Opens a host-provided side view by id (e.g. "agent-code",
+   * "pair-coder", "markdown-preview"). Unknown ids are ignored.
+   */
+  showView(viewId: string): void;
 }
 
 /** Per-extension persisted storage (namespaced localStorage). */
@@ -121,6 +151,8 @@ export interface ExtensionContext {
       handler: () => void | Promise<void>;
     }
   ): void;
+  /** Ids of the currently enabled (installed) extensions. */
+  getEnabled(): string[];
   workspace: DCodeWorkspaceApi;
   ui: DCodeExtensionUi;
   storage: ExtensionStorage;

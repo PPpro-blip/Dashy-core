@@ -54,7 +54,33 @@ import {
   readBlobAsText,
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
-import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import { MonacoEditor, type DCodeMonacoEditor } from "@/components/dcode/MonacoEditor";
+import { ActivityBar, type SideView } from "@/components/dcode/ActivityBar";
+import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import { SourceControlPanel } from "@/components/dcode/SourceControlPanel";
+import { CommandPalette, QuickPickModal } from "@/components/dcode/CommandPalette";
+import { AiOutputPanel, type AiOutputState } from "@/components/dcode/AiOutputPanel";
+import { AgentCodePanel } from "@/components/dcode/AgentCodePanel";
+import { PairCoderPanel } from "@/components/dcode/PairCoderPanel";
+import { MarkdownPreviewPanel } from "@/components/dcode/MarkdownPreviewPanel";
+import {
+  activateEnabledExtensions,
+  deactivateAllExtensions,
+  setExtensionEnabled as runtimeSetExtensionEnabled,
+  getEnabledExtensionIdsCached,
+  commandRegistry,
+  COMMANDS_CHANGED_EVENT,
+  type CommandDefinition,
+  type DCodeExtensionUiApi,
+} from "@/lib/dcode/extensions/runtime";
+import type {
+  DCodeWorkspaceApi,
+  QuickPickItem,
+} from "@/lib/dcode/extensions/types";
+import type { Monaco } from "@monaco-editor/react";
+import { formatText } from "@/lib/dcode/extensions/format";
+import { getStoredTheme, setStoredTheme } from "@/lib/dcode/extensions/storage";
+import type { GithubBind } from "@/lib/dcode/github";
 import { useToast } from "@/components/Toast";
 import {
   BracesIcon,
@@ -489,6 +515,42 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  /* ---------------------- IDE chrome (extensions) state ------------------ */
+
+  const [sideView, setSideView] = useState<SideView>("explorer");
+  const [enabledExtensions, setEnabledExtensions] = useState<string[]>([]);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteCommands, setPaletteCommands] = useState<CommandDefinition[]>([]);
+  const [quickPick, setQuickPick] = useState<{
+    title: string;
+    items: QuickPickItem[];
+    resolve: (item: QuickPickItem | null) => void;
+  } | null>(null);
+  const [editorTheme, setEditorTheme] = useState<string>(() => getStoredTheme());
+  const [aiOutput, setAiOutput] = useState<AiOutputState | null>(null);
+  /** Which right-hand extension view is open (agent-code, pair-coder, …). */
+  const [extView, setExtView] = useState<string | null>(null);
+  /** GitHub bind for the Source Control panel. */
+  const [githubBind, setGithubBind] = useState<GithubBind | null>(
+    project?.githubRepoFullName
+      ? {
+          fullName: project.githubRepoFullName,
+          defaultBranch: project.githubDefaultBranch ?? "main",
+          lastSyncedSha: project.githubLastSyncedSha ?? null,
+        }
+      : null
+  );
+  const [commitFocusSignal] = useState(0);
+
+  /** Live Monaco handles (populated on editor mount) for extensions. */
+  const monacoRef = useRef<Monaco | null>(null);
+  const editorInstanceRef = useRef<DCodeMonacoEditor | null>(null);
+  const selectionRef = useRef<string>("");
+  /** Ref mirror of markDirty / handleSelectFile so the stable extension API
+   * always calls the freshest implementation. */
+  const markDirtyRef = useRef<() => void>(() => {});
+  const selectFileRef = useRef<(id: string) => void>(() => {});
+
   /**
    * Latest content seen from the Monaco editor for the ACTIVE file. Monaco
    * reports changes asynchronously; keeping the newest buffer here lets us
@@ -507,6 +569,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
     [files, activeFileId]
   );
+
+  /** Ref mirror of the active file id so the (stable) extension API never
+   * closes over a stale id after a tab switch. */
+  const activeFileIdRef = useRef(activeFileId);
+  useEffect(() => {
+    activeFileIdRef.current = activeFileId;
+  }, [activeFileId]);
 
   /**
    * Ingest guard for seed state (chat hand-off, an old project row, a draft
@@ -1312,6 +1381,343 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     [closeGitHubModal, importingRepo, markDirty, persist, toast]
   );
 
+  /* ----------------------- extensions: workspace API --------------------- */
+
+  // Keep ref mirrors current so the STABLE workspace API (built once, captured
+  // by extensions at activation) always calls the freshest React logic.
+  useEffect(() => {
+    markDirtyRef.current = markDirty;
+    selectFileRef.current = handleSelectFile;
+  }, [markDirty, handleSelectFile]);
+
+  const activeFileFromRefs = useCallback((): DCodeFile | null => {
+    const bufId = editorBufferRef.current?.fileId;
+    const id = bufId || activeFileIdRef.current;
+    return (
+      latestRef.current.files.find((f) => f.id === id) ??
+      latestRef.current.files.find((f) => f.id === activeFileIdRef.current) ??
+      latestRef.current.files[0] ??
+      null
+    );
+  }, []);
+
+  /**
+   * Stable workspace API handed to every extension + AI panel. Built ONCE
+   * (empty deps) and reads all mutable state through refs, so a command
+   * registered at activation never sees stale files/selection after edits.
+   */
+  const workspaceApi = useMemo<DCodeWorkspaceApi>(() => {
+    return {
+      getActiveFile: () => activeFileFromRefs(),
+      getFiles: () => latestRef.current.files,
+      getSelectedText: () => selectionRef.current || null,
+      openFile: (fileId) => selectFileRef.current(fileId),
+      applyTheme: (themeId) => {
+        setStoredTheme(themeId);
+        setEditorTheme(themeId);
+        monacoRef.current?.editor.setTheme(themeId);
+      },
+      formatActiveFile: async () => {
+        const file = activeFileFromRefs();
+        if (!file) {
+          toast.show({ type: "info", title: "Nothing to format", message: "Open a file first." });
+          return false;
+        }
+        if (file.content.startsWith("data:")) return false;
+        const buffer = editorBufferRef.current;
+        const source = buffer && buffer.fileId === file.id ? buffer.content : file.content;
+        const result = await formatText(file.name, source);
+        if (!result.ok || result.text === undefined) {
+          toast.show({
+            type: "error",
+            title: "Format failed",
+            message: result.error ?? "Could not format this file.",
+          });
+          return false;
+        }
+        if (result.text === source) {
+          toast.show({ type: "info", title: "Already formatted", message: `${file.name} is clean.` });
+          return true;
+        }
+        editorBufferRef.current = { fileId: file.id, content: result.text };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: result.text! } : f))
+        );
+        markDirtyRef.current();
+        toast.show({ type: "success", title: "Formatted", message: `${file.name} formatted with Prettier.` });
+        return true;
+      },
+      getUserId: async () => {
+        try {
+          const supabase = createClient();
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+          return user?.id ?? null;
+        } catch {
+          return null;
+        }
+      },
+      showAiOutput: (title) => setAiOutput({ title, content: "", running: true }),
+      appendAiOutput: (text) =>
+        setAiOutput((prev) =>
+          prev ? { ...prev, content: prev.content + text } : { title: "DashyAI", content: text, running: true }
+        ),
+      finishAiOutput: () =>
+        setAiOutput((prev) => (prev ? { ...prev, running: false } : prev)),
+      saveActiveFile: async () => {
+        await persistRef.current("manual");
+      },
+      writeFile: (name, content, language) => {
+        const clean = name.trim();
+        const existing = latestRef.current.files.find(
+          (f) => f.name.toLowerCase() === clean.toLowerCase()
+        );
+        if (existing) {
+          editorBufferRef.current = { fileId: existing.id, content };
+          setFiles((prev) =>
+            prev.map((f) => (f.id === existing.id ? { ...f, content } : f))
+          );
+          setActiveFileId(existing.id);
+          markDirtyRef.current();
+          return existing.id;
+        }
+        const file: DCodeFile = {
+          id: newId(),
+          name: clean,
+          language: language || languageFromFilename(clean),
+          content,
+        };
+        setFiles((prev) => [...prev, file]);
+        setActiveFileId(file.id);
+        markDirtyRef.current();
+        return file.id;
+      },
+      replaceSelection: (text) => {
+        const editor = editorInstanceRef.current;
+        if (!editor) return false;
+        const selection = editor.getSelection();
+        if (!selection || selection.isEmpty()) return false;
+        editor.executeEdits("dashy.pair", [
+          { range: selection, text, forceMoveMarkers: true },
+        ]);
+        editor.focus();
+        return true;
+      },
+      setActiveFileContent: (content) => {
+        const file = activeFileFromRefs();
+        if (!file) return;
+        editorBufferRef.current = { fileId: file.id, content };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content } : f))
+        );
+        markDirtyRef.current();
+      },
+      getMonaco: () => monacoRef.current,
+      getEditor: () => editorInstanceRef.current,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ----------------------- extensions: UI api + palette ------------------ */
+
+  const extensionUi = useMemo<DCodeExtensionUiApi>(
+    () => ({
+      showQuickPick: (items, title) =>
+        new Promise((resolve) => {
+          setQuickPick({
+            title: title ?? "Select",
+            items,
+            resolve: (item) => {
+              setQuickPick(null);
+              resolve(item as (typeof items)[number] | null);
+            },
+          });
+        }),
+      notify: (message) => toast.show({ type: "info", title: "Extensions", message }),
+      showView: (viewId) => {
+        if (viewId === "extensions") {
+          setSideView("extensions");
+          return;
+        }
+        setExtView(viewId);
+      },
+    }),
+    [toast]
+  );
+
+  /** Refresh the palette command list from the shared registry. */
+  const refreshCommands = useCallback(() => {
+    setPaletteCommands(commandRegistry.getAll());
+  }, []);
+
+  /* Activate enabled extensions once on mount (read-only share view skips). */
+  useEffect(() => {
+    if (readOnly) return;
+    let cancelled = false;
+    void (async () => {
+      await activateEnabledExtensions(workspaceApi, extensionUi);
+      if (cancelled) return;
+      setEnabledExtensions(getEnabledExtensionIdsCached());
+      refreshCommands();
+    })();
+    const onChanged = () => refreshCommands();
+    window.addEventListener(COMMANDS_CHANGED_EVENT, onChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(COMMANDS_CHANGED_EVENT, onChanged);
+      void deactivateAllExtensions();
+    };
+    // Mount-only: the API/ui use refs internally so re-activation isn't needed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly]);
+
+  /** Toggle (install/uninstall) an extension live. */
+  const handleToggleExtension = useCallback(
+    async (id: string, enabled: boolean) => {
+      await runtimeSetExtensionEnabled(id, enabled, workspaceApi, extensionUi);
+      setEnabledExtensions(getEnabledExtensionIdsCached());
+      refreshCommands();
+      toast.show({
+        type: enabled ? "success" : "info",
+        title: enabled ? "Installed" : "Uninstalled",
+        message: `${id} ${enabled ? "enabled — its commands are in the palette." : "disabled."}`,
+      });
+    },
+    [extensionUi, refreshCommands, toast, workspaceApi]
+  );
+
+  const runCommand = useCallback((command: CommandDefinition) => {
+    setPaletteOpen(false);
+    void commandRegistry.execute(command.id);
+  }, []);
+
+  /* Ctrl/Cmd+Shift+P opens the Command Palette. */
+  useEffect(() => {
+    if (readOnly) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "p"
+      ) {
+        event.preventDefault();
+        refreshCommands();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [readOnly, refreshCommands]);
+
+  /* Core (non-extension) D-Code commands live in the same registry so the
+   * palette is useful out of the box. Registered once on mount. */
+  useEffect(() => {
+    if (readOnly) return;
+    const core: CommandDefinition[] = [
+      {
+        id: "dcode.view.explorer",
+        title: "Show Explorer",
+        category: "View",
+        handler: () => setSideView("explorer"),
+      },
+      {
+        id: "dcode.view.scm",
+        title: "Show Source Control",
+        category: "View",
+        handler: () => setSideView("scm"),
+      },
+      {
+        id: "dcode.view.extensions",
+        title: "Show Extensions",
+        category: "View",
+        handler: () => setSideView("extensions"),
+      },
+      {
+        id: "dcode.file.save",
+        title: "Save",
+        category: "File",
+        handler: () => void persistRef.current("manual"),
+      },
+      {
+        id: "dcode.view.terminal",
+        title: "Toggle Terminal",
+        category: "View",
+        handler: () => setTerminalOpen((open) => !open),
+      },
+      {
+        id: "dcode.file.new",
+        title: "New File",
+        category: "File",
+        handler: () => {
+          setSideView("explorer");
+          setAddingFile(true);
+        },
+      },
+    ];
+    for (const cmd of core) commandRegistry.register(cmd);
+    refreshCommands();
+    return () => {
+      for (const cmd of core) commandRegistry.unregister(cmd.id);
+    };
+  }, [readOnly, refreshCommands]);
+
+  /* Persist the GitHub bind onto the project row (Source Control). */
+  const handleGithubBind = useCallback(
+    async (bind: GithubBind | null) => {
+      setGithubBind(bind);
+      const id = latestRef.current.projectId;
+      if (!id) return;
+      try {
+        await updateProject(id, {
+          github: {
+            fullName: bind?.fullName ?? null,
+            defaultBranch: bind?.defaultBranch ?? null,
+            lastSyncedSha: bind?.lastSyncedSha ?? null,
+          },
+        });
+      } catch {
+        toast.show({
+          type: "error",
+          title: "Bind not saved",
+          message: "Could not persist the repository binding.",
+        });
+      }
+    },
+    [toast]
+  );
+
+  const handleGithubPull = useCallback(
+    (pulledFiles: DCodeFile[], syncedSha: string) => {
+      setFiles(pulledFiles);
+      setActiveFileId(pulledFiles[0]?.id ?? "");
+      setGithubBind((prev) => (prev ? { ...prev, lastSyncedSha: syncedSha } : prev));
+      markDirty();
+    },
+    [markDirty]
+  );
+
+  const handleGithubConnect = useCallback(() => {
+    void (async () => {
+      try {
+        const supabase = createClient();
+        await supabase.auth.signInWithOAuth({
+          provider: "github",
+          options: {
+            scopes: "repo",
+            redirectTo: typeof window !== "undefined" ? window.location.href : undefined,
+          },
+        });
+      } catch {
+        toast.show({
+          type: "error",
+          title: "GitHub sign-in failed",
+          message: "Could not start the GitHub OAuth flow.",
+        });
+      }
+    })();
+  }, [toast]);
+
   /* ------------------------------ save status ----------------------------- */
 
   const statusLabel = () => {
@@ -1488,8 +1894,47 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         {/* Split: editor body gets 70% (flex-7) when the terminal is open,
             otherwise it fills the whole remaining column. */}
         <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
-        {/* File tree */}
-        <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+        {/* Activity bar — Explorer / Source Control / Extensions */}
+        {!readOnly && (
+          <ActivityBar
+            view={sideView}
+            onSelect={setSideView}
+            scmChangeCount={0}
+            enabledExtensionCount={enabledExtensions.length}
+          />
+        )}
+
+        {/* Source Control panel */}
+        {!readOnly && sideView === "scm" && (
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <SourceControlPanel
+              files={files}
+              bind={githubBind}
+              connected={githubConnected}
+              onConnect={handleGithubConnect}
+              onBind={handleGithubBind}
+              onPull={handleGithubPull}
+              commitFocusSignal={commitFocusSignal}
+            />
+          </aside>
+        )}
+
+        {/* Extensions panel (Installed + Discover) */}
+        {!readOnly && sideView === "extensions" && (
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <ExtensionsPanel
+              enabled={enabledExtensions}
+              onToggle={(id, enabled) => void handleToggleExtension(id, enabled)}
+            />
+          </aside>
+        )}
+
+        {/* File tree (Explorer) */}
+        <aside
+          className={`${
+            !readOnly && sideView !== "explorer" ? "hidden" : "flex"
+          } min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40`}
+        >
           <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
             Files
           </p>
@@ -1722,8 +2167,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   key={`${activeFile.id}:${activeFile.language}`}
                   value={activeFile.content}
                   language={activeFile.language}
+                  theme={editorTheme}
                   onChange={readOnly ? undefined : updateActiveContent}
                   readOnly={readOnly}
+                  onEditorReady={(editor, monaco) => {
+                    editorInstanceRef.current = editor;
+                    monacoRef.current = monaco;
+                  }}
+                  onSelectionChange={(text) => {
+                    selectionRef.current = text;
+                  }}
                 />
               )
             ) : (
@@ -1759,7 +2212,23 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
               </div>
             )}
           </div>
+
+          {/* DashyAI output drawer (Explain / Refactor results). */}
+          {aiOutput && (
+            <AiOutputPanel output={aiOutput} onClose={() => setAiOutput(null)} />
+          )}
         </div>
+
+        {/* Extension side panels (Agent Code / Pair Coder / Markdown Preview) */}
+        {!readOnly && extView === "agent-code" && (
+          <AgentCodePanel api={workspaceApi} onClose={() => setExtView(null)} />
+        )}
+        {!readOnly && extView === "pair-coder" && (
+          <PairCoderPanel api={workspaceApi} onClose={() => setExtView(null)} />
+        )}
+        {!readOnly && extView === "markdown-preview" && (
+          <MarkdownPreviewPanel api={workspaceApi} onClose={() => setExtView(null)} />
+        )}
         </div>
 
         {/* Mock terminal drawer — bottom 30% of the workspace when open. */}
@@ -1932,6 +2401,25 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           </div>
         </>
+      )}
+
+      {/* Command Palette (Ctrl/Cmd+Shift+P) — commands from enabled extensions. */}
+      {!readOnly && (
+        <CommandPalette
+          open={paletteOpen}
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+          onRun={runCommand}
+        />
+      )}
+
+      {/* Generic quick pick (theme picker, extension toggles, …). */}
+      {quickPick && (
+        <QuickPickModal
+          title={quickPick.title}
+          items={quickPick.items}
+          onSelect={quickPick.resolve}
+        />
       )}
     </div>
   );

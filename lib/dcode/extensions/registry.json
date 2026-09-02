@@ -1,5 +1,0 @@
-[
-  {"id":"dashy.cline","name":"Agent Code (Cline-style)","author":"DashyCore","description":"A web-safe coding-agent companion that reads in-memory files, previews edits, and simulates terminal actions.","tags":["agent","coding"],"version":"1.0.0","entry":"builtin:agent-code"},
-  {"id":"dashy.roo","name":"Pair Coder (Roo-style)","author":"DashyCore","description":"Discuss the current selection with a web-native pair-coding assistant and review suggestions before applying them.","tags":["pairing","coding"],"version":"1.0.0","entry":"builtin:pair-coder"},
-  {"id":"dashy.autocomplete","name":"Ghost Suggestions","author":"DashyCore","description":"Optional debounced inline completions for Monaco. Disabled by default.","tags":["autocomplete","monaco"],"version":"1.0.0","entry":"builtin:autocomplete"}
-]
