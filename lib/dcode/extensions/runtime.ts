@@ -10,7 +10,7 @@
  * and try/catch isolation so one broken extension never crashes the IDE.
  */
 
-import { BUILTIN_EXTENSIONS } from "./registry";
+import { BUILTIN_EXTENSIONS, DEFAULT_DISABLED_IDS } from "./registry";
 import {
   extensionStorageGet,
   extensionStorageSet,
@@ -96,6 +96,8 @@ export interface DCodeExtensionUiApi {
     title?: string
   ): Promise<T | null>;
   notify(message: string): void;
+  /** Opens a host-provided side view by id (agent-code, pair-coder, …). */
+  showView(viewId: string): void;
 }
 
 const activeModules = new Map<string, ExtensionModule>();
@@ -105,7 +107,8 @@ let enabledIdsCache: string[] | null = null;
 function enabledIds(): string[] {
   if (!enabledIdsCache) {
     enabledIdsCache = getEnabledExtensionIds(
-      BUILTIN_EXTENSIONS.map((m) => m.manifest.id)
+      BUILTIN_EXTENSIONS.map((m) => m.manifest.id),
+      DEFAULT_DISABLED_IDS
     );
   }
   return enabledIdsCache;
@@ -127,6 +130,7 @@ function buildContext(
     registerCommand(id, def) {
       commandRegistry.register({ id, title: def.title, category: def.category, handler: def.handler });
     },
+    getEnabled: () => getEnabledExtensionIdsCached(),
     workspace,
     ui,
     storage: {
@@ -199,7 +203,8 @@ export async function setExtensionEnabled(
   if (!mod) return;
   setExtensionEnabledState(id, enabled);
   enabledIdsCache = getEnabledExtensionIds(
-    BUILTIN_EXTENSIONS.map((m) => m.manifest.id)
+    BUILTIN_EXTENSIONS.map((m) => m.manifest.id),
+    DEFAULT_DISABLED_IDS
   );
   if (enabled) {
     await activateOne(mod, workspace, ui);

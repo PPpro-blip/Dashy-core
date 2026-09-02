@@ -1,33 +1,36 @@
-import registry from "./registry.json";
+/**
+ * DashyCore v7 — Dashy Extensions: public barrel.
+ *
+ * One import site for the extension system. The honest banner copy lives here
+ * so the ExtensionsPanel and any docs share one wording.
+ */
 
-export interface DashyExtension {
-  id: string;
-  name: string;
-  author: string;
-  description: string;
-  tags: string[];
-  version: string;
-  entry: string;
-}
+export const EXTENSIONS_HONEST_BANNER =
+  "Web-safe Dashy Extensions. Desktop-only VS Code extensions (Cline, Roo, .vsix) cannot run in the browser — we ship native equivalents below.";
 
-export const EXTENSIONS_STORAGE_KEY = "dashycore:dcode:extensions:v1";
-export const EXTENSIONS_HONEST_COPY =
-  "Curated web-safe extensions. VS Code .vsix and Node-only extensions like Cline/Roo Code do not run in a browser IDE — Dashy ships web-native equivalents below.";
-
-export const extensionRegistry = registry as DashyExtension[];
-
-export function getEnabledExtensionIds(): string[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const value = JSON.parse(window.localStorage.getItem(EXTENSIONS_STORAGE_KEY) || "[]");
-    return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
-  } catch { return []; }
-}
-
-export function setExtensionEnabled(id: string, enabled: boolean): string[] {
-  const next = new Set(getEnabledExtensionIds());
-  if (enabled) next.add(id); else next.delete(id);
-  const ids = [...next];
-  if (typeof window !== "undefined") window.localStorage.setItem(EXTENSIONS_STORAGE_KEY, JSON.stringify(ids));
-  return ids;
-}
+export { BUILTIN_EXTENSIONS, DEFAULT_DISABLED_IDS, builtinExtensionById } from "./registry";
+export {
+  DISCOVER_CATALOG,
+  CATALOG_CATEGORIES,
+  catalogEntryById,
+  getRemoteCatalogUrl,
+  type CatalogEntry,
+  type CatalogCategory,
+} from "./catalog";
+export {
+  commandRegistry,
+  activateEnabledExtensions,
+  deactivateAllExtensions,
+  setExtensionEnabled,
+  getEnabledExtensionIdsCached,
+  COMMANDS_CHANGED_EVENT,
+  type CommandDefinition,
+  type DCodeExtensionUiApi,
+} from "./runtime";
+export type {
+  ExtensionManifest,
+  ExtensionModule,
+  ExtensionContext,
+  DCodeWorkspaceApi,
+  QuickPickItem,
+} from "./types";

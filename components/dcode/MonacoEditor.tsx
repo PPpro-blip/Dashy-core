@@ -39,8 +39,10 @@ export interface MonacoEditorProps {
   readOnly?: boolean;
   /** Monaco theme id (must be a defined Dashy theme). */
   theme?: string;
-  /** Called once with the live Monaco editor instance (extensions). */
-  onEditorReady?: (editor: DCodeMonacoEditor) => void;
+  /** Called once with the live Monaco editor instance + namespace (extensions). */
+  onEditorReady?: (editor: DCodeMonacoEditor, monaco: Monaco) => void;
+  /** Fired whenever the editor's selection changes (selection text). */
+  onSelectionChange?: (selectedText: string) => void;
   /** Extra editor options (merged over the D-Code defaults). */
   options?: Record<string, unknown>;
   className?: string;
@@ -53,6 +55,7 @@ export function MonacoEditor({
   readOnly = false,
   theme,
   onEditorReady,
+  onSelectionChange,
   options,
   className,
 }: MonacoEditorProps) {
@@ -62,9 +65,18 @@ export function MonacoEditor({
     (editor, monaco) => {
       defineDashyThemes(monaco);
       monaco.editor.setTheme(themeId);
-      onEditorReady?.(editor);
+      if (onSelectionChange) {
+        editor.onDidChangeCursorSelection(() => {
+          const model = editor.getModel();
+          const selection = editor.getSelection();
+          onSelectionChange(
+            model && selection ? model.getValueInRange(selection) : ""
+          );
+        });
+      }
+      onEditorReady?.(editor, monaco);
     },
-    [onEditorReady, themeId]
+    [onEditorReady, onSelectionChange, themeId]
   );
 
   return (

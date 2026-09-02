@@ -8,6 +8,10 @@
  */
 
 const ENABLED_KEY = "dashy.dcode.extensions.enabled";
+/** Ids the host has already offered to this user (so a user-disabled
+ * extension is NOT silently re-enabled on the next load, while a brand-new
+ * built-in still defaults to enabled). */
+const SEEN_KEY = "dashy.dcode.extensions.seen";
 const THEME_KEY = "dashy.dcode.theme";
 const FORMAT_ON_SAVE_KEY = "dashy.dcode.prettier.formatOnSave";
 
@@ -34,18 +38,44 @@ function writeJson(key: string, value: unknown): void {
 }
 
 /**
- * Ids of enabled extensions. Unknown ids are ignored by the host; missing
- * key means "all built-ins enabled" (the default for first-party packs).
+ * Ids of enabled extensions. Unknown ids are ignored by the host; a missing
+ * key means "all built-ins enabled except the ones that ship disabled by
+ * default" (e.g. Ghost Suggestions). Persisted as a JSON string array under
+ * `dashy.dcode.extensions.enabled`.
  */
-export function getEnabledExtensionIds(allIds: string[]): string[] {
+export function getEnabledExtensionIds(
+  allIds: string[],
+  defaultDisabled: string[] = []
+): string[] {
+  const off = new Set(defaultDisabled);
   const stored = readJson(ENABLED_KEY);
-  if (!Array.isArray(stored)) return [...allIds];
+  const seenRaw = readJson(SEEN_KEY);
+  const seen = new Set(
+    Array.isArray(seenRaw) ? seenRaw.filter((x): x is string => typeof x === "string") : []
+  );
+
+  if (!Array.isArray(stored)) {
+    // First run: everything on except the default-disabled set. Record that
+    // all current built-ins have now been offered.
+    writeJson(SEEN_KEY, [...allIds]);
+    return allIds.filter((id) => !off.has(id));
+  }
+
   const known = new Set(allIds);
   const enabled = stored.filter(
     (id): id is string => typeof id === "string" && known.has(id)
   );
-  // Newly shipped built-ins default to enabled.
-  for (const id of allIds) if (!enabled.includes(id)) enabled.push(id);
+  // Auto-enable only built-ins the user has never been offered (brand-new),
+  // and never a default-disabled one. A user-disabled extension stays off
+  // because it is already in `seen`.
+  const newlySeen: string[] = [];
+  for (const id of allIds) {
+    if (!seen.has(id)) {
+      newlySeen.push(id);
+      if (!enabled.includes(id) && !off.has(id)) enabled.push(id);
+    }
+  }
+  if (newlySeen.length > 0) writeJson(SEEN_KEY, [...seen, ...newlySeen]);
   return enabled;
 }
 
@@ -56,6 +86,12 @@ export function setExtensionEnabledState(id: string, enabled: boolean): void {
     ? [...new Set([...list, id])]
     : list.filter((x) => x !== id);
   writeJson(ENABLED_KEY, next);
+  // Mark seen so getEnabledExtensionIds never re-enables a user-disabled id.
+  const seenRaw = readJson(SEEN_KEY);
+  const seen = Array.isArray(seenRaw)
+    ? seenRaw.filter((x): x is string => typeof x === "string")
+    : [];
+  if (!seen.includes(id)) writeJson(SEEN_KEY, [...seen, id]);
 }
 
 /* ------------------------------- theme -------------------------------- */
