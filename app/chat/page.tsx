@@ -89,6 +89,12 @@ const ACTIONS = [
 
 const ACTIVE_CONVERSATION_KEY = "dashycore:active-conversation";
 
+/** True for the in-flight typing placeholder — never treat these as real replies. */
+function isPlaceholderAssistantContent(content: string): boolean {
+  const trimmed = content.trim();
+  return trimmed.length === 0 || trimmed === "..." || trimmed === "…";
+}
+
 function markActiveConversation(id: string | null): void {
   try {
     if (id) {
@@ -115,6 +121,9 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HistoryMessage[]>([]);
+  /** Serializes cloud/local saves so an empty placeholder cannot overwrite the final reply. */
+  const persistChainRef = useRef(Promise.resolve());
+  const persistGenerationRef = useRef(0);
   /** Title / creation time of the active conversation (cloud-agnostic). */
   const activeTitleRef = useRef<string>("New Chat");
   const activeCreatedAtRef = useRef<number>(Date.now());
@@ -178,6 +187,7 @@ export default function ChatPage() {
     abortControllerRef.current?.abort();
     setIsStreaming(false);
     setMessages([]);
+    messagesRef.current = [];
     setStatuses([]);
     setInput("");
     setActiveConversationId(null);
@@ -197,7 +207,13 @@ export default function ChatPage() {
     abortControllerRef.current?.abort();
     setIsStreaming(false);
     setStatuses([]);
-    setMessages(conversation.messages);
+    const hydrated = conversation.messages.map((m) =>
+      m.role === "assistant" && isPlaceholderAssistantContent(m.content)
+        ? { ...m, content: "" }
+        : m
+    );
+    setMessages(hydrated);
+    messagesRef.current = hydrated;
     setActiveConversationId(conversation.id);
     markActiveConversation(conversation.id);
     activeTitleRef.current = conversation.title;
@@ -252,6 +268,7 @@ export default function ChatPage() {
   const persistConversation = useCallback(
     (conversationId: string, msgs: HistoryMessage[], model: string, title?: string) => {
       if (title) activeTitleRef.current = title;
+      const generation = ++persistGenerationRef.current;
       const conversation: Conversation = {
         id: conversationId,
         title: activeTitleRef.current,
@@ -260,8 +277,14 @@ export default function ChatPage() {
         createdAt: activeCreatedAtRef.current,
         updatedAt: Date.now(),
       };
-      // Cloud-first: Supabase when signed in, localStorage when signed out.
-      void saveConversationAsync(conversation);
+      // Serialize writes and drop stale snapshots so the empty typing
+      // placeholder cannot race past the final streamed assistant text.
+      persistChainRef.current = persistChainRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (generation !== persistGenerationRef.current) return;
+          await saveConversationAsync(conversation);
+        });
       return conversation;
     },
     []
@@ -289,8 +312,17 @@ export default function ChatPage() {
       abortControllerRef.current = controller;
       setStatuses([]);
 
+      const applyAssistantContent = (content: string) => {
+        const next = messagesRef.current.map((m) =>
+          m.id === assistantMessageId ? { ...m, content } : m
+        );
+        messagesRef.current = next;
+        setMessages(next);
+        return next;
+      };
+
       try {
-        await sendChatMessage(
+        const result = await sendChatMessage(
           {
             message: promptText,
             model,
@@ -303,13 +335,15 @@ export default function ChatPage() {
           },
           {
             onDelta: (delta) => {
-              setMessages((prev) =>
-                prev.map((m) =>
+              setMessages((prev) => {
+                const next = prev.map((m) =>
                   m.id === assistantMessageId
                     ? { ...m, content: m.content + delta }
                     : m
-                )
-              );
+                );
+                messagesRef.current = next;
+                return next;
+              });
             },
             onStatus: (next) => setStatuses(next.slice(-4)),
             onDone: () => {
@@ -317,6 +351,10 @@ export default function ChatPage() {
             },
           }
         );
+        // Source of truth: the aggregated stream result, not the typing placeholder.
+        if (!isPlaceholderAssistantContent(result.content)) {
+          applyAssistantContent(result.content);
+        }
       } catch (error) {
         if (error instanceof ChatClientError && error.kind === "aborted") {
           // User pressed stop — keep whatever has streamed so far.
@@ -325,18 +363,12 @@ export default function ChatPage() {
             error instanceof ChatClientError
               ? error.message
               : "Connection error to dashy-flow-state. Please try again.";
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMessageId
-                ? {
-                    ...m,
-                    content:
-                      m.content.length > 0
-                        ? `${m.content}\n\n> ⚠️ ${message}`
-                        : `⚠️ ${message}`,
-                  }
-                : m
-            )
+          const current =
+            messagesRef.current.find((m) => m.id === assistantMessageId)?.content ?? "";
+          applyAssistantContent(
+            current.length > 0 && !isPlaceholderAssistantContent(current)
+              ? `${current}\n\n> ⚠️ ${message}`
+              : `⚠️ ${message}`
           );
           toast.error("Message failed", message);
         }
@@ -380,6 +412,7 @@ export default function ChatPage() {
 
       const withUserMessage = [...messages, userMessage, assistantMessage];
       setMessages(withUserMessage);
+      messagesRef.current = withUserMessage;
 
       // FULL-HISTORY payload: every prior turn of this conversation
       // (user + assistant, in send order) plus the message being sent
@@ -396,7 +429,9 @@ export default function ChatPage() {
         ? titleFromContent(firstUserMessage.content)
         : titleFromContent(promptText);
       emitChatTitle(title);
-      persistConversation(conversationId, withUserMessage, selectedModel, title);
+      // Persist the user turn immediately, but never write the empty typing
+      // placeholder — the final aggregated assistant text is saved on stream end.
+      persistConversation(conversationId, [...messages, userMessage], selectedModel, title);
 
       let authToken: string | undefined;
       try {
@@ -449,13 +484,20 @@ export default function ChatPage() {
         .filter((m) => m.id !== assistantMessageId)
         .concat(freshAssistant);
       setMessages(withoutOld);
+      messagesRef.current = withoutOld;
 
       const conversationId = activeConversationId ?? newConversationId();
       if (!activeConversationId) {
         setActiveConversationId(conversationId);
         markActiveConversation(conversationId);
       }
-      persistConversation(conversationId, withoutOld, selectedModel);
+      persistConversation(
+        conversationId,
+        withoutOld.filter(
+          (m) => m.role !== "assistant" || !isPlaceholderAssistantContent(m.content)
+        ),
+        selectedModel
+      );
 
       // FULL-HISTORY payload for regeneration: every turn before the one
       // being regenerated, ending with its user message — identical to
@@ -655,11 +697,11 @@ export default function ChatPage() {
       ) : (
         /* ---------------------------- MESSAGE THREAD ------------------------ */
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
-          {messages.map((message) => (
+          {messages.map((message, index) => (
             <MessageRow
               key={message.id}
               message={message}
-              isStreaming={isStreaming}
+              isStreaming={isStreaming && index === messages.length - 1}
               statuses={statuses}
               onCopy={() => void handleCopy(message.content)}
               onOpenInDcode={handleOpenInDcode}
@@ -753,8 +795,9 @@ function MessageRow({
 }) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
-  const isAssistantEmpty = !isUser && message.content.length === 0;
+  const isAssistantEmpty = !isUser && isPlaceholderAssistantContent(message.content);
   const isThisStreaming = !isUser && isStreaming;
+  const showTypingLoader = isAssistantEmpty && isThisStreaming;
   const modelLabel = message.model ? getModelById(message.model).label : null;
 
   const handleCopyClick = async () => {
@@ -801,12 +844,29 @@ function MessageRow({
           <div className="rounded-2xl rounded-tr-sm border border-cyan-400/15 bg-cyan-500/10 px-4 py-3 text-sm leading-relaxed text-zinc-100">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
-        ) : isAssistantEmpty ? (
+        ) : showTypingLoader ? (
           <div className="rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
             <div className="flex min-h-[20px] items-center gap-1.5 py-0.5">
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400" />
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:0.15s]" />
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:0.3s]" />
+            </div>
+          </div>
+        ) : isAssistantEmpty ? (
+          <div className="relative rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
+            <p className="text-sm italic text-zinc-500">
+              This reply was not saved. Regenerate to try again.
+            </p>
+            <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 opacity-0 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100">
+              <button
+                type="button"
+                onClick={onRegenerate}
+                title="Regenerate response"
+                aria-label="Regenerate response"
+                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+              >
+                <RefreshIcon className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
         ) : (
