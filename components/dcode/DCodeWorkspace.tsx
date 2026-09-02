@@ -96,7 +96,7 @@ export interface DCodeWorkspaceProps {
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 
 /** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
-const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
+const VALID_FILENAME = /^[a-zA-Z0-9_\-\.\/]+$/;
 
 interface GithubRepo {
   full_name: string;
@@ -846,7 +846,11 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const validateFileName = useCallback(
     (name: string): boolean => {
       const isValid =
-        /^[a-zA-Z0-9_\-\.]+$/.test(name) && name.length > 0 && name.length <= 60;
+        VALID_FILENAME.test(name) &&
+        name.length > 0 && name.length <= 60 &&
+        !name.startsWith(".") && !name.endsWith(".") &&
+        !name.startsWith("/") && !name.endsWith("/") &&
+        !name.includes("//");
       if (isValid) return true;
       toast.show({
         type: "error",
@@ -969,8 +973,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         return;
       }
       setDeletingFileId(id);
-      // No confirm dialog in MVP — the file is recoverable via undo of your
-      // own edits only; keep it snappy but guard the last file (above).
+      if (!window.confirm(`Delete “${files.find((f) => f.id === id)?.name ?? "this file"}”? This cannot be undone.`)) {
+        setDeletingFileId(null);
+        return;
+      }
       window.setTimeout(() => {
         setFiles((prev) => {
           const index = prev.findIndex((f) => f.id === id);
@@ -1129,12 +1135,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         setIsPublic(true);
         setShareSlug(updated.shareSlug);
         const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
-        await navigator.clipboard.writeText(url);
-        toast.show({
-          type: "success",
-          title: "Public link copied",
-          message: "Anyone with the link can view this project.",
-        });
+        if (navigator.share) {
+          await navigator.share({ title: title || "D-Code project", text: "View my D-Code project", url });
+        } else {
+          await navigator.clipboard.writeText(url);
+          toast.show({ title: "Public link copied", message: "Anyone with the link can view this project." });
+        }
       } else if (shareSlug) {
         await navigator.clipboard.writeText(
           `${window.location.origin}/d-code/share/${shareSlug}`
@@ -1700,7 +1706,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                       : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
                   }`}
                 >
-                  {file.name}
+                  <span className="max-w-[24ch] truncate" title={file.name}>{file.name}</span>
                 </button>
               );
             })}

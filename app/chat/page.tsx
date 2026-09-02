@@ -527,7 +527,7 @@ export default function ChatPage() {
       const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
         prompt
       )}?width=1024&height=1024&nologo=true&seed=${Math.floor(
-        Math.random() * 100000
+        Date.now() + Math.floor(Math.random() * 100000)
       )}`;
 
       const userMessage: HistoryMessage = {
