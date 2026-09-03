@@ -1,56 +1,113 @@
 "use client";
 
 /**
- * DashyCore v7 — Dashy Agent (z.ai/glm-5) workspace.
+ * DashyCore v7 — Dashy Agent workspace (`/agents`).
  *
- * An interactive agent console that talks to the dashy-flow-state worker in
- * Agent Mode. Agent Mode returns a single JSON document (never SSE):
- *
- *   { success: true, mode: "agent", modelId, reply, memories: [], activity: [{ type, message, tool }] }
- *
- * The assistant reply is rendered as markdown; the `activity` timeline is
- * shown below it in an interactive, collapsible cyan "Agent Thought Log".
+ * Talks to dashy-flow-state in Agent Mode: a single JSON POST
+ * (`agentMode: true`, `userId` required, full `messages[]` thread).
+ * Never SSE. Never gameMode. Never Pollinations.
  */
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { createClient } from "@/lib/supabase/client";
 import {
+  AGENT_MODEL_ID,
   ChatClientError,
-  sendChatMessage,
+  sendAgentMessage,
   type AgentActivity,
+  type ChatMemory,
 } from "@/lib/chat-client";
+import { useToast } from "@/components/Toast";
 import {
   BotIcon,
   ChevronDownIcon,
-  CodeIcon,
   LoaderIcon,
   SendIcon,
   SparklesIcon,
+  SquareIcon,
 } from "@/components/icons";
 
-/** The agent model requested from the dashy-flow-state worker. */
-const AGENT_MODEL_ID = "z.ai/glm-5";
+const DISPLAY_MODEL = "z.ai/glm-5";
+const LOGIN_TOAST = "Please log in to use Agent mode";
 
 interface AgentTurn {
   role: "user" | "assistant";
   content: string;
   activity?: AgentActivity[];
+  memories?: ChatMemory[];
   modelId?: string;
   error?: string;
 }
 
+const STARTER_PROMPTS = [
+  {
+    label: "Search my docs for…",
+    prompt: "Search my docs for the most recent notes and summarize them.",
+  },
+  {
+    label: "Summarize what you know about…",
+    prompt: "Summarize what you know about me from memory.",
+  },
+  {
+    label: "What can you recall?",
+    prompt: "What do you remember about my projects?",
+  },
+];
+
+function storageKey(userId: string): string {
+  return `dashycore:agent-thread:${userId}`;
+}
+
+function loadThread(userId: string): AgentTurn[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(storageKey(userId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (turn): turn is AgentTurn =>
+        Boolean(turn) &&
+        (turn.role === "user" || turn.role === "assistant") &&
+        typeof turn.content === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveThread(userId: string, turns: AgentTurn[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(storageKey(userId), JSON.stringify(turns));
+  } catch {
+    // Best-effort persistence — quota / private mode.
+  }
+}
+
 export default function AgentsPage() {
+  const toast = useToast();
   const [turns, setTurns] = useState<AgentTurn[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [headerModel, setHeaderModel] = useState(DISPLAY_MODEL);
 
   const endRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const turnsRef = useRef<AgentTurn[]>([]);
+
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
 
   useEffect(() => {
     let cancelled = false;
@@ -60,11 +117,21 @@ export default function AgentsPage() {
         const {
           data: { session },
         } = await supabase.auth.getSession();
-        if (cancelled || !session?.user) return;
-        setUserId(session.user.id);
-        setAuthToken(session.access_token);
+        if (cancelled) return;
+        if (session?.user) {
+          setUserId(session.user.id);
+          setAuthToken(session.access_token);
+        } else {
+          setUserId(null);
+          setAuthToken(null);
+        }
       } catch {
-        // Auth is best-effort — Agent Mode still works with the session token.
+        if (!cancelled) {
+          setUserId(null);
+          setAuthToken(null);
+        }
+      } finally {
+        if (!cancelled) setAuthReady(true);
       }
     }
     void loadUser();
@@ -74,48 +141,111 @@ export default function AgentsPage() {
   }, []);
 
   useEffect(() => {
+    if (!userId) {
+      setHydrated(false);
+      return;
+    }
+    setTurns(loadThread(userId));
+    setHydrated(true);
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId || !hydrated) return;
+    saveThread(userId, turns);
+  }, [turns, userId, hydrated]);
+
+  useEffect(() => {
+    const last = [...turns].reverse().find((t) => t.role === "assistant" && t.modelId);
+    if (last?.modelId) setHeaderModel(last.modelId);
+  }, [turns]);
+
+  useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [turns, busy]);
 
-  const handleSend = useCallback(async () => {
-    const message = input.trim();
-    if (!message || busy) return;
-    setInput("");
-    setError(null);
-    setTurns((prev) => [...prev, { role: "user", content: message }]);
-    setBusy(true);
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 38), 160)}px`;
+  }, [input]);
 
-    try {
-      const result = await sendChatMessage({
-        message,
-        model: AGENT_MODEL_ID,
-        userId: userId ?? undefined,
-        authToken: authToken ?? undefined,
-        agentMode: true,
-      });
-      setTurns((prev) => [
-        ...prev,
-        {
+  const handleSend = useCallback(
+    async (preset?: string) => {
+      const message = (preset ?? input).trim();
+      if (!message || busy) return;
+
+      if (!authReady) return;
+      if (!userId) {
+        toast.error(LOGIN_TOAST);
+        setError(LOGIN_TOAST);
+        return;
+      }
+
+      setInput("");
+      setError(null);
+
+      const userTurn: AgentTurn = { role: "user", content: message };
+      const nextTurns = [...turnsRef.current, userTurn];
+      setTurns(nextTurns);
+      turnsRef.current = nextTurns;
+      setBusy(true);
+
+      const history = nextTurns
+        .filter((t) => !t.error && t.content.trim().length > 0)
+        .map((t) => ({ role: t.role, content: t.content }));
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      try {
+        const result = await sendAgentMessage({
+          message,
+          userId,
+          authToken: authToken ?? undefined,
+          history,
+          signal: controller.signal,
+          model: AGENT_MODEL_ID,
+        });
+        const assistant: AgentTurn = {
           role: "assistant",
           content: result.content,
           activity: result.activity,
+          memories: result.memories,
           modelId: result.modelId ?? AGENT_MODEL_ID,
-        },
-      ]);
-    } catch (err) {
-      const messageText =
-        err instanceof ChatClientError
-          ? err.message
-          : "Connection error to dashy-flow-state. Please try again.";
-      setError(messageText);
-      setTurns((prev) => [
-        ...prev,
-        { role: "assistant", content: "", error: messageText },
-      ]);
-    } finally {
-      setBusy(false);
-    }
-  }, [authToken, busy, input, userId]);
+        };
+        const withReply = [...turnsRef.current, assistant];
+        setTurns(withReply);
+        turnsRef.current = withReply;
+        if (assistant.modelId) setHeaderModel(assistant.modelId);
+      } catch (err) {
+        if (err instanceof ChatClientError && err.kind === "aborted") {
+          return;
+        }
+        const messageText =
+          err instanceof ChatClientError
+            ? err.message
+            : "Connection error to dashy-flow-state. Please try again.";
+        setError(messageText);
+        const failTurn: AgentTurn = {
+          role: "assistant",
+          content: "",
+          error: messageText,
+        };
+        const withError = [...turnsRef.current, failTurn];
+        setTurns(withError);
+        turnsRef.current = withError;
+      } finally {
+        abortRef.current = null;
+        setBusy(false);
+      }
+    },
+    [authReady, authToken, busy, input, toast, userId]
+  );
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -129,7 +259,6 @@ export default function AgentsPage() {
 
   return (
     <div className="mx-auto flex h-[calc(100vh-4rem)] w-full max-w-3xl flex-col px-6 py-6">
-      {/* Hero */}
       <div className="flex-shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-400/10 shadow-lg shadow-cyan-500/10">
@@ -137,19 +266,16 @@ export default function AgentsPage() {
           </div>
           <div className="min-w-0">
             <h1 className="text-lg font-semibold tracking-tight text-white">
-              Dashy Agent <span className="text-cyan-400">(z.ai/glm-5)</span>
+              Dashy Agent
             </h1>
-            <p className="text-xs text-zinc-500">
-              Agent Mode · multi-step reasoning · memory + tool activity log
-            </p>
+            <p className="truncate text-xs text-zinc-500">{headerModel}</p>
           </div>
         </div>
       </div>
 
-      {/* Conversation */}
       <div className="mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-5">
         {turns.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+          <div className="flex h-full flex-col items-center justify-center px-4 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-cyan-500/10">
               <SparklesIcon className="h-6 w-6 text-cyan-400" />
             </div>
@@ -157,46 +283,75 @@ export default function AgentsPage() {
               Ask the Dashy Agent anything
             </p>
             <p className="mt-1 max-w-sm text-xs leading-relaxed text-zinc-500">
-              It plans, searches memory, calls tools and returns one final
-              answer with a transparent thought log.
+              It searches your memory, then returns one answer with a
+              transparent activity log.
             </p>
+            <div className="mt-6 flex w-full max-w-md flex-col gap-2">
+              {STARTER_PROMPTS.map((item) => (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() => void handleSend(item.prompt)}
+                  disabled={busy}
+                  className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-4 py-2.5 text-left text-sm text-zinc-300 transition-colors hover:border-cyan-400/30 hover:bg-cyan-500/5 hover:text-cyan-200 disabled:opacity-50"
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
-          turns.map((turn, index) => (
-            <AgentTurnRow key={index} turn={turn} />
-          ))
+          turns.map((turn, index) => <AgentTurnRow key={index} turn={turn} />)
         )}
 
         {busy && (
           <div className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-xs text-zinc-500">
             <LoaderIcon className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-            Agent is thinking…
+            <span className="flex items-center gap-1.5">
+              Agent is thinking
+              <span className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:0.15s]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:0.3s]" />
+              </span>
+            </span>
           </div>
         )}
         <div ref={endRef} />
       </div>
 
-      {/* Composer */}
       <div className="flex-shrink-0 pt-4">
         <div className="flex items-end gap-2 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-2 focus-within:border-cyan-400/30">
           <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Message the Dashy Agent…"
             rows={1}
             disabled={busy}
-            className="max-h-40 min-h-[38px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
+            className="max-h-40 min-h-[38px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none disabled:opacity-60"
           />
-          <button
-            type="button"
-            onClick={() => void handleSend()}
-            disabled={!input.trim() || busy}
-            aria-label="Send to agent"
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-30 disabled:shadow-none"
-          >
-            <SendIcon className="h-4 w-4" />
-          </button>
+          {busy ? (
+            <button
+              type="button"
+              onClick={handleStop}
+              aria-label="Stop agent"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-red-400/30 bg-red-500/10 text-red-300 transition-colors hover:bg-red-500/20"
+            >
+              <SquareIcon className="h-4 w-4" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleSend()}
+              disabled={!input.trim() || busy}
+              aria-label="Send to agent"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-cyan-500 text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-30 disabled:shadow-none"
+            >
+              <SendIcon className="h-4 w-4" />
+            </button>
+          )}
         </div>
         {error && (
           <p
@@ -213,10 +368,6 @@ export default function AgentsPage() {
     </div>
   );
 }
-
-/* ========================================================================== */
-/* Turn row                                                                    */
-/* ========================================================================== */
 
 function AgentTurnRow({ turn }: { turn: AgentTurn }) {
   if (turn.role === "user") {
@@ -249,8 +400,7 @@ function AgentTurnRow({ turn }: { turn: AgentTurn }) {
       </div>
       <div className="ml-3 max-w-[85%] min-w-0 space-y-2">
         {turn.modelId && (
-          <span className="inline-flex items-center gap-1 rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
-            <CodeIcon className="h-3 w-3" />
+          <span className="inline-flex items-center rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
             {turn.modelId}
           </span>
         )}
@@ -269,20 +419,33 @@ function AgentTurnRow({ turn }: { turn: AgentTurn }) {
             </Markdown>
           </div>
         </div>
+        {turn.memories && turn.memories.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {turn.memories.map((memory, index) => (
+              <span
+                key={index}
+                title={memory.content.slice(0, 240)}
+                className="inline-flex max-w-full items-center rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] text-cyan-300"
+              >
+                Used memory
+                {memory.title ? `: ${memory.title}` : ""}
+              </span>
+            ))}
+          </div>
+        )}
         {turn.activity && turn.activity.length > 0 && (
-          <AgentThoughtLog activity={turn.activity} />
+          <AgentActivityLog activity={turn.activity} />
         )}
       </div>
     </div>
   );
 }
 
-/* ========================================================================== */
-/* Agent Thought Log                                                           */
-/* ========================================================================== */
-
-function AgentThoughtLog({ activity }: { activity: AgentActivity[] }) {
-  const [open, setOpen] = useState(true);
+function AgentActivityLog({ activity }: { activity: AgentActivity[] }) {
+  const [open, setOpen] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(min-width: 768px)").matches;
+  });
 
   return (
     <div className="overflow-hidden rounded-xl border border-cyan-400/20 bg-cyan-500/[0.04]">
@@ -294,10 +457,10 @@ function AgentThoughtLog({ activity }: { activity: AgentActivity[] }) {
       >
         <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
         <span className="text-xs font-semibold text-cyan-300">
-          Agent Thought Log
+          Agent activity
         </span>
         <span className="ml-auto flex items-center gap-1 text-[10px] text-zinc-500">
-          {open ? "Hide" : "Show"}
+          {activity.length} {activity.length === 1 ? "step" : "steps"}
           <ChevronDownIcon
             className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`}
           />
@@ -305,31 +468,24 @@ function AgentThoughtLog({ activity }: { activity: AgentActivity[] }) {
       </button>
 
       {open && (
-        <div className="border-t border-cyan-400/10 px-3 py-2.5">
-          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
-            {activity.map((step, index) => (
-              <Fragment key={index}>
-                {index > 0 && (
-                  <span className="text-cyan-400/40" aria-hidden="true">
-                    ➔
-                  </span>
-                )}
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="rounded-md border border-cyan-400/25 bg-cyan-400/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-cyan-300">
-                    [{step.type}]
-                  </span>
-                  {step.message && (
-                    <span className="text-xs text-zinc-400">{step.message}</span>
-                  )}
-                  {step.tool && (
-                    <span className="rounded-md border border-white/[0.08] bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
-                      {step.tool}
-                    </span>
-                  )}
+        <div className="space-y-1.5 border-t border-cyan-400/10 px-3 py-2.5">
+          {activity.map((step, index) => (
+            <div key={index} className="flex items-start gap-2 text-xs">
+              <span className="mt-px flex-shrink-0 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-cyan-300">
+                {step.type}
+              </span>
+              {step.message && (
+                <span className="min-w-0 flex-1 leading-relaxed text-zinc-400">
+                  {step.message}
                 </span>
-              </Fragment>
-            ))}
-          </div>
+              )}
+              {step.tool && (
+                <span className="flex-shrink-0 rounded-md border border-white/[0.08] bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
+                  {step.tool}
+                </span>
+              )}
+            </div>
+          ))}
         </div>
       )}
     </div>
