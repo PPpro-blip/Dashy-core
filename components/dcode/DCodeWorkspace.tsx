@@ -490,9 +490,6 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     files[0]?.id ?? ""
   );
   const [isPublic, setIsPublic] = useState(project?.isPublic ?? false);
-  const [shareSlug, setShareSlug] = useState<string | null>(
-    project?.shareSlug ?? null
-  );
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(
     project ? new Date(project.updatedAt) : null
@@ -1183,11 +1180,6 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   /* --------------------------------- share -------------------------------- */
 
-  const shareUrl = useMemo(() => {
-    if (!shareSlug || typeof window === "undefined") return null;
-    return `${window.location.origin}/d-code/share/${shareSlug}`;
-  }, [shareSlug]);
-
   const handleShare = useCallback(async () => {
     if (savingShare) return;
     setSavingShare(true);
@@ -1199,33 +1191,26 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         id = latestRef.current.projectId;
         if (!id) throw new Error("Save the project before sharing.");
       }
+
+      // Make sure the project is publicly readable before opening the Share
+      // Hub. The Hub owns the native OS modal ("Share via device") and the
+      // per-app composer grid; the toolbar never invokes the OS share sheet.
       if (!isPublic) {
-        const updated = await toggleProjectPublic(id, true);
+        await toggleProjectPublic(id, true);
         setIsPublic(true);
-        setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
-        if (navigator.share) {
-          await navigator.share({ title: title || "D-Code project", text: "View my D-Code project", url });
-        } else {
-          await navigator.clipboard.writeText(url);
-          toast.show({ title: "Public link copied", message: "Anyone with the link can view this project." });
-        }
-      } else if (shareSlug) {
-        await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
-        );
-        toast.show({ type: "success", title: "Link copied" });
       }
+
+      router.push(`/d-code/share/${id}?open=1`);
     } catch (error) {
       toast.show({
         type: "error",
-        title: "Sharing failed",
+        title: "Opening Share Hub failed",
         message: error instanceof Error ? error.message : "Please try again.",
       });
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, savingShare, shareSlug, toast]);
+  }, [isPublic, persist, router, savingShare, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;
@@ -1872,18 +1857,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 type="button"
                 onClick={() => void handleShare()}
                 disabled={savingShare}
-                title={isPublic ? "Copy public link" : "Share — make public & copy link"}
-                aria-label={isPublic ? "Copy public link" : "Share project"}
+                title="Open Dashy Share Hub"
+                aria-label="Open Dashy Share Hub"
                 className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
                 {savingShare ? (
                   <LoaderIcon className="h-3 w-3 animate-spin" />
-                ) : isPublic ? (
-                  <GlobeIcon className="h-3 w-3" />
                 ) : (
                   <ShareIcon className="h-3 w-3" />
                 )}
-                {isPublic ? "Copy link" : "Share"}
+                Share
               </button>
             </>
           )}
