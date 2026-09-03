@@ -469,6 +469,27 @@ export async function getProjectByShareSlug(
   return data ? rowToProject(data as DCodeProjectRow) : null;
 }
 
+/**
+ * Resolves the public Share Hub reference by project id first, then by share
+ * slug. The toolbar routes to `/d-code/share/<projectId>`; this lets the hub
+ * load an owner's row immediately and then redirect to the canonical slug URL
+ * (so OG-image/permalink handling stays stable for every visitor).
+ */
+export async function getPublicProject(
+  ref: string
+): Promise<DCodeProject | null> {
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("dcode_projects")
+    .select("*")
+    .eq("id", ref)
+    .eq("is_public", true)
+    .maybeSingle();
+  if (!error && data) return rowToProject(data as DCodeProjectRow);
+  if (error) throw classError(error);
+  return getProjectByShareSlug(ref);
+}
+
 /** Creates a project for the signed-in user and returns the stored row. */
 export async function createProject(
   draft: DCodeProjectDraft

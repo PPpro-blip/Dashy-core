@@ -3,18 +3,24 @@
 /**
  * DashyCore v7 — public read-only share viewer (client).
  *
- * Rendered by the (server) share page. Fetches the project by share slug via
- * lib/dcode (RLS allows public reads on is_public = true) so signed-out
- * visitors can view shared D-Code projects.
+ * Rendered by the (server) share page. Fetches the project by id or share
+ * slug via lib/dcode (RLS allows public reads on is_public = true) so
+ * signed-out visitors can view shared D-Code projects.
+ *
+ * This page is also the custom Dashy Share Hub: when a project is loaded it
+ * opens the ShareHub modal with copy-link, QR, "Share via device" (the only
+ * place that intentionally calls navigator.share) and the per-app composer
+ * grid. Closing the modal leaves the read-only D-Code workspace available.
  */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { useParams } from "next/navigation";
-import { getProjectByShareSlug, type DCodeProject } from "@/lib/dcode";
+import { useParams, useRouter } from "next/navigation";
+import { getPublicProject, type DCodeProject } from "@/lib/dcode";
 import { DCodeWorkspace } from "@/components/dcode/DCodeWorkspace";
-import { CodeIcon, GlobeIcon, LoaderIcon } from "@/components/icons";
+import { ShareHub } from "@/components/share/ShareHub";
+import { CodeIcon, GlobeIcon, LoaderIcon, ShareIcon } from "@/components/icons";
 
 interface LoadState {
   status: "loading" | "ready" | "missing";
@@ -23,17 +29,27 @@ interface LoadState {
 
 export function SharePageView() {
   const params = useParams<{ share_slug: string }>();
-  const shareSlug = typeof params.share_slug === "string" ? params.share_slug : "";
+  const router = useRouter();
+  const shareRef = typeof params.share_slug === "string" ? params.share_slug : "";
   const [state, setState] = useState<LoadState>({
     status: "loading",
     project: null,
   });
+  const [hubOpen, setHubOpen] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!state.project?.shareSlug || typeof window === "undefined") return;
+    setShareUrl(
+      `${window.location.origin}/d-code/share/${state.project.shareSlug}`
+    );
+  }, [state.project?.shareSlug]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       try {
-        const project = await getProjectByShareSlug(shareSlug);
+        const project = await getPublicProject(shareRef);
         if (cancelled) return;
         setState(
           project ? { status: "ready", project } : { status: "missing", project: null }
@@ -42,11 +58,37 @@ export function SharePageView() {
         if (!cancelled) setState({ status: "missing", project: null });
       }
     }
-    if (shareSlug) void load();
+    if (shareRef) void load();
     return () => {
       cancelled = true;
     };
-  }, [shareSlug]);
+  }, [shareRef]);
+
+  // The toolbar routes with the project id and `?open=1`; redirect to the
+  // canonical share-slug URL so OG previews, image serving and shared links
+  // always resolve to the same permalink.
+  useEffect(() => {
+    if (
+      state.status === "ready" &&
+      state.project?.shareSlug &&
+      shareRef !== state.project.shareSlug
+    ) {
+      const search = typeof window === "undefined" ? "" : window.location.search;
+      router.replace(`/d-code/share/${state.project.shareSlug}${search}`);
+    }
+  }, [router, shareRef, state.project?.shareSlug, state.status]);
+
+  // Auto-open the Share Hub when the toolbar asked for it (`/…?open=1`).
+  useEffect(() => {
+    if (
+      state.status === "ready" &&
+      state.project &&
+      typeof window !== "undefined" &&
+      window.location.search.includes("open=1")
+    ) {
+      setHubOpen(true);
+    }
+  }, [state]);
 
   return (
     <div className="flex min-h-screen flex-col bg-navy">
@@ -68,6 +110,16 @@ export function SharePageView() {
           D-Code
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {state.project && (
+            <button
+              type="button"
+              onClick={() => setHubOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
+            >
+              <ShareIcon className="h-3 w-3" />
+              Open Share Hub
+            </button>
+          )}
           <span className="flex items-center gap-1.5 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1.5 text-[11px] font-medium text-cyan-300">
             <GlobeIcon className="h-3 w-3" />
             Public share
@@ -112,6 +164,18 @@ export function SharePageView() {
           <DCodeWorkspace project={state.project} readOnly />
         )}
       </main>
+
+      {hubOpen && state.project && (
+        <ShareHub
+          project={{
+            id: state.project.id,
+            title: state.project.title,
+            files: state.project.files,
+          }}
+          shareUrl={shareUrl}
+          onClose={() => setHubOpen(false)}
+        />
+      )}
     </div>
   );
 }
