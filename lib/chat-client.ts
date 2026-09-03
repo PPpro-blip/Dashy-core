@@ -719,6 +719,142 @@ export async function sendChatMessage(
 }
 
 /**
+ * Agent Mode JSON client — used only by `/agents`.
+ *
+ * Live worker contract (plain JSON, never SSE):
+ *   POST {base}/chat
+ *   Body: { userId, agentMode: true, message, messages, model }
+ *   Response: { success, mode: "agent", modelId, reply, memories, activity }
+ *
+ * `gameMode` is never sent. `userId` is required.
+ */
+export const AGENT_MODEL_ID = "z-ai/glm-5";
+
+export interface AgentRequest {
+  message: string;
+  userId: string;
+  authToken?: string;
+  /** Full thread in send order, ending with the latest user turn. */
+  history?: ChatHistoryEntry[];
+  signal?: AbortSignal;
+  model?: string;
+}
+
+export async function sendAgentMessage(
+  request: AgentRequest
+): Promise<ChatResult> {
+  if (!request.userId) {
+    throw new ChatClientError(
+      "Please log in to use Agent mode",
+      "unauthorized"
+    );
+  }
+
+  const base = DASHY_FLOW_STATE_URL.replace(/\/$/, "");
+  const token = request.authToken || getSessionToken();
+  const currentText = (request.message ?? "").trim();
+  if (!currentText) {
+    throw new ChatClientError(
+      "The assistant returned an empty response. Please try again.",
+      "empty"
+    );
+  }
+
+  const baseMessages = request.history ? buildWireMessages(request.history) : [];
+  let priorMessages = baseMessages;
+  const lastBase = baseMessages[baseMessages.length - 1];
+  if (lastBase && lastBase.role === "user" && lastBase.content === currentText) {
+    priorMessages = baseMessages.slice(0, -1);
+  }
+  const threadMessages: WireMessage[] = [
+    ...priorMessages,
+    { role: "user", content: currentText },
+  ];
+
+  let res: Response;
+  try {
+    res = await fetch(`${base}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        userId: request.userId,
+        agentMode: true,
+        message: currentText,
+        messages: threadMessages,
+        model: request.model ?? AGENT_MODEL_ID,
+      }),
+      signal: request.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ChatClientError("Request stopped.", "aborted");
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ChatClientError("Request stopped.", "aborted");
+    }
+    throw new ChatClientError(
+      "Could not reach the dashy-flow-state backend. Check your connection and try again.",
+      "network"
+    );
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    throw new ChatClientError(
+      "Your session has expired. Please sign in again.",
+      "unauthorized",
+      res.status
+    );
+  }
+
+  if (res.status === 429) {
+    throw new ChatClientError(
+      "You're sending messages too quickly. Please wait a moment and retry.",
+      "rate_limited",
+      res.status
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
+    throw new ChatClientError(
+      res.ok
+        ? "The backend returned malformed data."
+        : `The backend could not process your request (HTTP ${res.status}).`,
+      "server",
+      res.status
+    );
+  }
+
+  if (typeof raw !== "object" || raw === null) {
+    throw new ChatClientError(
+      "The assistant returned an empty response. Please try again.",
+      "empty",
+      res.status
+    );
+  }
+
+  const obj = raw as UnknownRecord;
+  if (typeof obj.error === "string" && obj.error.length > 0) {
+    throw new ChatClientError(obj.error, "server", res.status);
+  }
+  if (!res.ok) {
+    throw new ChatClientError(
+      `The backend could not process your request (HTTP ${res.status}).`,
+      "server",
+      res.status
+    );
+  }
+
+  return parseAgentResponse(obj);
+}
+
+/**
  * Lightweight reachability check for the flow-state worker.
  * Any HTTP response counts as "reachable"; only network failure is offline.
  */
