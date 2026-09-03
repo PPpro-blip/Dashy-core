@@ -28,17 +28,30 @@ import {
   GlobeIcon,
   LinkIcon,
   LoaderIcon,
+  LockIcon,
   ShareIcon,
   XIcon,
 } from "@/components/icons";
+
+/**
+ * Owner-only privacy controls surfaced inside the Hub. Omitted for plain
+ * visitors (they must never see make public/private) — when absent the Hub
+ * renders exactly as before.
+ */
+export interface ShareHubPrivacy {
+  isPublic: boolean;
+  busy: boolean;
+  onToggle: (next: boolean) => void;
+}
 
 interface ShareHubProps {
   onClose: () => void;
   project: { id: string; title: string; files: DCodeFile[] } | null;
   shareUrl: string | null;
+  privacy?: ShareHubPrivacy;
 }
 
-export function ShareHub({ onClose, project, shareUrl }: ShareHubProps) {
+export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps) {
   const toast = useToast();
   const [selectedApp, setSelectedApp] = useState<ShareAppId | null>(null);
   const [copying, setCopying] = useState(false);
@@ -58,6 +71,16 @@ export function ShareHub({ onClose, project, shareUrl }: ShareHubProps) {
       imageOptions
     )
   );
+
+  // Keep the composer's permalink in sync with the canonical share URL —
+  // e.g. the owner hits "Make public" while the hub is open and the freshly
+  // assigned slug must flow into copy/QR/intents immediately.
+  useEffect(() => {
+    if (!shareUrl) return;
+    setDraft((current) =>
+      current.url === shareUrl ? current : { ...current, url: shareUrl }
+    );
+  }, [shareUrl]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -86,10 +109,15 @@ export function ShareHub({ onClose, project, shareUrl }: ShareHubProps) {
     setCopying(true);
     try {
       const ok = await copyText(url);
+      const message = ok
+        ? privacy && !privacy.isPublic
+          ? "The project is private — visitors will see the private notice until you make it public."
+          : "Anyone with the link can view this project."
+        : "Please copy manually.";
       toast.show({
         type: ok ? "success" : "error",
         title: ok ? "Link copied" : "Copy failed",
-        message: ok ? "Anyone with the link can view this project." : "Please copy manually.",
+        message,
       });
     } finally {
       setCopying(false);
@@ -187,6 +215,64 @@ export function ShareHub({ onClose, project, shareUrl }: ShareHubProps) {
               </div>
             </div>
           </div>
+
+          {/* Owner privacy controls — hidden for plain visitors, who never
+              see this prop at all. A private project still renders the full
+              hub for its owner; this row is how they publish/revoke. */}
+          {privacy && (
+            <div
+              className={`flex items-center gap-3 rounded-xl border px-3.5 py-3 ${
+                privacy.isPublic
+                  ? "border-cyan-400/20 bg-cyan-400/[0.06]"
+                  : "border-amber-400/25 bg-amber-400/[0.07]"
+              }`}
+            >
+              <span
+                className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg ${
+                  privacy.isPublic
+                    ? "bg-cyan-400/15 text-cyan-300"
+                    : "bg-amber-400/15 text-amber-300"
+                }`}
+              >
+                {privacy.isPublic ? (
+                  <GlobeIcon className="h-3.5 w-3.5" />
+                ) : (
+                  <LockIcon className="h-3.5 w-3.5" />
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-semibold text-zinc-100">
+                  {privacy.isPublic
+                    ? "Public — anyone with the link can view"
+                    : "Private — only you can open this link"}
+                </p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">
+                  {privacy.isPublic
+                    ? "Making it private revokes visitor access instantly; your Share Hub keeps working."
+                    : "Everyone else sees “link is private”. Make it public to activate this link."}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => privacy.onToggle(!privacy.isPublic)}
+                disabled={privacy.busy}
+                className={`flex flex-shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition-all disabled:opacity-50 ${
+                  privacy.isPublic
+                    ? "border border-white/[0.1] bg-white/[0.03] text-zinc-300 hover:border-zinc-600 hover:text-white"
+                    : "bg-cyan-500 text-[#06202a] shadow-lg shadow-cyan-500/20 hover:bg-cyan-400"
+                }`}
+              >
+                {privacy.busy ? (
+                  <LoaderIcon className="h-3 w-3 animate-spin" />
+                ) : privacy.isPublic ? (
+                  <LockIcon className="h-3 w-3" />
+                ) : (
+                  <GlobeIcon className="h-3 w-3" />
+                )}
+                {privacy.isPublic ? "Make private" : "Make public"}
+              </button>
+            </div>
+          )}
 
           {/* Quick actions */}
           <div className="grid grid-cols-2 gap-2">
