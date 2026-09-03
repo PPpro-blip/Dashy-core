@@ -454,7 +454,23 @@ export async function getProject(id: string): Promise<DCodeProject | null> {
   return data ? rowToProject(data as DCodeProjectRow) : null;
 }
 
-/** Fetches a public project by its share slug (works for anonymous visitors). */
+/** True for canonical uuid text (8-4-4-4-12 hex). */
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
+
+/**
+ * Fetches a project by its share slug.
+ *
+ * No explicit `is_public` filter: visibility is delegated to RLS. The
+ * `dcode_projects_select_public` policy admits anonymous visitors only for
+ * rows with is_public = true, while the owner policy (auth.uid() = user_id)
+ * admits the owner unconditionally. That is what lets the Share Hub render
+ * for the OWNER of a private project (to manage/copy/preview the link)
+ * while visitors keep seeing nothing.
+ */
 export async function getProjectByShareSlug(
   shareSlug: string
 ): Promise<DCodeProject | null> {
@@ -462,32 +478,38 @@ export async function getProjectByShareSlug(
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
-    .eq("share_slug", shareSlug)
-    .eq("is_public", true)
+    .eq("share_slug", shareSlug.trim().toLowerCase())
     .maybeSingle();
   if (error) throw classError(error);
   return data ? rowToProject(data as DCodeProjectRow) : null;
 }
 
 /**
- * Resolves the public Share Hub reference by project id first, then by share
- * slug. The toolbar routes to `/d-code/share/<projectId>`; this lets the hub
- * load an owner's row immediately and then redirect to the canonical slug URL
- * (so OG-image/permalink handling stays stable for every visitor).
+ * Resolves the Share Hub reference: EITHER the project's primary uuid id OR
+ * its share slug (the stable /d-code/share/<key> permalink).
+ *
+ * IMPORTANT (bug history): the slug is a 12-char token like `x7pseyikpg8t`
+ * — querying `.eq("id", slug)` makes Postgres fail with
+ * `22P02 invalid input syntax for type uuid`, which used to throw here and
+ * mask the whole slug fallback. Non-uuid keys therefore skip the id query
+ * entirely and resolve via share_slug.
  */
 export async function getPublicProject(
   ref: string
 ): Promise<DCodeProject | null> {
-  const supabase = createClient();
-  const { data, error } = await supabase
-    .from("dcode_projects")
-    .select("*")
-    .eq("id", ref)
-    .eq("is_public", true)
-    .maybeSingle();
-  if (!error && data) return rowToProject(data as DCodeProjectRow);
-  if (error) throw classError(error);
-  return getProjectByShareSlug(ref);
+  const key = ref.trim();
+  if (!key) return null;
+  if (isUuid(key)) {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("dcode_projects")
+      .select("*")
+      .eq("id", key)
+      .maybeSingle();
+    if (error) throw classError(error);
+    if (data) return rowToProject(data as DCodeProjectRow);
+  }
+  return getProjectByShareSlug(key);
 }
 
 /** Creates a project for the signed-in user and returns the stored row. */
@@ -573,6 +595,11 @@ export async function updateProject(
  * Toggles a project between private and public. Going public assigns a
  * share_slug once (unique; retried on the rare collision) and returns the
  * updated project — use shareSlug for the /d-code/share/<slug> link.
+ *
+ * The permalink is STABLE across private → public cycles: an existing
+ * share_slug is reused so links the owner already copied keep working after
+ * re-publishing (previously every make-public minted a fresh slug and
+ * silently killed the old URL).
  */
 export async function toggleProjectPublic(
   id: string,
@@ -581,13 +608,28 @@ export async function toggleProjectPublic(
   const supabase = createClient();
 
   if (!isPublic) {
+    // Going private keeps the slug assigned (just flips the flag) so the
+    // owner's Hub URL and a future re-publish both survive.
     return updateProject(id, { isPublic: false });
   }
 
-  // Going public: make sure a share slug exists. `update … select` returns
-  // zero rows when the RLS-visible row didn't change? No — an update that
-  // matches but only writes the slug always returns the row. A unique
-  // violation on share_slug is retried with a fresh slug.
+  // Going public: reuse the row's existing slug when it has ever been
+  // public; mint one only for a first-time public project.
+  const current = await getProject(id);
+  if (!current) {
+    throw new DCodeError(
+      "Project not found — sign in as its owner to change sharing."
+    );
+  }
+  if (current.shareSlug) {
+    // Already public with a live permalink → truthful no-op (avoids an
+    // updated_at write on every Share click).
+    if (current.isPublic) return current;
+    return updateProject(id, { isPublic: true });
+  }
+
+  // First time public: assign a slug. A unique violation on share_slug is
+  // retried with a fresh token.
   for (let attempt = 0; attempt < 5; attempt++) {
     const slug = newShareSlug();
     const { data, error } = await supabase

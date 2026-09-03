@@ -3,9 +3,13 @@
 /**
  * DashyCore v7 — public read-only share viewer (client).
  *
- * Rendered by the (server) share page. Fetches the project by id or share
- * slug via lib/dcode (RLS allows public reads on is_public = true) so
- * signed-out visitors can view shared D-Code projects.
+ * Rendered by the (server) share page. Resolves the share key — EITHER the
+ * project uuid OR its 12-char share slug — through lib/dcode; visibility is
+ * decided by RLS (anon sees only is_public = true rows, the owner always
+ * sees their own row). That asymmetry is intentional: the OWNER must get the
+ * full Share Hub even for a private project (composers, copy, QR, device
+ * share, make public/private), while visitors keep seeing the
+ * "private / no longer exists" empty state.
  *
  * This page is also the custom Dashy Share Hub: when a project is loaded it
  * opens the ShareHub modal with copy-link, QR, "Share via device" (the only
@@ -13,13 +17,19 @@
  * grid. Closing the modal leaves the read-only D-Code workspace available.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useParams, useRouter } from "next/navigation";
-import { getPublicProject, type DCodeProject } from "@/lib/dcode";
+import {
+  getPublicProject,
+  toggleProjectPublic,
+  type DCodeProject,
+} from "@/lib/dcode";
+import { createClient } from "@/lib/supabase/client";
 import { DCodeWorkspace } from "@/components/dcode/DCodeWorkspace";
 import { ShareHub } from "@/components/share/ShareHub";
+import { useToast } from "@/components/Toast";
 import { CodeIcon, GlobeIcon, LoaderIcon, ShareIcon } from "@/components/icons";
 
 interface LoadState {
@@ -30,6 +40,7 @@ interface LoadState {
 export function SharePageView() {
   const params = useParams<{ share_slug: string }>();
   const router = useRouter();
+  const toast = useToast();
   const shareRef = typeof params.share_slug === "string" ? params.share_slug : "";
   const [state, setState] = useState<LoadState>({
     status: "loading",
@@ -37,13 +48,41 @@ export function SharePageView() {
   });
   const [hubOpen, setHubOpen] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [updatingShare, setUpdatingShare] = useState(false);
+  // Session user id (UI affordance only — RLS still enforces everything).
+  const [viewerId, setViewerId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!state.project?.shareSlug || typeof window === "undefined") return;
-    setShareUrl(
-      `${window.location.origin}/d-code/share/${state.project.shareSlug}`
-    );
-  }, [state.project?.shareSlug]);
+    let cancelled = false;
+    const supabase = createClient();
+    supabase.auth
+      .getUser()
+      .then(({ data }) => {
+        if (!cancelled) setViewerId(data.user?.id ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setViewerId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A project the viewer loaded under RLS while not public can only be
+  // reached by its owner (the public policy hides private rows from
+  // everyone else), so this is the authoritative-enough ownership signal
+  // for showing owner-only chrome.
+  const isOwner =
+    !!state.project && !!viewerId && state.project.userId === viewerId;
+
+  // Canonical permalink for copy/QR/composers: stable slug when one exists,
+  // otherwise the project uuid — the loader resolves either key, and the
+  // toolbar copy/link builders must use this same shareKey.
+  useEffect(() => {
+    if (!state.project || typeof window === "undefined") return;
+    const shareKey = state.project.shareSlug ?? state.project.id;
+    setShareUrl(`${window.location.origin}/d-code/share/${shareKey}`);
+  }, [state.project]);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +110,7 @@ export function SharePageView() {
     if (
       state.status === "ready" &&
       state.project?.shareSlug &&
-      shareRef !== state.project.shareSlug
+      shareRef.toLowerCase() !== state.project.shareSlug
     ) {
       const search = typeof window === "undefined" ? "" : window.location.search;
       router.replace(`/d-code/share/${state.project.shareSlug}${search}`);
@@ -89,6 +128,49 @@ export function SharePageView() {
       setHubOpen(true);
     }
   }, [state]);
+
+  /** Owner-only: flip is_public, refetch the row and keep UI state == DB. */
+  const handleTogglePublic = useCallback(
+    async (next: boolean) => {
+      if (!state.project || updatingShare) return;
+      setUpdatingShare(true);
+      try {
+        // Awaits the write (slug assignment/reuse) before we trust the link.
+        const updated = await toggleProjectPublic(state.project.id, next);
+        setState({ status: "ready", project: updated });
+        if (next && updated.shareSlug) {
+          router.replace(
+            `/d-code/share/${updated.shareSlug}${
+              typeof window === "undefined" ? "" : window.location.search
+            }`
+          );
+        }
+        toast.show(
+          next
+            ? {
+                type: "success",
+                title: "Project is public",
+                message: "The share link now works for everyone.",
+              }
+            : {
+                type: "info",
+                title: "Project is private",
+                message:
+                  "Visitors can no longer open the link. Your Share Hub stays available.",
+              }
+        );
+      } catch (error) {
+        toast.show({
+          type: "error",
+          title: "Could not update sharing",
+          message: error instanceof Error ? error.message : "Please try again.",
+        });
+      } finally {
+        setUpdatingShare(false);
+      }
+    },
+    [router, state.project, toast, updatingShare]
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-navy">
@@ -122,7 +204,9 @@ export function SharePageView() {
           )}
           <span className="flex items-center gap-1.5 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1.5 text-[11px] font-medium text-cyan-300">
             <GlobeIcon className="h-3 w-3" />
-            Public share
+            {state.project && !state.project.isPublic
+              ? "Private (owner view)"
+              : "Public share"}
           </span>
           <Link
             href="/chat"
@@ -173,6 +257,15 @@ export function SharePageView() {
             files: state.project.files,
           }}
           shareUrl={shareUrl}
+          privacy={
+            isOwner
+              ? {
+                  isPublic: state.project.isPublic,
+                  busy: updatingShare,
+                  onToggle: (next) => void handleTogglePublic(next),
+                }
+              : undefined
+          }
           onClose={() => setHubOpen(false)}
         />
       )}

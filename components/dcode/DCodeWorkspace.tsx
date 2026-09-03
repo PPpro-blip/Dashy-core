@@ -1192,15 +1192,19 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         if (!id) throw new Error("Save the project before sharing.");
       }
 
-      // Make sure the project is publicly readable before opening the Share
-      // Hub. The Hub owns the native OS modal ("Share via device") and the
-      // per-app composer grid; the toolbar never invokes the OS share sheet.
-      if (!isPublic) {
-        await toggleProjectPublic(id, true);
-        setIsPublic(true);
-      }
+      // Publicize BEFORE opening the Share Hub and await the write, so the
+      // link the Hub copies is already live for visitors. toggleProjectPublic
+      // is idempotent while public and returns the saved row — including the
+      // STABLE share slug (reused across private→public cycles, never
+      // rotated), so previously copied links keep working.
+      const saved = await toggleProjectPublic(id, true);
+      setIsPublic(saved.isPublic);
 
-      router.push(`/d-code/share/${id}?open=1`);
+      // Share key for the custom hub: stable slug when present, else the
+      // uuid — /d-code/share/<key> resolves either. Never the OS sheet:
+      // navigator.share lives inside the Hub only.
+      const shareKey = saved.shareSlug ?? id;
+      router.push(`/d-code/share/${shareKey}?open=1`);
     } catch (error) {
       toast.show({
         type: "error",
@@ -1210,18 +1214,23 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, router, savingShare, toast]);
+  }, [persist, router, savingShare, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;
     setSavingShare(true);
     try {
-      await toggleProjectPublic(projectId, false);
-      setIsPublic(false);
+      // Await the write, then mirror the RETURNED row (not an optimistic
+      // guess) so the toolbar state matches the database. The share slug
+      // stays assigned — the owner keeps opening the same hub URL, while
+      // visitors hit the private empty state again.
+      const saved = await toggleProjectPublic(projectId, false);
+      setIsPublic(saved.isPublic);
       toast.show({
         type: "info",
         title: "Project is private",
-        message: "The share link no longer works.",
+        message:
+          "Visitors can no longer open the share link — your Share Hub stays available.",
       });
     } catch (error) {
       toast.show({
