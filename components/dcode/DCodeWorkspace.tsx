@@ -513,6 +513,8 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  /** Title input handle — soft-focused when the project is still untitled. */
+  const titleInputRef = useRef<HTMLInputElement>(null);
 
   /* ---------------------- IDE chrome (extensions) state ------------------ */
 
@@ -825,6 +827,24 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [readOnly]);
+
+  /**
+   * Soft rename nudge: an editor that still carries the default
+   * "Untitled project" title (fresh draft, or first save just created the
+   * row and remounted us) gets its title input focused + selected once on
+   * mount — renaming is one keystroke away, never forced.
+   */
+  useEffect(() => {
+    if (readOnly) return;
+    if (title !== "Untitled project") return;
+    const t = window.setTimeout(() => {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    }, 150);
+    return () => window.clearTimeout(t);
+    // Intentionally mount-only: never steal focus while the user edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* Load the authenticated user's email for the terminal `whoami`. */
   useEffect(() => {
@@ -1831,6 +1851,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           <h1 className="min-w-0 truncate text-sm font-semibold text-white">{title}</h1>
         ) : (
           <input
+            ref={titleInputRef}
             type="text"
             value={title}
             onChange={(e) => handleTitleChange(e.target.value)}
