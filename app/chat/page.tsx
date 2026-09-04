@@ -43,6 +43,7 @@ import {
 import { getModelById } from "@/lib/models";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import { AttachmentButton } from "@/components/AttachmentButton";
+import ImgStudio from "@/components/img-engine/ImgStudio";
 import { useToast } from "@/components/Toast";
 import {
   ArrowUpRightIcon,
@@ -155,6 +156,8 @@ export default function ChatPage() {
   const [statuses, setStatuses] = useState<string[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [studioPrompt, setStudioPrompt] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -712,6 +715,22 @@ export default function ChatPage() {
     [toast]
   );
 
+  const handleOpenStudio = useCallback((prompt = input) => {
+    setStudioPrompt(prompt);
+    setStudioOpen(true);
+  }, [input]);
+
+  const handleStudioSend = useCallback((item: { prompt: string; url?: string }) => {
+    if (!item.url) return;
+    const conversationId = activeConversationId ?? newConversationId();
+    if (!activeConversationId) { setActiveConversationId(conversationId); markActiveConversation(conversationId); }
+    const imageMessage: HistoryMessage = { id: newConversationId(), role: "assistant", content: `![<IMG> ${item.prompt}](${item.url})\n\n*${item.prompt}*`, timestamp: Date.now(), engine: "img" };
+    const next = [...messages, imageMessage]; setMessages(next);
+    persistConversation(conversationId, next, selectedModel);
+    setStudioOpen(false);
+    toast.success("Sent to chat", "The verified image was saved to this conversation.");
+  }, [activeConversationId, messages, persistConversation, selectedModel, toast]);
+
   /**
    * Hands a fenced code block to D-Code: stashes the snapshot in
    * sessionStorage and opens a scratch project seeded with it. Purely
@@ -774,7 +793,7 @@ export default function ChatPage() {
                 type="button"
                 onClick={() => {
                   if (image) {
-                    handleGenerateImage(prompt);
+                    handleOpenStudio(prompt);
                   } else {
                     void handleSend(prompt);
                   }
@@ -822,6 +841,8 @@ export default function ChatPage() {
       )}
 
       {/* --------------------- BOTTOM-ANCHORED INPUT BAR --------------------- */}
+      {studioOpen && <ImgStudio initialPrompt={studioPrompt} onClose={() => setStudioOpen(false)} onSendToChat={handleStudioSend} />}
+
       <div className="flex-shrink-0 border-t border-white/[0.06] bg-navy/70 p-4 backdrop-blur-2xl">
         <div className="mx-auto w-full max-w-3xl">
           <div className="flex items-end gap-2 rounded-2xl border border-white/[0.1] bg-white/[0.045] px-3 py-2.5 shadow-inner shadow-black/10 transition-colors focus-within:border-cyan-400/60 focus-within:ring-4 focus-within:ring-cyan-400/10">
@@ -842,10 +863,10 @@ export default function ChatPage() {
             />
             <button
               type="button"
-              onClick={() => handleGenerateImage()}
-              disabled={!input.trim()}
-              aria-label="Generate image with <IMG> Engine"
-              title="Generate an image from the composer prompt with the <IMG> engine (or type /img <prompt>)"
+onClick={() => handleOpenStudio()}
+              disabled={isStreaming}
+              aria-label="Open <IMG> Studio with <IMG> Engine"
+              title="Generate image with <IMG> Engine"
               className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <ImageIcon className="h-4 w-4" />
