@@ -496,6 +496,71 @@ async function consumeStream(
 }
 
 /**
+ * Multi-turn context hardening.
+ * ---
+ * The live `dashy-flow-state` worker is a single-`message` endpoint (see
+ * `_reference/chat-client.reference.ts`): it reads the `message` string and
+ * does NOT consume the additive `messages` array. To guarantee the model sees
+ * every prior turn (no "what item?" multi-turn regression), for the normal
+ * streaming path we fold the WHOLE thread into `message` while still emitting
+ * the structured `messages` array for any worker that does read it.
+ */
+
+/** In-flight typing placeholder / empty bubbles — never forward as history. */
+function isPlaceholderContent(content: string): boolean {
+  const trimmed = (content ?? "").trim();
+  return trimmed.length === 0 || trimmed === "..." || trimmed === "…";
+}
+
+/** Keep at most this many of the most recent turns (oldest dropped first). */
+const MAX_HISTORY_TURNS = 40;
+/** Keep the conversational window under ~100k chars, dropping oldest first. */
+const MAX_HISTORY_CHARS = 100_000;
+
+type WireMessage = { role: "user" | "assistant" | "system"; content: string };
+
+/**
+ * Normalizes a thread into the worker's `messages` shape: keeps only ranked
+ * roles with real content, filters out placeholder/empty assistant bubbles,
+ * and caps the payload size. The latest (current) user turn is never dropped.
+ */
+function buildWireMessages(history: ChatHistoryEntry[]): WireMessage[] {
+  const cleaned: WireMessage[] = [];
+  for (const entry of history) {
+    const role =
+      entry.role === "system" ? "system" : entry.role === "assistant" ? "assistant" : "user";
+    const content = (entry.content ?? "").trim();
+    if (!content) continue; // skip empty / image-only stubs so roles stay valid
+    if (role === "assistant" && isPlaceholderContent(content)) continue;
+    cleaned.push({ role, content });
+  }
+
+  let start = 0;
+  // Turn cap: keep the most recent MAX_HISTORY_TURNS entries.
+  if (cleaned.length > MAX_HISTORY_TURNS) start = cleaned.length - MAX_HISTORY_TURNS;
+  // Char cap: keep dropping the OLDEST until under budget (final turn preserved).
+  let total = cleaned.slice(start).reduce((n, m) => n + m.content.length, 0);
+  while (total > MAX_HISTORY_CHARS && start < cleaned.length - 1) {
+    total -= cleaned[start].content.length;
+    start++;
+  }
+  return cleaned.slice(start);
+}
+
+/** Renders a normalized thread as a readable transcript for the `message` field. */
+function transcriptOfThread(messages: WireMessage[]): string {
+  return messages
+    .map((m) =>
+      m.role === "user"
+        ? `User: ${m.content}`
+        : m.role === "assistant"
+          ? `Assistant: ${m.content}`
+          : `System: ${m.content}`
+    )
+    .join("\n\n");
+}
+
+/**
  * Sends a message to the dashy-flow-state worker and streams the reply.
  *
  * @throws {ChatClientError} with a safe user-facing message on failure.
@@ -507,6 +572,31 @@ export async function sendChatMessage(
   const base = DASHY_FLOW_STATE_URL.replace(/\/$/, "");
   const token = request.authToken || getSessionToken();
 
+  // Normalize the full thread so the structured `messages` array and the
+  // reference worker's `message` field both carry the same context. Some
+  // callers (chat page) already append the current user turn to history;
+  // others (voice page) pass only prior turns. Rebuild the thread so it
+  // ALWAYS ends with the latest user message and never duplicates it.
+  const currentText = (request.message ?? "").trim();
+  const baseMessages = request.history ? buildWireMessages(request.history) : [];
+  let priorMessages = baseMessages;
+  const lastBase = baseMessages[baseMessages.length - 1];
+  if (lastBase && lastBase.role === "user" && lastBase.content === currentText) {
+    priorMessages = baseMessages.slice(0, -1);
+  }
+  const threadMessages: WireMessage[] = currentText
+    ? [...priorMessages, { role: "user" as const, content: currentText }]
+    : priorMessages;
+  const hasHistory = threadMessages.length > 1;
+
+  // On the normal streaming path `message` carries the ENTIRE thread so a
+  // single-`message` worker still sees every prior turn. The agent/JSON path
+  // and the first turn keep the plain latest user line.
+  const wireMessage =
+    !request.agentMode && hasHistory
+      ? transcriptOfThread(threadMessages)
+      : request.message;
+
   let res: Response;
   try {
     res = await fetch(`${base}/chat`, {
@@ -517,7 +607,7 @@ export async function sendChatMessage(
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
-        message: request.message,
+        message: wireMessage,
         model: request.model,
         ...(request.userId ? { userId: request.userId } : {}),
         ...(request.agentMode !== undefined
@@ -526,12 +616,11 @@ export async function sendChatMessage(
         ...(request.conversationId
           ? { conversation_id: request.conversationId }
           : {}),
-        // Additive field: full conversation history (all user+assistant
-        // turns in order). The core contract fields above are unchanged,
-        // and the SSE response handling is untouched.
-        ...(request.history
-          ? { messages: request.history.map(({ role, content }) => ({ role, content })) }
-          : {}),
+        // Additive field: full conversation history (all user+assistant turns
+        // in order, placeholder-stripped and capped), ending with the latest
+        // user message. The core contract fields above are unchanged, and the
+        // SSE response handling is untouched.
+        ...(!request.agentMode && threadMessages.length > 0 ? { messages: threadMessages } : {}),
       }),
       signal: request.signal,
     });
@@ -627,6 +716,142 @@ export async function sendChatMessage(
   callbacks.onDelta?.(text);
   callbacks.onDone?.();
   return { content: text, memories: [], statusStates: [] };
+}
+
+/**
+ * Agent Mode JSON client — used only by `/agents`.
+ *
+ * Live worker contract (plain JSON, never SSE):
+ *   POST {base}/chat
+ *   Body: { userId, agentMode: true, message, messages, model }
+ *   Response: { success, mode: "agent", modelId, reply, memories, activity }
+ *
+ * `gameMode` is never sent. `userId` is required.
+ */
+export const AGENT_MODEL_ID = "z-ai/glm-5";
+
+export interface AgentRequest {
+  message: string;
+  userId: string;
+  authToken?: string;
+  /** Full thread in send order, ending with the latest user turn. */
+  history?: ChatHistoryEntry[];
+  signal?: AbortSignal;
+  model?: string;
+}
+
+export async function sendAgentMessage(
+  request: AgentRequest
+): Promise<ChatResult> {
+  if (!request.userId) {
+    throw new ChatClientError(
+      "Please log in to use Agent mode",
+      "unauthorized"
+    );
+  }
+
+  const base = DASHY_FLOW_STATE_URL.replace(/\/$/, "");
+  const token = request.authToken || getSessionToken();
+  const currentText = (request.message ?? "").trim();
+  if (!currentText) {
+    throw new ChatClientError(
+      "The assistant returned an empty response. Please try again.",
+      "empty"
+    );
+  }
+
+  const baseMessages = request.history ? buildWireMessages(request.history) : [];
+  let priorMessages = baseMessages;
+  const lastBase = baseMessages[baseMessages.length - 1];
+  if (lastBase && lastBase.role === "user" && lastBase.content === currentText) {
+    priorMessages = baseMessages.slice(0, -1);
+  }
+  const threadMessages: WireMessage[] = [
+    ...priorMessages,
+    { role: "user", content: currentText },
+  ];
+
+  let res: Response;
+  try {
+    res = await fetch(`${base}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        userId: request.userId,
+        agentMode: true,
+        message: currentText,
+        messages: threadMessages,
+        model: request.model ?? AGENT_MODEL_ID,
+      }),
+      signal: request.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ChatClientError("Request stopped.", "aborted");
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ChatClientError("Request stopped.", "aborted");
+    }
+    throw new ChatClientError(
+      "Could not reach the dashy-flow-state backend. Check your connection and try again.",
+      "network"
+    );
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    throw new ChatClientError(
+      "Your session has expired. Please sign in again.",
+      "unauthorized",
+      res.status
+    );
+  }
+
+  if (res.status === 429) {
+    throw new ChatClientError(
+      "You're sending messages too quickly. Please wait a moment and retry.",
+      "rate_limited",
+      res.status
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = await res.json();
+  } catch {
+    throw new ChatClientError(
+      res.ok
+        ? "The backend returned malformed data."
+        : `The backend could not process your request (HTTP ${res.status}).`,
+      "server",
+      res.status
+    );
+  }
+
+  if (typeof raw !== "object" || raw === null) {
+    throw new ChatClientError(
+      "The assistant returned an empty response. Please try again.",
+      "empty",
+      res.status
+    );
+  }
+
+  const obj = raw as UnknownRecord;
+  if (typeof obj.error === "string" && obj.error.length > 0) {
+    throw new ChatClientError(obj.error, "server", res.status);
+  }
+  if (!res.ok) {
+    throw new ChatClientError(
+      `The backend could not process your request (HTTP ${res.status}).`,
+      "server",
+      res.status
+    );
+  }
+
+  return parseAgentResponse(obj);
 }
 
 /**
