@@ -32,7 +32,9 @@ import {
   EVENTS,
   emitChatTitle,
   getConversationAsync,
+  imgMessageUrlFromContent,
   newConversationId,
+  promptFromImageUrl,
   saveConversationAsync,
   titleFromContent,
   type Conversation,
@@ -89,6 +91,9 @@ const ACTIONS = [
 
 const ACTIVE_CONVERSATION_KEY = "dashycore:active-conversation";
 
+/** HARD lifecycle rule: an <IMG> generation may never spin forever. */
+const IMG_LOAD_TIMEOUT_MS = 60_000;
+
 /**
  * Zero-cost <IMG> engine URL (pollinations.ai). The seed is regenerated on
  * EVERY call (crypto.randomUUID slice, else timestamp + random) so two
@@ -97,10 +102,11 @@ const ACTIVE_CONVERSATION_KEY = "dashycore:active-conversation";
 const POLLINATIONS_URL_BASE = "https://image.pollinations.ai/prompt/";
 
 function uniqueImageSeed(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
-  }
-  return `${Date.now()}${Math.floor(Math.random() * 100000)}`;
+  const random =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().replace(/-/g, "")
+      : Math.random().toString(36).slice(2, 8);
+  return `${Date.now()}_${random.slice(0, 8)}`;
 }
 
 function buildImageUrl(prompt: string): string {
@@ -110,29 +116,13 @@ function buildImageUrl(prompt: string): string {
 }
 
 /**
- * Matches an assistant message whose content is exactly ONE Pollinations
- * markdown image — the wire format the <IMG> engine persists. Detecting it
- * from the content (not just the `engine` flag) keeps the badge + rich
- * rendering working after a reload, including cloud-synced threads where
- * the messages table has no engine column.
+ * Returns the Pollinations URL for an assistant <IMG> message. Prefer the
+ * structured `imageUrl` field (set at generation time) and fall back to the
+ * persisted markdown line so cloud/local reloads still render the image.
  */
-const IMG_MESSAGE_RE =
-  /^!\[[^\]]*\]\((https:\/\/image\.pollinations\.ai\/prompt\/\S+?)\)$/;
-
 function imgMessageUrl(message: HistoryMessage): string | null {
   if (message.role !== "assistant") return null;
-  const match = IMG_MESSAGE_RE.exec(message.content.trim());
-  return match ? match[1] : null;
-}
-
-/** Recovers the prompt from a Pollinations URL (for retry with a fresh seed). */
-function imgPromptFromUrl(url: string): string {
-  const after = url.slice(POLLINATIONS_URL_BASE.length);
-  try {
-    return decodeURIComponent(after.split("?")[0] ?? "");
-  } catch {
-    return "";
-  }
+  return message.imageUrl ?? imgMessageUrlFromContent(message.content);
 }
 
 /** Soft trigger: "/img <prompt>" or "/image <prompt>" (never plain words). */
@@ -440,7 +430,6 @@ export default function ChatPage() {
   const handleGenerateImage = useCallback(
     (promptFromComposer?: string) => {
       const prompt = (promptFromComposer ?? input).trim();
-      if (isStreaming) return;
       if (!prompt) {
         toast.error(
           "Describe an image first",
@@ -459,9 +448,7 @@ export default function ChatPage() {
         markActiveConversation(conversationId);
       }
 
-      const engine = "img" as const;
       const imageUrl = buildImageUrl(prompt);
-
       const userMessage: HistoryMessage = {
         id: newConversationId(),
         role: "user",
@@ -473,14 +460,20 @@ export default function ChatPage() {
         role: "assistant",
         content: `![<IMG> generated](${imageUrl})`,
         timestamp: Date.now(),
-        engine,
+        engine: "img",
+        contentType: "image",
+        prompt,
+        imageUrl,
+        imageStatus: "loading",
       };
 
-      const withMessages = [...messages, userMessage, assistantMessage];
+      // Append (never overwrite) a NEW bubble. `messagesRef.current` is the
+      // latest thread, so rapid gen #1 → gen #2 cannot lose gen #1.
+      const withMessages = [...messagesRef.current, userMessage, assistantMessage];
       setMessages(withMessages);
       messagesRef.current = withMessages;
 
-      const firstUserMessage = messages.find((m) => m.role === "user");
+      const firstUserMessage = messagesRef.current.find((m) => m.role === "user");
       const title = firstUserMessage
         ? titleFromContent(firstUserMessage.content)
         : titleFromContent(prompt);
@@ -492,7 +485,7 @@ export default function ChatPage() {
         `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
       );
     },
-    [activeConversationId, input, isStreaming, messages, persistConversation, selectedModel, toast]
+    [activeConversationId, input, persistConversation, selectedModel, toast]
   );
 
   /**
@@ -506,13 +499,22 @@ export default function ChatPage() {
       if (!message) return;
       const currentUrl = imgMessageUrl(message);
       if (!currentUrl) return;
-      const prompt = imgPromptFromUrl(currentUrl);
+      const prompt = message.prompt || promptFromImageUrl(currentUrl);
       if (!prompt) return;
 
       const nextUrl = buildImageUrl(prompt);
       const next = messagesRef.current.map((m) =>
         m.id === messageId
-          ? { ...m, content: `![<IMG> generated](${nextUrl})`, engine: "img" as const }
+          ? {
+              ...m,
+              content: `![<IMG> generated](${nextUrl})`,
+              engine: "img" as const,
+              contentType: "image" as const,
+              prompt,
+              imageUrl: nextUrl,
+              imageStatus: "loading" as const,
+              imageError: undefined,
+            }
           : m
       );
       messagesRef.current = next;
@@ -777,7 +779,7 @@ export default function ChatPage() {
                     void handleSend(prompt);
                   }
                 }}
-                disabled={isStreaming}
+                disabled={!image && isStreaming}
                 className="group flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-left transition-all hover:border-cyan-400/30 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-cyan-500/5 disabled:opacity-50"
               >
                 <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-cyan-500/10">
@@ -841,7 +843,7 @@ export default function ChatPage() {
             <button
               type="button"
               onClick={() => handleGenerateImage()}
-              disabled={isStreaming}
+              disabled={!input.trim()}
               aria-label="Generate image with <IMG> Engine"
               title="Generate an image from the composer prompt with the <IMG> engine (or type /img <prompt>)"
               className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
@@ -1092,19 +1094,62 @@ function MessageRow({
 /* ========================================================================== */
 
 /**
- * Renders ONE Pollinations generation with real load/error states:
+ * Renders ONE Pollinations generation with real load/error states and a hard
+ * 60s lifecycle:
  *  - while the URL loads → spinner overlay ("Rendering image…")
- *  - on load            → image shown, spinner hidden
- *  - on error           → "Image failed, tap retry" + Retry (parent rebuilds
+ *  - on load            → loading state is released, spinner hidden
+ *  - on error / timeout → "Image failed, tap retry" + Retry (parent rebuilds
  *                         the URL with a FRESH seed — a brand-new generation)
+ *
+ * There is NO global image lock. Each bubble owns its own timer, so one stuck
+ * generation can never block the next one.
  */
 function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void }) {
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
+  const statusRef = useRef<"loading" | "loaded" | "error">("loading");
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const timerRef = useRef<number | null>(null);
 
-  // A retry swaps the URL prop — reset to the loading state for the new seed.
+  const clearTimer = () => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const applyStatus = (next: "loading" | "loaded" | "error") => {
+    statusRef.current = next;
+    setStatus(next);
+    // HARD RULE: clear the lock/timer on load, error, and remount. The 60s
+    // timeout is the last-resort release; the first terminal event wins.
+    if (next !== "loading") clearTimer();
+  };
+
+  // A retry swaps the URL prop — reset to loading for the new seed, arm a 60s
+  // timeout, and release it as soon as the element loads/errors/unmounts.
   useEffect(() => {
-    setStatus("loading");
+    applyStatus("loading");
+    const img = imgRef.current;
+    if (img && img.complete) {
+      // Already cached (reload/retry): avoid a spinner that never clears because
+      // the cached image's load event can fire before React attaches onLoad.
+      applyStatus(img.naturalWidth > 0 ? "loaded" : "error");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (statusRef.current === "loading") {
+        applyStatus("error");
+      }
+    }, IMG_LOAD_TIMEOUT_MS);
+    timerRef.current = timer;
+    return () => {
+      clearTimer();
+    };
+    // IMG_LOAD_TIMEOUT_MS is a module constant; url is the lifecycle key.
   }, [url]);
+
+  const handleLoad = () => applyStatus("loaded");
+  const handleError = () => applyStatus("error");
 
   return (
     <div className="relative overflow-hidden rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] p-1.5">
@@ -1131,10 +1176,11 @@ function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void })
         <>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
+            ref={imgRef}
             src={url}
-            alt="<IMG> generated"
-            onLoad={() => setStatus("loaded")}
-            onError={() => setStatus("error")}
+            alt={promptFromImageUrl(url) || "<IMG> generated"}
+            onLoad={handleLoad}
+            onError={handleError}
             className="block max-h-[70vh] min-h-[13rem] w-full max-w-full rounded-xl object-contain"
           />
           {status === "loading" && (
