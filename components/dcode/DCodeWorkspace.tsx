@@ -66,6 +66,7 @@ import { MarkdownPreviewPanel } from "@/components/dcode/MarkdownPreviewPanel";
 import {
   activateEnabledExtensions,
   deactivateAllExtensions,
+  onMonacoEditorReady,
   setExtensionEnabled as runtimeSetExtensionEnabled,
   getEnabledExtensionIdsCached,
   commandRegistry,
@@ -77,9 +78,10 @@ import type {
   DCodeWorkspaceApi,
   QuickPickItem,
 } from "@/lib/dcode/extensions/types";
+import { builtinExtensionById } from "@/lib/dcode/extensions/registry";
 import type { Monaco } from "@monaco-editor/react";
 import { formatText } from "@/lib/dcode/extensions/format";
-import { getStoredTheme, setStoredTheme } from "@/lib/dcode/extensions/storage";
+import { getFormatOnSave, getStoredTheme, setStoredTheme } from "@/lib/dcode/extensions/storage";
 import type { GithubBind } from "@/lib/dcode/github";
 import { useToast } from "@/components/Toast";
 import {
@@ -672,6 +674,47 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     [clearSaveErrorTimer, toast]
   );
 
+  /**
+   * Pre-save Prettier hook — runs ONLY when the dashy.prettier extension is
+   * enabled AND the user turned "Format on Save" on (Preferences persisted by
+   * the extension). Formats the ACTIVE file's flushed buffer, mirrors the
+   * result into editor state, and can never break the save itself: any
+   * failure falls through with the files untouched.
+   */
+  const maybeFormatOnSave = useCallback(
+    async (files: DCodeFile[]): Promise<DCodeFile[]> => {
+      try {
+        if (!getFormatOnSave()) return files;
+        if (!getEnabledExtensionIdsCached().includes("dashy.prettier")) return files;
+        const buffer = editorBufferRef.current;
+        const targetId = buffer?.fileId ?? activeFileIdRef.current;
+        const index = files.findIndex((f) => f.id === targetId);
+        if (index < 0) return files;
+        const file = files[index];
+        if (!file || file.content.startsWith("data:")) return files;
+        const source =
+          buffer && buffer.fileId === file.id ? buffer.content : file.content;
+        const result = await formatText(file.name, source);
+        if (!result.ok || result.text === undefined || result.text === source) {
+          return files;
+        }
+        const next = [...files];
+        next[index] = { ...file, content: result.text };
+        // Keep Monaco + the editor buffer in sync with what is being saved.
+        if (buffer && buffer.fileId === file.id) {
+          editorBufferRef.current = { fileId: file.id, content: result.text };
+        }
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: result.text! } : f))
+        );
+        return next;
+      } catch {
+        return files; // Formatting must never block a save.
+      }
+    },
+    []
+  );
+
   const persist = useCallback(
     async (mode: "autosave" | "manual"): Promise<void> => {
       const { projectId: id, title: t, files: rawFiles } = latestRef.current;
@@ -680,11 +723,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       // Flush any pending Monaco buffer into the snapshot being persisted so
       // an edit made in the last few milliseconds is never dropped.
       const buffer = editorBufferRef.current;
-      const fs = buffer
+      const flushed = buffer
         ? rawFiles.map((f) =>
             f.id === buffer.fileId ? { ...f, content: buffer.content } : f
           )
         : rawFiles;
+      // Optional Prettier pass (extension-gated, failure-isolated).
+      const fs = await maybeFormatOnSave(flushed);
 
       // Draft without a row yet → only an explicit save creates it.
       if (!id) {
@@ -733,7 +778,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         handleSaveFailure(error, mode);
       }
     },
-    [clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast]
+    [clearSaveErrorTimer, handleSaveFailure, maybeFormatOnSave, readOnly, router, toast]
   );
 
   /* Keep the retry timer pointed at the freshest persist implementation. */
@@ -1572,10 +1617,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       await runtimeSetExtensionEnabled(id, enabled, workspaceApi, extensionUi);
       setEnabledExtensions(getEnabledExtensionIdsCached());
       refreshCommands();
+      const name = builtinExtensionById(id)?.manifest.name ?? id;
       toast.show({
         type: enabled ? "success" : "info",
-        title: enabled ? "Installed" : "Uninstalled",
-        message: `${id} ${enabled ? "enabled — its commands are in the palette." : "disabled."}`,
+        title: enabled ? `${name} enabled` : `${name} disabled`,
+        message: enabled
+          ? "Its commands are live in the Command Palette."
+          : "Its commands left the Command Palette.",
       });
     },
     [extensionUi, refreshCommands, toast, workspaceApi]
@@ -2165,6 +2213,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   onEditorReady={(editor, monaco) => {
                     editorInstanceRef.current = editor;
                     monacoRef.current = monaco;
+                    // Monaco mounted (async CDN load / tab switch) — give
+                    // enabled Monaco-provider extensions (snippets, ghost
+                    // text) a chance to register against the live instance.
+                    void onMonacoEditorReady(workspaceApi, extensionUi);
                   }}
                   onSelectionChange={(text) => {
                     selectionRef.current = text;

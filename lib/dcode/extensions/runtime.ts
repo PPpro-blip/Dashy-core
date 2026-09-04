@@ -189,6 +189,46 @@ export async function deactivateAllExtensions(): Promise<void> {
 }
 
 /**
+ * Extensions whose activate() registers Monaco providers (completion
+ * providers, ghost-text completions). Monaco mounts asynchronously (CDN
+ * loader) and remounts per tab switch, so these may have been enabled while
+ * no editor instance existed — getMonaco() was null and they registered
+ * nothing. Re-running activate once a real editor is ready fixes
+ * "enabled but does nothing".
+ */
+const MONACO_PROVIDER_EXTENSION_IDS = ["dashy.snippets", "dashy.autocomplete"];
+
+/**
+ * Called from the workspace every time a Monaco editor instance becomes
+ * ready: (re)activates the enabled Monaco-provider extensions against the
+ * live instance. Idempotent, per-extension failure-isolated.
+ */
+export async function onMonacoEditorReady(
+  workspace: DCodeWorkspaceApi,
+  ui: DCodeExtensionUiApi
+): Promise<void> {
+  for (const id of MONACO_PROVIDER_EXTENSION_IDS) {
+    try {
+      if (!enabledIds().includes(id)) continue;
+      const mod = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+      if (!mod) continue;
+      if (activeModules.has(id)) {
+        // Clean teardown first so the provider never registers twice.
+        try {
+          await mod.deactivate?.();
+        } catch (error) {
+          console.error(`[dcode] extension ${id} failed to deactivate`, error);
+        }
+        activeModules.delete(id);
+      }
+      await activateOne(mod, workspace, ui);
+    } catch (error) {
+      console.error(`[dcode] re-activating ${id} on editor ready failed`, error);
+    }
+  }
+}
+
+/**
  * Enables or disables an extension, live. Persists the preference and
  * activates/deactivates + (un)registers its commands immediately, so the
  * palette reflects the change without a reload.
@@ -201,7 +241,15 @@ export async function setExtensionEnabled(
 ): Promise<void> {
   const mod = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
   if (!mod) return;
-  setExtensionEnabledState(id, enabled);
+  // Pass the full registry so the stored enabled set is seeded from the
+  // CURRENT defaults when the user toggles before any preference exists —
+  // one toggle must never flip the state of every other built-in.
+  setExtensionEnabledState(
+    id,
+    enabled,
+    BUILTIN_EXTENSIONS.map((m) => m.manifest.id),
+    DEFAULT_DISABLED_IDS
+  );
   enabledIdsCache = getEnabledExtensionIds(
     BUILTIN_EXTENSIONS.map((m) => m.manifest.id),
     DEFAULT_DISABLED_IDS

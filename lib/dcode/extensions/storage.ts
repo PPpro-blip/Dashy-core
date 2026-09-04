@@ -7,6 +7,8 @@
  * are consumed server-side by app/api/github/[...path]/route.ts.
  */
 
+import { DEFAULT_DCODE_THEME_ID } from "./themes";
+
 const ENABLED_KEY = "dashy.dcode.extensions.enabled";
 /** Ids the host has already offered to this user (so a user-disabled
  * extension is NOT silently re-enabled on the next load, while a brand-new
@@ -55,10 +57,13 @@ export function getEnabledExtensionIds(
   );
 
   if (!Array.isArray(stored)) {
-    // First run: everything on except the default-disabled set. Record that
-    // all current built-ins have now been offered.
+    // First run: everything on except the default-disabled set. Persist BOTH
+    // the resolved enabled set (explicit state) and the "offered" marker, so
+    // the very first toggle edits a real list instead of an implicit default.
+    const defaults = allIds.filter((id) => !off.has(id));
     writeJson(SEEN_KEY, [...allIds]);
-    return allIds.filter((id) => !off.has(id));
+    writeJson(ENABLED_KEY, defaults);
+    return defaults;
   }
 
   const known = new Set(allIds);
@@ -79,9 +84,28 @@ export function getEnabledExtensionIds(
   return enabled;
 }
 
-export function setExtensionEnabledState(id: string, enabled: boolean): void {
+/**
+ * Flips one extension in the persisted enabled set.
+ *
+ * When nothing is stored yet, the list is seeded with the CURRENT
+ * default-enabled set (all known ids minus the default-disabled ones) —
+ * never an empty list. Toggling ONE extension must never wipe the enable
+ * state of every other built-in (the classic "toggle Prettier off →
+ * everything goes dark" bug).
+ */
+export function setExtensionEnabledState(
+  id: string,
+  enabled: boolean,
+  allIds: string[] = [],
+  defaultDisabled: string[] = []
+): void {
   const stored = readJson(ENABLED_KEY);
-  const list = Array.isArray(stored) ? stored.filter((x): x is string => typeof x === "string") : [];
+  const list = Array.isArray(stored)
+    ? stored.filter((x): x is string => typeof x === "string")
+    : (() => {
+        const off = new Set(defaultDisabled);
+        return allIds.filter((x) => !off.has(x));
+      })();
   const next = enabled
     ? [...new Set([...list, id])]
     : list.filter((x) => x !== id);
@@ -97,11 +121,11 @@ export function setExtensionEnabledState(id: string, enabled: boolean): void {
 /* ------------------------------- theme -------------------------------- */
 
 export function getStoredTheme(): string {
-  if (typeof window === "undefined") return "dcode-obsidian";
+  if (typeof window === "undefined") return DEFAULT_DCODE_THEME_ID;
   try {
-    return window.localStorage.getItem(THEME_KEY) ?? "dcode-obsidian";
+    return window.localStorage.getItem(THEME_KEY) ?? DEFAULT_DCODE_THEME_ID;
   } catch {
-    return "dcode-obsidian";
+    return DEFAULT_DCODE_THEME_ID;
   }
 }
 

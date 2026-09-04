@@ -6,9 +6,16 @@
  * apply-command per theme. The selection is persisted to localStorage.
  */
 
-import { DASHY_THEMES } from "../themes";
+import { DASHY_THEMES, DEFAULT_DCODE_THEME_ID } from "../themes";
 import { getStoredTheme, setStoredTheme } from "../storage";
 import type { ExtensionModule } from "../types";
+
+/**
+ * Revert hook installed by activate() so deactivate() (which gets no
+ * context) can restore the default theme when the pack is disabled —
+ * a disabled extension must not leave its contribution applied.
+ */
+let revertToDefault: (() => void) | null = null;
 
 export const themesExtension: ExtensionModule = {
   manifest: {
@@ -45,6 +52,10 @@ export const themesExtension: ExtensionModule = {
       setStoredTheme(themeId);
       context.workspace.applyTheme(themeId);
     };
+    // Disable must revert the immediate effect: swap the editor back to the
+    // default D-Code theme (applied + persisted, so reloads stay consistent
+    // while the pack is disabled).
+    revertToDefault = () => applyTheme(DEFAULT_DCODE_THEME_ID);
 
     context.registerCommand("dashy.themes.selectTheme", {
       title: "Color Theme",
@@ -76,5 +87,11 @@ export const themesExtension: ExtensionModule = {
     if (DASHY_THEMES.some((t) => t.id === stored)) {
       context.workspace.applyTheme(stored);
     }
+  },
+
+  deactivate() {
+    // Best-effort revert (isolated by the host's try/catch even if it throws).
+    revertToDefault?.();
+    revertToDefault = null;
   },
 };
