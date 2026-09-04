@@ -41,6 +41,7 @@ import {
 import { getModelById } from "@/lib/models";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import { AttachmentButton } from "@/components/AttachmentButton";
+import ImgStudio from "@/components/img-engine/ImgStudio";
 import { useToast } from "@/components/Toast";
 import {
   ArrowUpRightIcon,
@@ -110,6 +111,8 @@ export default function ChatPage() {
   const [statuses, setStatuses] = useState<string[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [studioPrompt, setStudioPrompt] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -495,72 +498,21 @@ export default function ChatPage() {
     [toast]
   );
 
-  /**
-   * Zero-cost <IMG> engine (pollinations.ai) — NO dashy-flow-state call.
-   * Takes the composer prompt, then immediately appends a user message and an
-   * assistant message that renders the generated image as markdown.
-   */
-  const handleGenerateImage = useCallback(
-    (promptFromComposer?: string) => {
-      const prompt = (promptFromComposer ?? input).trim();
-      if (!prompt || isStreaming) {
-        if (!prompt) {
-          toast.error(
-            "Describe an image first",
-            "Type what you want to generate, then tap the <IMG> button."
-          );
-        }
-        return;
-      }
+  const handleOpenStudio = useCallback((prompt = input) => {
+    setStudioPrompt(prompt);
+    setStudioOpen(true);
+  }, [input]);
 
-      setInput("");
-      setStatuses([]);
-
-      let conversationId = activeConversationId;
-      if (!conversationId) {
-        conversationId = newConversationId();
-        setActiveConversationId(conversationId);
-        markActiveConversation(conversationId);
-      }
-
-      const engine = "img" as const;
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-        prompt
-      )}?width=1024&height=1024&nologo=true&seed=${Math.floor(
-        Math.random() * 100000
-      )}`;
-
-      const userMessage: HistoryMessage = {
-        id: newConversationId(),
-        role: "user",
-        content: prompt,
-        timestamp: Date.now(),
-      };
-      const assistantMessage: HistoryMessage = {
-        id: newConversationId(),
-        role: "assistant",
-        content: `![<IMG> generated](${imageUrl})`,
-        timestamp: Date.now(),
-        engine,
-      };
-
-      const withMessages = [...messages, userMessage, assistantMessage];
-      setMessages(withMessages);
-
-      const firstUserMessage = messages.find((m) => m.role === "user");
-      const title = firstUserMessage
-        ? titleFromContent(firstUserMessage.content)
-        : titleFromContent(prompt);
-      emitChatTitle(title);
-      persistConversation(conversationId, withMessages, selectedModel, title);
-
-      toast.success(
-        "<IMG> engine",
-        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
-      );
-    },
-    [activeConversationId, input, isStreaming, messages, persistConversation, selectedModel, toast]
-  );
+  const handleStudioSend = useCallback((item: { prompt: string; url?: string }) => {
+    if (!item.url) return;
+    const conversationId = activeConversationId ?? newConversationId();
+    if (!activeConversationId) { setActiveConversationId(conversationId); markActiveConversation(conversationId); }
+    const imageMessage: HistoryMessage = { id: newConversationId(), role: "assistant", content: `![<IMG> ${item.prompt}](${item.url})\n\n*${item.prompt}*`, timestamp: Date.now(), engine: "img" };
+    const next = [...messages, imageMessage]; setMessages(next);
+    persistConversation(conversationId, next, selectedModel);
+    setStudioOpen(false);
+    toast.success("Sent to chat", "The verified image was saved to this conversation.");
+  }, [activeConversationId, messages, persistConversation, selectedModel, toast]);
 
   /**
    * Hands a fenced code block to D-Code: stashes the snapshot in
@@ -624,7 +576,7 @@ export default function ChatPage() {
                 type="button"
                 onClick={() => {
                   if (image) {
-                    handleGenerateImage(prompt);
+                    handleOpenStudio(prompt);
                   } else {
                     void handleSend(prompt);
                   }
@@ -671,6 +623,8 @@ export default function ChatPage() {
       )}
 
       {/* --------------------- BOTTOM-ANCHORED INPUT BAR --------------------- */}
+      {studioOpen && <ImgStudio initialPrompt={studioPrompt} onClose={() => setStudioOpen(false)} onSendToChat={handleStudioSend} />}
+
       <div className="flex-shrink-0 border-t border-white/[0.06] bg-navy/70 p-4 backdrop-blur-2xl">
         <div className="mx-auto w-full max-w-3xl">
           <div className="flex items-end gap-2 rounded-2xl border border-white/[0.1] bg-white/[0.045] px-3 py-2.5 shadow-inner shadow-black/10 transition-colors focus-within:border-cyan-400/60 focus-within:ring-4 focus-within:ring-cyan-400/10">
@@ -691,9 +645,9 @@ export default function ChatPage() {
             />
             <button
               type="button"
-              onClick={() => handleGenerateImage()}
-              disabled={!input.trim() || isStreaming}
-              aria-label="Generate image with <IMG> Engine"
+              onClick={() => handleOpenStudio()}
+              disabled={isStreaming}
+              aria-label="Open <IMG> Studio with <IMG> Engine"
               title="Generate image with <IMG> Engine"
               className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
             >
