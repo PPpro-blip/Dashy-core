@@ -50,6 +50,12 @@ interface ShareComposerProps {
   imageOptions: ProjectImage[];
   onBack: () => void;
   onClose: () => void;
+  /**
+   * Fired when the user CONFIRMS this composer (deep-link opened or text
+   * copied) — the hub records the destination + caption + tags so the next
+   * "Share now" prefers this app. Never fired on cancel/back.
+   */
+  onConfirm?: (appId: ShareAppConfig["id"], draft: ShareDraft) => void;
 }
 
 function ChipInput({
@@ -113,6 +119,7 @@ export function ShareComposer({
   imageOptions,
   onBack,
   onClose,
+  onConfirm,
 }: ShareComposerProps) {
   const toast = useToast();
   const [copying, setCopying] = useState<string | null>(null);
@@ -174,6 +181,9 @@ export function ShareComposer({
   };
 
   const handleConfirm = () => {
+    // Record the confirmed destination + draft BEFORE performing the share
+    // action so the hub's "Share now" can prefer this app next time.
+    onConfirm?.(app.id, draft);
     switch (app.id) {
       case "whatsapp":
         open(buildWhatsAppUrl(draft));
