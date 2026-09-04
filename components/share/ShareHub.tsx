@@ -4,21 +4,32 @@
  * DashyCore v7 — ShareHub
  *
  * The main share surface (modal sheet on desktop, full-screen friendly on
- * mobile). It shows a live preview card, copy-link, QR code, the OS
- * "Share via device" action and the per-app grid. Tapping an app opens its
- * ShareComposer instead of firing a raw intent immediately.
+ * mobile). Layout, top to bottom:
+ *
+ *   1. Big centered project preview card — thumb, title, tags/description,
+ *      public URL row with Copy + QR
+ *   2. PRIMARY action — a giant "Share now" button:
+ *        · navigator.share() when available  → one-tap OS share sheet
+ *        · else the LAST-USED app composer (dashy.share.prefs), prefilled
+ *        · else it points the user at the app grid below
+ *   3. Owner-only privacy controls (make public / private)
+ *   4. Clean per-app grid (composers keep full customization)
+ *
+ * Honest by design: composers deep-link or copy — nothing fakes a post.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DCodeFile } from "@/lib/dcode";
 import {
   collectProjectImages,
   makeDefaultDraft,
   SHARE_APPS,
   SHARE_APP_MAP,
+  tagSlug,
   type ShareAppId,
   type ShareDraft,
 } from "@/lib/share-intents";
+import { applyPrefsToDraft, getSharePrefs, saveSharePrefs } from "@/lib/share-prefs";
 import { copyText } from "@/lib/clipboard";
 import { ShareComposer } from "@/components/share/ShareComposer";
 import { ShareQr } from "@/components/share/ShareQr";
@@ -55,20 +66,33 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
   const toast = useToast();
   const [selectedApp, setSelectedApp] = useState<ShareAppId | null>(null);
   const [copying, setCopying] = useState(false);
-  const [deviceSharing, setDeviceSharing] = useState(false);
+  const [sharingNow, setSharingNow] = useState(false);
+  const [showQr, setShowQr] = useState(false);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   const imageOptions = useMemo(
     () => collectProjectImages(project?.files ?? []),
     [project?.files]
   );
 
+  // Last-used destination + caption/tags (dashy.share.prefs). Seeds the
+  // draft so "Share now" opens the last-used composer prefilled.
+  const prefs = useMemo(() => getSharePrefs(), []);
+  const lastApp =
+    prefs.destination && SHARE_APP_MAP[prefs.destination]
+      ? SHARE_APP_MAP[prefs.destination]
+      : null;
+
   // The hub remounts on each open (conditional render in the workspace), so
   // this initializer gives us fresh smart defaults every time it opens.
   const [draft, setDraft] = useState<ShareDraft>(() =>
-    makeDefaultDraft(
-      project?.title ?? "Untitled project",
-      shareUrl ?? "",
-      imageOptions
+    applyPrefsToDraft(
+      makeDefaultDraft(
+        project?.title ?? "Untitled project",
+        shareUrl ?? "",
+        imageOptions
+      ),
+      prefs
     )
   );
 
@@ -99,11 +123,22 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
         imageOptions={imageOptions}
         onBack={() => setSelectedApp(null)}
         onClose={onClose}
+        onConfirm={(appId, confirmedDraft) => {
+          // Remember the last destination + caption + tags — the next
+          // "Share now" (desktop, no OS sheet) prefers this composer.
+          saveSharePrefs({
+            destination: appId,
+            caption: confirmedDraft.caption,
+            tags: confirmedDraft.tags,
+          });
+        }}
       />
     );
   }
 
   const url = draft.url;
+  const canDeviceShare =
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
 
   const handleCopyLink = async () => {
     setCopying(true);
@@ -124,34 +159,55 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
     }
   };
 
-  const handleDeviceShare = async () => {
-    if (typeof navigator === "undefined" || !navigator.share) {
-      toast.show({
-        type: "info",
-        title: "Device share not available",
-        message: "Copy the link or pick an app from the grid instead.",
-      });
+  /**
+   * PRIMARY one-tap action:
+   *   1. navigator.share (mobile + supported desktop) → OS share sheet
+   *   2. last-used app composer, prefilled with the remembered draft
+   *   3. no preference yet → spotlight the app grid to pick one
+   */
+  const handleShareNow = async () => {
+    if (canDeviceShare) {
+      setSharingNow(true);
+      try {
+        await navigator.share({
+          title: draft.title,
+          text: [draft.caption.trim(), draft.tags.map(tagSlug).filter(Boolean).join(" ")]
+            .filter(Boolean)
+            .join("\n\n"),
+          url,
+        });
+      } catch (error) {
+        if ((error as { name?: string }).name !== "AbortError") {
+          toast.show({
+            type: "error",
+            title: "Device share failed",
+            message: error instanceof Error ? error.message : "Please try again.",
+          });
+        }
+      } finally {
+        setSharingNow(false);
+      }
       return;
     }
-    setDeviceSharing(true);
-    try {
-      await navigator.share({
-        title: draft.title,
-        text: draft.caption,
-        url,
-      });
-    } catch (error) {
-      if ((error as { name?: string }).name !== "AbortError") {
-        toast.show({
-          type: "error",
-          title: "Device share failed",
-          message: error instanceof Error ? error.message : "Please try again.",
-        });
-      }
-    } finally {
-      setDeviceSharing(false);
+    if (lastApp) {
+      setSelectedApp(lastApp.id);
+      return;
     }
+    // First time on desktop: guide to the grid (one intentional pick).
+    gridRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    toast.show({
+      type: "info",
+      title: "Pick where to share",
+      message:
+        "Choose an app below — your choice is remembered for one-tap sharing next time.",
+    });
   };
+
+  const shareNowLabel = canDeviceShare
+    ? "Share now"
+    : lastApp
+    ? `Share now · ${lastApp.name}`
+    : "Share now";
 
   return (
     <>
@@ -190,10 +246,10 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
         </div>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
-          {/* Preview card */}
-          <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.02]">
-            <div className="flex items-stretch gap-3">
-              <div className="relative w-24 flex-shrink-0 bg-black/30">
+          {/* Big centered preview card */}
+          <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02] transition-colors hover:border-cyan-400/25">
+            <div className="flex flex-col items-center px-5 pb-4 pt-6 text-center">
+              <div className="relative h-20 w-20 overflow-hidden rounded-2xl border border-white/[0.08] bg-black/30 shadow-lg shadow-black/40">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={draft.imageDataUrl ?? "/icon-512.png"}
@@ -201,27 +257,102 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
                   className="absolute inset-0 h-full w-full object-cover"
                 />
               </div>
-              <div className="min-w-0 flex-1 py-3 pr-3">
-                <p className="truncate text-sm font-semibold text-white">
-                  {draft.title}
-                </p>
-                <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-zinc-400">
-                  {draft.caption || "Built with DashyCore D-Code ⚡"}
-                </p>
-                <p className="mt-2 flex items-center gap-1 truncate font-mono text-[10px] text-zinc-600">
-                  <GlobeIcon className="h-3 w-3 flex-shrink-0" />
-                  <span className="truncate">{url}</span>
+              <p className="mt-3 max-w-full truncate px-2 text-base font-semibold text-white">
+                {draft.title || "Untitled project"}
+              </p>
+              <p className="mt-1 line-clamp-2 max-w-sm text-xs leading-relaxed text-zinc-400">
+                {draft.caption || "Built with DashyCore D-Code ⚡"}
+              </p>
+              {draft.tags.length > 0 && (
+                <div className="mt-2.5 flex flex-wrap justify-center gap-1.5">
+                  {draft.tags.slice(0, 6).map((tag) => (
+                    <span
+                      key={tag}
+                      className="rounded-lg border border-cyan-400/20 bg-cyan-400/[0.08] px-2 py-0.5 text-[10px] font-medium text-cyan-300"
+                    >
+                      {tagSlug(tag) || tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Public URL row: link + Copy + QR */}
+            <div className="flex items-center gap-2 border-t border-white/[0.06] bg-black/20 px-4 py-3">
+              <GlobeIcon className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400/70" />
+              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-400">
+                {url || "Assigning share link…"}
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleCopyLink()}
+                disabled={!url || copying}
+                title="Copy the public project link"
+                className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20 disabled:opacity-40"
+              >
+                {copying ? (
+                  <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CopyIcon className="h-3.5 w-3.5" />
+                )}
+                Copy
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowQr((v) => !v)}
+                aria-expanded={showQr}
+                title={showQr ? "Hide QR code" : "Show QR code"}
+                className={`flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors ${
+                  showQr
+                    ? "border-cyan-400/40 bg-cyan-400/15 text-cyan-200"
+                    : "border-white/[0.1] bg-white/[0.03] text-zinc-300 hover:border-cyan-400/40 hover:text-cyan-300"
+                }`}
+              >
+                <LinkIcon className="h-3.5 w-3.5" />
+                QR
+              </button>
+            </div>
+
+            {showQr && (
+              <div className="flex flex-col items-center border-t border-white/[0.06] px-4 py-4">
+                <ShareQr value={url} />
+                <p className="mt-2 text-[11px] text-zinc-500">
+                  Scan to open this public project
                 </p>
               </div>
-            </div>
+            )}
           </div>
+
+          {/* PRIMARY action — one-tap share */}
+          <button
+            type="button"
+            onClick={() => void handleShareNow()}
+            disabled={sharingNow || !url}
+            className="group flex w-full flex-col items-center justify-center gap-1 rounded-2xl bg-gradient-to-b from-cyan-400 to-cyan-500 px-6 py-4 text-[#06202a] shadow-lg shadow-cyan-500/25 transition-all hover:from-cyan-300 hover:to-cyan-400 hover:shadow-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="flex items-center gap-2 text-base font-bold">
+              {sharingNow ? (
+                <LoaderIcon className="h-5 w-5 animate-spin" />
+              ) : (
+                <ShareIcon className="h-5 w-5" />
+              )}
+              {shareNowLabel}
+            </span>
+            <span className="text-[11px] font-medium opacity-75">
+              {canDeviceShare
+                ? "Opens your device's share sheet"
+                : lastApp
+                ? `Opens your ${lastApp.name} composer, prefilled`
+                : "Pick an app below — remembered for next time"}
+            </span>
+          </button>
 
           {/* Owner privacy controls — hidden for plain visitors, who never
               see this prop at all. A private project still renders the full
               hub for its owner; this row is how they publish/revoke. */}
           {privacy && (
             <div
-              className={`flex items-center gap-3 rounded-xl border px-3.5 py-3 ${
+              className={`flex items-center gap-3 rounded-2xl border px-3.5 py-3 ${
                 privacy.isPublic
                   ? "border-cyan-400/20 bg-cyan-400/[0.06]"
                   : "border-amber-400/25 bg-amber-400/[0.07]"
@@ -274,76 +405,49 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
             </div>
           )}
 
-          {/* Quick actions */}
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => void handleCopyLink()}
-              disabled={!url}
-              className="flex min-h-12 flex-col items-center justify-center gap-1 rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-40"
-            >
-              {copying ? (
-                <LoaderIcon className="h-4 w-4 animate-spin" />
-              ) : (
-                <CopyIcon className="h-4 w-4" />
-              )}
-              <span className="text-[11px] font-medium">Copy link</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleDeviceShare()}
-              disabled={deviceSharing}
-              className="flex min-h-12 flex-col items-center justify-center gap-1 rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-40"
-            >
-              {deviceSharing ? (
-                <LoaderIcon className="h-4 w-4 animate-spin" />
-              ) : (
-                <ShareIcon className="h-4 w-4" />
-              )}
-              <span className="text-[11px] font-medium">Share via device</span>
-            </button>
-          </div>
-
-          {/* QR code */}
-          <div className="flex flex-col items-center rounded-xl border border-white/[0.08] bg-white/[0.02] p-3">
-            <ShareQr value={url} />
-            <p className="mt-2 text-[11px] text-zinc-500">
-              Scan to open this public project
-            </p>
-          </div>
-
-          {/* App grid — each tile opens that app's composer. */}
-          <div>
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+          {/* App grid — each tile opens that app's composer (full
+              customization: title, caption, tags, image picker). */}
+          <div ref={gridRef}>
+            <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
               Share to…
             </p>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-3 gap-2 sm:grid-cols-3">
               {SHARE_APPS.map((app) => (
                 <button
                   key={app.id}
                   type="button"
                   onClick={() => setSelectedApp(app.id)}
-                  className="group flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.03] p-2 transition-all hover:border-cyan-400/40 hover:bg-white/[0.05]"
+                  className={`group flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 rounded-2xl border bg-white/[0.02] p-2 transition-all hover:border-cyan-400/40 hover:bg-white/[0.05] hover:shadow-lg hover:shadow-cyan-500/[0.07] ${
+                    prefs.destination === app.id
+                      ? "border-cyan-400/35"
+                      : "border-white/[0.08]"
+                  }`}
                 >
                   <span
-                    className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold text-white"
+                    className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold"
                     style={{
-                      backgroundColor: `${app.badge}33`,
+                      backgroundColor: `${app.badge}26`,
                       color: app.accent,
                       boxShadow: `0 0 0 1px ${app.accent}55`,
                     }}
                   >
                     {app.name.charAt(0)}
                   </span>
-                  <span className="text-[11px] font-medium text-zinc-300 group-hover:text-white">
+                  <span className="max-w-full truncate text-[11px] font-medium text-zinc-300 group-hover:text-white">
                     {app.name}
                   </span>
+                  {prefs.destination === app.id && (
+                    <span className="text-[9px] font-semibold uppercase tracking-wide text-cyan-400/80">
+                      Last used
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
-            <p className="mt-3 flex items-center gap-1.5 text-[11px] text-zinc-600">
-              <LinkIcon className="h-3.5 w-3.5" />
-              Tapping an app opens a composer to refine title, caption & image first.
+            <p className="mt-3 flex items-center gap-1.5 text-[11px] leading-relaxed text-zinc-600">
+              <LinkIcon className="h-3.5 w-3.5 flex-shrink-0" />
+              Tapping an app opens a composer to refine title, caption &amp;
+              image first — we never post for you.
             </p>
           </div>
         </div>

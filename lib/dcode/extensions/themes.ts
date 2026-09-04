@@ -9,6 +9,14 @@
 
 import type { editor } from "monaco-editor";
 
+/**
+ * The default D-Code theme — the original cyan/obsidian look. Used whenever
+ * no stored preference exists AND as the revert target when the Dashy Theme
+ * Pack extension is disabled (a disabled extension must not keep its
+ * contribution applied).
+ */
+export const DEFAULT_DCODE_THEME_ID = "dcode-obsidian";
+
 export interface DashyThemeDefinition {
   /** Monaco theme id (stable — persisted in localStorage). */
   id: string;
