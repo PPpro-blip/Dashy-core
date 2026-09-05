@@ -25,6 +25,15 @@ export const DASHY_FLOW_STATE_URL =
   process.env.NEXT_PUBLIC_DASHY_FLOW_STATE_URL ??
   "https://dashy-flow-state.kamleshprathampandey.workers.dev";
 
+/**
+ * @deprecated Uploads no longer call this worker from the browser. Documents
+ * go through the same-origin proxy `POST /api/digest/upload`, which resolves
+ * the Supabase user from the httpOnly cookies and injects `userId` on the
+ * server→worker hop. This constant is kept only so the URL stays documented;
+ * do NOT fetch it from a client component (that is what produced the
+ * "userId is required" failures). Server-side resolution lives in
+ * `app/api/digest/upload/route.ts` (`DASHY_DIGEST_URL` there).
+ */
 export const DASHY_DIGEST_URL =
   process.env.NEXT_PUBLIC_DASHY_DIGEST_URL ??
   "https://dashy-digest.kamleshprathampandey.workers.dev";

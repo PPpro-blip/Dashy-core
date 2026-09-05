@@ -3,9 +3,10 @@
 /**
  * DashyCore v7 — Knowledge (workspace memory browser).
  *
- * Reuses the REAL upload flow (components/AttachmentButton → dashy-digest
- * worker → Supabase RAG tables) and lists indexed documents from the
- * `documents` table. No simulated ingestion.
+ * Reuses the REAL upload flow (components/AttachmentButton →
+ * POST /api/digest/upload → dashy-digest worker → Supabase RAG tables) and
+ * lists indexed documents from the `documents` table. No simulated
+ * ingestion — and no browser-side userId: the server proxy injects it.
  */
 
 import { useState } from "react";
@@ -42,6 +43,7 @@ export default function KnowledgePage() {
           {/* The whole visible control IS the attach button — no dead
               click area that only looks like a button. */}
           <AttachmentButton
+            origin="knowledge"
             className="h-9 w-auto gap-1.5 rounded-xl border border-cyan-400/25 bg-cyan-500/10 px-3.5 text-cyan-300 hover:border-cyan-400/40 hover:bg-cyan-500/20 hover:text-cyan-200"
             onUploaded={() => setReloadKey((key) => key + 1)}
           />
