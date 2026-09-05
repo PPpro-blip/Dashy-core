@@ -117,11 +117,12 @@ export function AttachmentButton({
         message: `${file.name} is now searchable in your workspace.`,
       });
       onUploaded?.({ filename: file.name, documentId });
-    } catch (error) {
+    } catch (err) {
+      console.error("CRITICAL UPLOAD ERROR:", err);
       const isAuthError =
-        error instanceof DigestUploadError && error.kind === "unauthenticated";
+        err instanceof DigestUploadError && err.kind === "unauthenticated";
       const message =
-        error instanceof Error ? error.message : "Something went wrong.";
+        err instanceof Error ? err.message : "Something went wrong.";
       toast.update(toastId, {
         type: "error",
         title: isAuthError ? "Sign in required" : "Upload failed",
