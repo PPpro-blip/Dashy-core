@@ -8,7 +8,7 @@
  *
  *   POST https://dashy-digest.kamleshprathampandey.workers.dev
  *   Authorization: Bearer <supabase access token>
- *   FormData: { file, filename, sourceType, userId }
+ *   FormData: { file, filename, sourceType, userId, user_id }
  *
  * The Supabase user id is resolved from the live session BEFORE the request
  * is sent, so the worker never receives an upload without `userId`. Signed-out
@@ -28,6 +28,7 @@ import {
   DigestUploadError,
   digestSourceTypeFor,
   resolveDigestIdentity,
+  uploadToDigest,
   uploadFileToDigest,
 } from "@/lib/digest-client";
 
@@ -86,8 +87,8 @@ export function AttachmentButton({
       if (!cancelled && identity) identityRef.current = identity;
     };
 
-    // Initial hydration (retries internally while the session settles).
-    void resolveDigestIdentity(userId).then(remember);
+    // Initial hydration
+    void resolveDigestIdentity(userId).then(remember).catch(() => {});
 
     const supabase = createClient();
     const {
@@ -100,8 +101,8 @@ export function AttachmentButton({
       }
       const nextUserId = session?.user?.id ?? null;
       const nextToken = session?.access_token ?? null;
-      if (nextUserId && nextToken) {
-        identityRef.current = { userId: nextUserId, accessToken: nextToken };
+      if (nextUserId) {
+        identityRef.current = { userId: nextUserId, accessToken: nextToken || "" };
       }
     });
 
@@ -140,9 +141,14 @@ export function AttachmentButton({
     // clean login message instead of the worker's "userId is required".
     // Always re-consult the live session first (it auto-refreshes an expired
     // token); fall back to the warm cache only if that momentarily fails.
-    const identity =
-      (await resolveDigestIdentity(userId)) ?? identityRef.current;
-    if (!identity?.userId || !identity.accessToken) {
+    let identity: DigestIdentity | null = null;
+    try {
+      identity = (await resolveDigestIdentity(userId)) ?? identityRef.current;
+    } catch {
+      identity = identityRef.current;
+    }
+
+    if (!identity?.userId) {
       toast.error("Sign in required", DIGEST_LOGIN_REQUIRED_MESSAGE);
       return;
     }
@@ -155,7 +161,7 @@ export function AttachmentButton({
     );
 
     try {
-      const { documentId } = await uploadFileToDigest({ file, identity });
+      const { documentId } = await uploadToDigest({ file, identity });
 
       toast.update(toastId, {
         type: "success",

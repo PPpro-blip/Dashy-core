@@ -4,10 +4,10 @@
  * DashyCore v7 — the shared client boundary for the live `dashy-digest`
  * upload worker.
  *
- * The multipart request below is deliberately boring. It is the production
- * contract: the browser owns the multipart boundary, the worker receives the
- * verified Supabase user id in the query string and form body, and the only
- * manually supplied header is the Bearer token.
+ * The multipart request below is the canonical production upload path:
+ * the browser handles the multipart boundary, the worker receives the
+ * verified Supabase user id in BOTH the FormData body AND the URL query string
+ * (`?userId=...&user_id=...`), and the Bearer token is provided in headers.
  */
 
 import { createClient } from "@/lib/supabase/client";
@@ -17,7 +17,7 @@ import { createClient } from "@/lib/supabase/client";
  * environment variable. `||` also treats an accidentally empty value as
  * missing.
  */
-const BASE_URL =
+export const DASHY_DIGEST_URL =
   process.env.NEXT_PUBLIC_DASHY_DIGEST_URL ||
   "https://dashy-digest.kamleshprathampandey.workers.dev";
 
@@ -36,6 +36,14 @@ export interface DigestUploadResult {
   raw: Record<string, unknown>;
 }
 
+export interface UploadDigestOptions {
+  file: File;
+  identity?: DigestIdentity | null;
+  fallbackUserId?: string | null;
+  sourceType?: string;
+  signal?: AbortSignal;
+}
+
 export class DigestUploadError extends Error {
   constructor(
     message: string,
@@ -48,72 +56,51 @@ export class DigestUploadError extends Error {
 }
 
 /**
- * Resolves the signed-in caller for a digest upload.
+ * Resolves the user ID and session access token reliably for digest uploads.
  *
- * WATERPROOF CONTRACT — returns BOTH halves or `null`, never a partial:
- *  1. `getSession()` (local cookie/storage read, auto-refreshes an expired
- *     token) — the exact pattern /chat and /agents use.
- *  2. If either half is missing, `getUser()` forces a server round-trip that
- *     also hydrates the client's session store, then the session is re-read
- *     so a freshly minted access token is picked up.
- *  3. Auth hydration race (Knowledge mounts before the browser client has
- *     restored the cookie session): retried a couple of times with a short
- *     backoff instead of failing the upload with "userId is required".
- *
- * `fallbackUserId` (e.g. the chat page's already-loaded id) is a last resort
- * and can never authenticate a signed-out visitor on its own — an access
- * token is always required alongside it.
+ * Retrieves the session via getSession(), falls back to getUser() if session
+ * has no user, or to fallbackUserId. Throws a clean DigestUploadError if
+ * no user identity could be resolved.
  */
 export async function resolveDigestIdentity(
   fallbackUserId?: string | null
-): Promise<DigestIdentity | null> {
-  const attempt = async (): Promise<DigestIdentity | null> => {
-    const supabase = createClient();
+): Promise<DigestIdentity> {
+  const supabase = createClient();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  let userId = session?.user?.id;
+  let accessToken = session?.access_token;
 
+  if (!userId) {
     const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
-    let userId: string | null = session?.user?.id ?? null;
-    let accessToken: string | null = session?.access_token ?? null;
-
-    if (!userId || !accessToken) {
-      // Forces a network verification AND hydrates the client session store.
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      userId = user?.id ?? userId;
-
-      // Prefer the (possibly just-refreshed) session for BOTH halves.
-      const s2 = (await supabase.auth.getSession()).data.session;
-      accessToken = s2?.access_token ?? accessToken;
-      userId = s2?.user?.id ?? userId;
-    }
-
-    if (!userId && fallbackUserId) userId = fallbackUserId;
-
-    // Both halves are mandatory: the worker verifies the Bearer token AND
-    // requires an explicit userId. Missing either means "not signed in".
-    if (!userId || !accessToken) return null;
-
-    return { userId, accessToken };
-  };
-
-  for (let i = 0; i < 3; i += 1) {
-    try {
-      const identity = await attempt();
-      if (identity) return identity;
-    } catch {
-      // Network/storage hiccup — fall through to the retry below.
-    }
-    // Short backoff: 0ms, 150ms, 400ms — covers the mount-before-hydration
-    // race without making a genuinely signed-out visitor wait.
-    if (i < 2) {
-      await new Promise((resolve) => setTimeout(resolve, i === 0 ? 150 : 400));
-    }
+      data: { user },
+    } = await supabase.auth.getUser();
+    userId = user?.id;
   }
 
-  return null;
+  if (!userId && fallbackUserId) {
+    userId = fallbackUserId;
+  }
+
+  if (userId && !accessToken) {
+    const {
+      data: { session: s2 },
+    } = await supabase.auth.getSession();
+    accessToken = s2?.access_token;
+  }
+
+  if (!userId) {
+    throw new DigestUploadError(
+      DIGEST_LOGIN_REQUIRED_MESSAGE,
+      "unauthenticated"
+    );
+  }
+
+  return {
+    userId,
+    accessToken: accessToken || "",
+  };
 }
 
 /** Maps a file to the source type expected by the digest pipeline. */
@@ -177,23 +164,27 @@ function workerErrorMessage(response: WorkerResponse): string {
 }
 
 /**
- * Build the worker URL with the two user id spellings required by production.
- * Using URL rather than string concatenation preserves any configured base
- * path and correctly escapes a UUID/query value.
+ * Builds the digest URL with EVERY userId key in the query string:
+ * `?userId=...&user_id=...&userid=...`
  */
 function buildDigestUrl(identity: DigestIdentity): string {
-  const url = new URL(BASE_URL);
-  url.searchParams.append("userId", identity.userId);
-  url.searchParams.append("user_id", identity.userId);
+  const url = new URL(DASHY_DIGEST_URL);
+  url.searchParams.set("userId", identity.userId);
+  url.searchParams.set("user_id", identity.userId);
+  url.searchParams.set("userid", identity.userId);
   return url.toString();
 }
 
-/** The Authorization header is intentionally the only custom request header. */
+/** The Authorization header is supplied when an access token is available. */
 function authHeaders(identity: DigestIdentity): Record<string, string> {
-  return { Authorization: `Bearer ${identity.accessToken}` };
+  const headers: Record<string, string> = {};
+  if (identity.accessToken) {
+    headers["Authorization"] = `Bearer ${identity.accessToken}`;
+  }
+  return headers;
 }
 
-/** Send the one supported upload wire: CORS-safe multipart/form-data. */
+/** Sends the multipart/form-data upload payload with userId in body and query. */
 async function postMultipart(
   identity: DigestIdentity,
   file: File,
@@ -207,6 +198,7 @@ async function postMultipart(
   formData.append("sourceType", sourceType);
   formData.append("userId", identity.userId);
   formData.append("user_id", identity.userId);
+  formData.append("userid", identity.userId);
 
   const response = await fetch(buildDigestUrl(identity), {
     method: "POST",
@@ -258,8 +250,6 @@ function responseToResult(response: WorkerResponse): DigestUploadResult {
 function networkUploadError(error: unknown): DigestUploadError {
   if (error instanceof DigestUploadError) return error;
   if (error instanceof Error && error.message) {
-    // Keep the browser's real error (for example, a CORS TypeError) visible
-    // in the toast instead of replacing it with an unhelpful generic string.
     return new DigestUploadError(error.message, "network");
   }
   return new DigestUploadError(
@@ -269,26 +259,33 @@ function networkUploadError(error: unknown): DigestUploadError {
 }
 
 /**
- * Upload one file after the identity gate. No request is dispatched when the
- * visitor is signed out or the supplied identity is incomplete.
+ * Uploads one file to dashy-digest using the shared digest client.
+ *
+ * Appends userId and user_id to BOTH FormData and the query string.
+ * Supports passing either `{ file, ... }` or `(file, options)`.
  */
-export async function uploadFileToDigest(options: {
-  file: File;
-  identity?: DigestIdentity | null;
-  fallbackUserId?: string | null;
-  sourceType?: string;
-  signal?: AbortSignal;
-}): Promise<DigestUploadResult> {
-  // A caller-supplied identity is only trusted when BOTH halves are present
-  // and non-empty; otherwise we resolve it ourselves. This is the last gate
-  // before the wire — no request is ever dispatched without a real userId.
-  const supplied = options.identity;
-  const identity =
-    supplied && supplied.userId?.trim() && supplied.accessToken?.trim()
-      ? { userId: supplied.userId.trim(), accessToken: supplied.accessToken }
-      : await resolveDigestIdentity(supplied?.userId ?? options.fallbackUserId);
+export async function uploadToDigest(
+  fileOrOptions: File | UploadDigestOptions,
+  maybeOptions?: Omit<UploadDigestOptions, "file">
+): Promise<DigestUploadResult> {
+  const options: UploadDigestOptions =
+    fileOrOptions instanceof File
+      ? { file: fileOrOptions, ...maybeOptions }
+      : fileOrOptions;
 
-  if (!identity?.userId?.trim() || !identity.accessToken?.trim()) {
+  const supplied = options.identity;
+  let identity: DigestIdentity;
+
+  if (supplied && supplied.userId?.trim()) {
+    identity = {
+      userId: supplied.userId.trim(),
+      accessToken: supplied.accessToken || "",
+    };
+  } else {
+    identity = await resolveDigestIdentity(options.fallbackUserId);
+  }
+
+  if (!identity.userId?.trim()) {
     throw new DigestUploadError(
       DIGEST_LOGIN_REQUIRED_MESSAGE,
       "unauthenticated"
@@ -309,3 +306,6 @@ export async function uploadFileToDigest(options: {
     throw networkUploadError(err);
   }
 }
+
+/** Alias for uploadToDigest. */
+export const uploadFileToDigest = uploadToDigest;
