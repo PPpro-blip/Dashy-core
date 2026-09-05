@@ -4,7 +4,7 @@
  * DashyCore v7 — chat workspace (old peak Dashy aesthetic).
  *
  * - Hero: logo mark, "How can I help you today?", 2×2 action cards
- * - Bottom-anchored input bar: attach (dashy-digest) + textarea + cyan send
+ * - Bottom-anchored input bar: attach (/api/digest/upload proxy) + textarea + cyan send
  * - Real streaming from the dashy-flow-state worker via lib/chat-client
  *   (POST /chat · { message, model, userId, agentMode, conversation_id,
  *   messages } — `messages` carries the FULL prior turn history)
@@ -848,6 +848,7 @@ export default function ChatPage() {
           <div className="flex items-end gap-2 rounded-2xl border border-white/[0.1] bg-white/[0.045] px-3 py-2.5 shadow-inner shadow-black/10 transition-colors focus-within:border-cyan-400/60 focus-within:ring-4 focus-within:ring-cyan-400/10">
             <AttachmentButton
               userId={userId}
+              origin="chat"
               disabled={isStreaming}
               className="h-8 w-8 flex-shrink-0"
             />

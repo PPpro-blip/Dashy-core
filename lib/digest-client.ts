@@ -1,49 +1,59 @@
 "use client";
 
 /**
- * DashyCore v7 — the shared client boundary for the live `dashy-digest`
- * upload worker.
+ * DashyCore v7 — client boundary for document uploads.
  *
- * The multipart request below is the canonical production upload path:
- * the browser handles the multipart boundary, the worker receives the
- * verified Supabase user id in BOTH the FormData body AND the URL query string
- * (`?userId=...&user_id=...`), and the Bearer token is provided in headers.
+ * THE BROWSER NO LONGER TALKS TO `dashy-digest` DIRECTLY.
+ *
+ * Every upload goes to the same-origin Next.js route handler:
+ *
+ *     POST /api/digest/upload        (credentials: "include")
+ *     multipart/form-data: { file, filename, sourceType, origin? }
+ *
+ * The route handler (`app/api/digest/upload/route.ts`) resolves the caller
+ * with `supabase.auth.getUser()` from the httpOnly Supabase cookies and
+ * injects `userId` on the server→worker hop. The browser deliberately sends
+ * NO `userId`: a client-supplied identity is what produced the production
+ * "Upload failed: userId is required" failures, and the proxy ignores it
+ * anyway.
+ *
+ * Consequences of the same-origin hop:
+ *   - no CORS preflight against workers.dev (which could strip headers)
+ *   - no dependency on the browser client having hydrated its session
+ *   - the access token never has to be readable by client JS
  */
 
-import { createClient } from "@/lib/supabase/client";
-
-/**
- * Keep the production endpoint usable when a deployment omitted the public
- * environment variable. `||` also treats an accidentally empty value as
- * missing.
- */
-export const DASHY_DIGEST_URL =
-  process.env.NEXT_PUBLIC_DASHY_DIGEST_URL ||
-  "https://dashy-digest.kamleshprathampandey.workers.dev";
+/** Same-origin upload proxy — see `app/api/digest/upload/route.ts`. */
+export const DIGEST_UPLOAD_ENDPOINT = "/api/digest/upload";
 
 /** Message shown when the visitor has no usable Supabase session. */
 export const DIGEST_LOGIN_REQUIRED_MESSAGE = "Please log in to upload files.";
 
-/** Resolved Supabase identity used by the worker request. */
-export interface DigestIdentity {
-  userId: string;
-  accessToken: string;
-}
-
 export interface DigestUploadResult {
   documentId?: string;
   chunkCount?: number;
+  /** Raw proxy/worker payload, for callers that need extra fields. */
   raw: Record<string, unknown>;
 }
 
+/** Which surface started the upload — forwarded to the worker as metadata. */
+export type DigestOrigin = "knowledge" | "chat" | (string & {});
+
 export interface UploadDigestOptions {
   file: File;
-  identity?: DigestIdentity | null;
-  fallbackUserId?: string | null;
+  /** RAG ingest type; derived from the file when omitted. */
   sourceType?: string;
+  /** Surface that initiated the upload ("knowledge" | "chat"). */
+  origin?: DigestOrigin;
   signal?: AbortSignal;
 }
 
+/**
+ * Error thrown for every failed upload. `kind` distinguishes:
+ *  - `unauthenticated`: no server-side session (401/403 from the proxy)
+ *  - `network`: the proxy itself was unreachable / the request was aborted
+ *  - `worker`: any other non-2xx, carrying the worker's own message
+ */
 export class DigestUploadError extends Error {
   constructor(
     message: string,
@@ -55,55 +65,7 @@ export class DigestUploadError extends Error {
   }
 }
 
-/**
- * Resolves the user ID and session access token reliably for digest uploads.
- *
- * Retrieves the session via getSession(), falls back to getUser() if session
- * has no user, or to fallbackUserId. Throws a clean DigestUploadError if
- * no user identity could be resolved.
- */
-export async function resolveDigestIdentity(
-  fallbackUserId?: string | null
-): Promise<DigestIdentity> {
-  const supabase = createClient();
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  let userId = session?.user?.id;
-  let accessToken = session?.access_token;
-
-  if (!userId) {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    userId = user?.id;
-  }
-
-  if (!userId && fallbackUserId) {
-    userId = fallbackUserId;
-  }
-
-  if (userId && !accessToken) {
-    const {
-      data: { session: s2 },
-    } = await supabase.auth.getSession();
-    accessToken = s2?.access_token;
-  }
-
-  if (!userId) {
-    throw new DigestUploadError(
-      DIGEST_LOGIN_REQUIRED_MESSAGE,
-      "unauthenticated"
-    );
-  }
-
-  return {
-    userId,
-    accessToken: accessToken || "",
-  };
-}
-
-/** Maps a file to the source type expected by the digest pipeline. */
+/** Maps a file to the `sourceType` the digest worker / RAG pipeline expects. */
 export function digestSourceTypeFor(file: File): string {
   if (file.type === "application/pdf") return "pdf";
   if (file.type.startsWith("image/")) return "image";
@@ -113,156 +75,83 @@ export function digestSourceTypeFor(file: File): string {
   return "text";
 }
 
-interface WorkerResponse {
-  status: number;
-  statusText: string;
-  rawText: string;
-  payload: Record<string, unknown>;
-}
-
-/** Read the response once and retain both its text and useful JSON fields. */
-async function readWorkerResponse(response: Response): Promise<WorkerResponse> {
-  const rawText = await response.text();
-  let payload: Record<string, unknown> = {};
-
-  if (rawText.trim()) {
-    try {
-      const parsed: unknown = JSON.parse(rawText);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        payload = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // The plain response text is still surfaced below.
-    }
-  }
-
-  return {
-    status: response.status,
-    statusText: response.statusText,
-    rawText,
-    payload,
-  };
-}
-
-function workerErrorMessage(response: WorkerResponse): string {
-  const candidates = [
-    response.payload.error,
-    response.payload.message,
-    response.payload.details,
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
-    }
-  }
-
-  if (response.rawText.trim()) return response.rawText.trim().slice(0, 300);
-  return `Upload failed (HTTP ${response.status}${
-    response.statusText ? ` ${response.statusText}` : ""
-  })`;
-}
-
 /**
- * Builds the digest URL with EVERY userId key in the query string:
- * `?userId=...&user_id=...&userid=...`
+ * Client-side precheck ONLY (the server route is the source of truth).
+ *
+ * Used to disable the attach control and show a login toast for signed-out
+ * visitors without making them wait for a round trip. A `true` here proves
+ * nothing to the server — `app/api/digest/upload` re-verifies the session
+ * from cookies and returns 401 when it is missing.
  */
-function buildDigestUrl(identity: DigestIdentity): string {
-  const url = new URL(DASHY_DIGEST_URL);
-  url.searchParams.set("userId", identity.userId);
-  url.searchParams.set("user_id", identity.userId);
-  url.searchParams.set("userid", identity.userId);
-  return url.toString();
+export async function hasDigestSession(): Promise<boolean> {
+  try {
+    // Imported lazily so a server-render pass never pulls in the browser
+    // Supabase client.
+    const { createClient } = await import("@/lib/supabase/client");
+    const {
+      data: { session },
+    } = await createClient().auth.getSession();
+    return Boolean(session?.user?.id);
+  } catch {
+    // Unknown — let the server decide on the actual upload.
+    return true;
+  }
 }
 
-/** The Authorization header is supplied when an access token is available. */
-function authHeaders(identity: DigestIdentity): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (identity.accessToken) {
-    headers["Authorization"] = `Bearer ${identity.accessToken}`;
+/** Best-effort JSON parse of a proxy response body. */
+function parsePayload(rawText: string): Record<string, unknown> {
+  const trimmed = rawText.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return {};
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Plain-text body — surfaced verbatim below.
   }
-  return headers;
+  return {};
 }
 
-/** Sends the multipart/form-data upload payload with userId in body and query. */
-async function postMultipart(
-  identity: DigestIdentity,
-  file: File,
-  filename: string,
-  sourceType: string,
-  signal?: AbortSignal
-): Promise<WorkerResponse> {
-  const formData = new FormData();
-  formData.append("file", file, filename);
-  formData.append("filename", filename);
-  formData.append("sourceType", sourceType);
-  formData.append("userId", identity.userId);
-  formData.append("user_id", identity.userId);
-  formData.append("userid", identity.userId);
-
-  const response = await fetch(buildDigestUrl(identity), {
-    method: "POST",
-    mode: "cors",
-    headers: authHeaders(identity),
-    body: formData,
-    signal,
-  });
-
-  return readWorkerResponse(response);
-}
-
-function responseToResult(response: WorkerResponse): DigestUploadResult {
-  if (response.status === 401 || response.status === 403) {
-    throw new DigestUploadError(
-      "Your session has expired. Please sign in again.",
-      "unauthenticated",
-      response.status
-    );
-  }
-
-  if (
-    response.status < 200 ||
-    response.status >= 300 ||
-    response.payload.success === false
-  ) {
-    throw new DigestUploadError(
-      workerErrorMessage(response),
-      "worker",
-      response.status
-    );
-  }
-
-  return {
-    documentId:
-      typeof response.payload.documentId === "string"
-        ? response.payload.documentId
-        : typeof response.payload.memoryId === "string"
-          ? response.payload.memoryId
-          : undefined,
-    chunkCount:
-      typeof response.payload.chunkCount === "number"
-        ? response.payload.chunkCount
-        : undefined,
-    raw: response.payload,
+/** Extracts a human-readable error from a proxy JSON/text body. */
+function proxyErrorMessage(
+  payload: Record<string, unknown>,
+  rawText: string,
+  status: number,
+  statusText: string
+): string {
+  const asText = (value: unknown): string => {
+    if (typeof value === "string") return value.trim();
+    if (value && typeof value === "object") {
+      const nested = value as Record<string, unknown>;
+      return (
+        asText(nested.error) ||
+        asText(nested.message) ||
+        asText(nested.details) ||
+        asText(nested.error_description)
+      );
+    }
+    return "";
   };
-}
-
-function networkUploadError(error: unknown): DigestUploadError {
-  if (error instanceof DigestUploadError) return error;
-  if (error instanceof Error && error.message) {
-    return new DigestUploadError(error.message, "network");
-  }
-  return new DigestUploadError(
-    "Could not reach the dashy-digest worker. Check your connection and try again.",
-    "network"
+  return (
+    asText(payload.error) ||
+    asText(payload.message) ||
+    asText(payload.details) ||
+    rawText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300) ||
+    statusText ||
+    `Upload failed (HTTP ${status})`
   );
 }
 
 /**
- * Uploads one file to dashy-digest using the shared digest client.
+ * Uploads one file through the server-side proxy.
  *
- * Appends userId and user_id to BOTH FormData and the query string.
- * Supports passing either `{ file, ... }` or `(file, options)`.
+ * Accepts either `uploadToDigest({ file, … })` or `uploadToDigest(file, …)`
+ * so existing call sites keep working.
+ *
+ * @throws {DigestUploadError} `unauthenticated` when the server has no
+ * verified session, `network` when the proxy is unreachable or the request is
+ * aborted, `worker` for any other failure (carrying the worker's message).
  */
 export async function uploadToDigest(
   fileOrOptions: File | UploadDigestOptions,
@@ -273,39 +162,70 @@ export async function uploadToDigest(
       ? { file: fileOrOptions, ...maybeOptions }
       : fileOrOptions;
 
-  const supplied = options.identity;
-  let identity: DigestIdentity;
+  const { file, signal } = options;
+  const sourceType = options.sourceType ?? digestSourceTypeFor(file);
 
-  if (supplied && supplied.userId?.trim()) {
-    identity = {
-      userId: supplied.userId.trim(),
-      accessToken: supplied.accessToken || "",
-    };
-  } else {
-    identity = await resolveDigestIdentity(options.fallbackUserId);
-  }
+  // ── Same-origin request: file + metadata ONLY. No userId, no token. ──────
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("filename", file.name);
+  form.append("sourceType", sourceType);
+  if (options.origin) form.append("origin", options.origin);
 
-  if (!identity.userId?.trim()) {
-    throw new DigestUploadError(
-      DIGEST_LOGIN_REQUIRED_MESSAGE,
-      "unauthenticated"
-    );
-  }
-
+  let response: Response;
   try {
-    const response = await postMultipart(
-      identity,
-      options.file,
-      options.file.name,
-      options.sourceType ?? digestSourceTypeFor(options.file),
-      options.signal
+    response = await fetch(DIGEST_UPLOAD_ENDPOINT, {
+      method: "POST",
+      body: form,
+      // Ship the Supabase auth cookies so the server can resolve the user.
+      credentials: "include",
+      cache: "no-store",
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new DigestUploadError("Upload cancelled.", "network");
+    }
+    throw new DigestUploadError(
+      "Could not reach the upload service. Check your connection and try again.",
+      "network"
     );
-    return responseToResult(response);
-  } catch (err) {
-    console.error("CRITICAL UPLOAD ERROR:", err);
-    throw networkUploadError(err);
   }
+
+  const rawText = await response.text();
+  const payload = parsePayload(rawText);
+
+  if (response.status === 401 || response.status === 403) {
+    throw new DigestUploadError(
+      // The proxy answers 401 with exactly this message when the cookies hold
+      // no verified user; prefer its wording, fall back to our own.
+      proxyErrorMessage(payload, rawText, response.status, response.statusText) ||
+        DIGEST_LOGIN_REQUIRED_MESSAGE,
+      "unauthenticated",
+      response.status
+    );
+  }
+
+  if (!response.ok || payload.success === false) {
+    throw new DigestUploadError(
+      proxyErrorMessage(payload, rawText, response.status, response.statusText),
+      "worker",
+      response.status
+    );
+  }
+
+  return {
+    documentId:
+      typeof payload.documentId === "string"
+        ? payload.documentId
+        : typeof payload.memoryId === "string"
+          ? payload.memoryId
+          : undefined,
+    chunkCount:
+      typeof payload.chunkCount === "number" ? payload.chunkCount : undefined,
+    raw: payload,
+  };
 }
 
-/** Alias for uploadToDigest. */
+/** Alias kept for existing call sites. */
 export const uploadFileToDigest = uploadToDigest;
