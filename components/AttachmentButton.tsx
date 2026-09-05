@@ -18,11 +18,13 @@
  *   info "Uploading …" → success "Document indexed to memory ✓" (or error).
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/Toast";
 import { LoaderIcon, PaperclipIcon } from "@/components/icons";
+import { createClient } from "@/lib/supabase/client";
 import {
   DIGEST_LOGIN_REQUIRED_MESSAGE,
+  type DigestIdentity,
   DigestUploadError,
   digestSourceTypeFor,
   resolveDigestIdentity,
@@ -68,6 +70,47 @@ export function AttachmentButton({
   const [uploading, setUploading] = useState(false);
   const toast = useToast();
 
+  /**
+   * Warm identity cache. The Knowledge page renders this button immediately,
+   * before the Supabase browser client has hydrated its session from cookies.
+   * Subscribing to auth state keeps a verified { userId, accessToken } ready
+   * (and refreshed on TOKEN_REFRESHED / SIGNED_IN) so a click never races the
+   * hydration and never reaches the worker without a userId.
+   */
+  const identityRef = useRef<DigestIdentity | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const remember = (identity: DigestIdentity | null) => {
+      if (!cancelled && identity) identityRef.current = identity;
+    };
+
+    // Initial hydration (retries internally while the session settles).
+    void resolveDigestIdentity(userId).then(remember);
+
+    const supabase = createClient();
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (cancelled) return;
+      if (event === "SIGNED_OUT") {
+        identityRef.current = null;
+        return;
+      }
+      const nextUserId = session?.user?.id ?? null;
+      const nextToken = session?.access_token ?? null;
+      if (nextUserId && nextToken) {
+        identityRef.current = { userId: nextUserId, accessToken: nextToken };
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
+  }, [userId]);
+
   const openPicker = () => {
     if (disabled || uploading) return;
     inputRef.current?.click();
@@ -95,8 +138,11 @@ export function AttachmentButton({
 
     // Resolve the Supabase identity FIRST — a signed-out visitor must get a
     // clean login message instead of the worker's "userId is required".
-    const identity = await resolveDigestIdentity(userId);
-    if (!identity) {
+    // Always re-consult the live session first (it auto-refreshes an expired
+    // token); fall back to the warm cache only if that momentarily fails.
+    const identity =
+      (await resolveDigestIdentity(userId)) ?? identityRef.current;
+    if (!identity?.userId || !identity.accessToken) {
       toast.error("Sign in required", DIGEST_LOGIN_REQUIRED_MESSAGE);
       return;
     }
