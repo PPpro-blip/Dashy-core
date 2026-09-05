@@ -48,33 +48,72 @@ export class DigestUploadError extends Error {
 }
 
 /**
- * Resolve a signed-in Supabase session before a request is made. A caller's
- * already-loaded user id is only a fallback while a session and access token
- * are present; it can never authenticate a signed-out visitor by itself.
+ * Resolves the signed-in caller for a digest upload.
+ *
+ * WATERPROOF CONTRACT — returns BOTH halves or `null`, never a partial:
+ *  1. `getSession()` (local cookie/storage read, auto-refreshes an expired
+ *     token) — the exact pattern /chat and /agents use.
+ *  2. If either half is missing, `getUser()` forces a server round-trip that
+ *     also hydrates the client's session store, then the session is re-read
+ *     so a freshly minted access token is picked up.
+ *  3. Auth hydration race (Knowledge mounts before the browser client has
+ *     restored the cookie session): retried a couple of times with a short
+ *     backoff instead of failing the upload with "userId is required".
+ *
+ * `fallbackUserId` (e.g. the chat page's already-loaded id) is a last resort
+ * and can never authenticate a signed-out visitor on its own — an access
+ * token is always required alongside it.
  */
 export async function resolveDigestIdentity(
   fallbackUserId?: string | null
 ): Promise<DigestIdentity | null> {
-  try {
+  const attempt = async (): Promise<DigestIdentity | null> => {
     const supabase = createClient();
+
     const {
       data: { session },
     } = await supabase.auth.getSession();
 
-    if (!session?.access_token) return null;
+    let userId: string | null = session?.user?.id ?? null;
+    let accessToken: string | null = session?.access_token ?? null;
 
-    const userId = session.user?.id || fallbackUserId || "";
-    if (!userId) return null;
+    if (!userId || !accessToken) {
+      // Forces a network verification AND hydrates the client session store.
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      userId = user?.id ?? userId;
 
-    return {
-      userId,
-      accessToken: session.access_token,
-    };
-  } catch {
-    // Treat session/storage failures like a signed-out visitor. In
-    // particular, do not dispatch a worker request without an identity.
-    return null;
+      // Prefer the (possibly just-refreshed) session for BOTH halves.
+      const s2 = (await supabase.auth.getSession()).data.session;
+      accessToken = s2?.access_token ?? accessToken;
+      userId = s2?.user?.id ?? userId;
+    }
+
+    if (!userId && fallbackUserId) userId = fallbackUserId;
+
+    // Both halves are mandatory: the worker verifies the Bearer token AND
+    // requires an explicit userId. Missing either means "not signed in".
+    if (!userId || !accessToken) return null;
+
+    return { userId, accessToken };
+  };
+
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const identity = await attempt();
+      if (identity) return identity;
+    } catch {
+      // Network/storage hiccup — fall through to the retry below.
+    }
+    // Short backoff: 0ms, 150ms, 400ms — covers the mount-before-hydration
+    // race without making a genuinely signed-out visitor wait.
+    if (i < 2) {
+      await new Promise((resolve) => setTimeout(resolve, i === 0 ? 150 : 400));
+    }
   }
+
+  return null;
 }
 
 /** Maps a file to the source type expected by the digest pipeline. */
@@ -240,10 +279,16 @@ export async function uploadFileToDigest(options: {
   sourceType?: string;
   signal?: AbortSignal;
 }): Promise<DigestUploadResult> {
+  // A caller-supplied identity is only trusted when BOTH halves are present
+  // and non-empty; otherwise we resolve it ourselves. This is the last gate
+  // before the wire — no request is ever dispatched without a real userId.
+  const supplied = options.identity;
   const identity =
-    options.identity ?? (await resolveDigestIdentity(options.fallbackUserId));
+    supplied && supplied.userId?.trim() && supplied.accessToken?.trim()
+      ? { userId: supplied.userId.trim(), accessToken: supplied.accessToken }
+      : await resolveDigestIdentity(supplied?.userId ?? options.fallbackUserId);
 
-  if (!identity?.userId || !identity.accessToken) {
+  if (!identity?.userId?.trim() || !identity.accessToken?.trim()) {
     throw new DigestUploadError(
       DIGEST_LOGIN_REQUIRED_MESSAGE,
       "unauthenticated"
