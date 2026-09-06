@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useToast } from "@/components/Toast";
+import { generateImage } from "@/lib/img-engine";
 import {
   AlertIcon,
   CheckIcon,
@@ -36,13 +37,27 @@ interface MediaItem {
   id: string;
   type: MediaType;
   prompt: string;
+  /** Final display URL (direct Pollinations URL, or /api/img-proxy URL). */
   url: string;
+  /** Direct Pollinations URL when the display URL is the same-origin proxy. */
+  sourceUrl?: string;
   createdAt: number;
   aspectRatio: AspectRatio;
   model?: string;
+  seed?: string;
   width: number;
   height: number;
+  /** Optimistic tile state; only `ready` (or legacy items) are persisted. */
+  status?: "loading" | "ready" | "error";
+  error?: string;
 }
+
+type GenerateOverrides = {
+  prompt?: string;
+  aspect?: AspectRatio;
+  model?: ModelOption;
+  id?: string;
+};
 
 const STORAGE_KEY = "dashy.media.library";
 
@@ -64,15 +79,26 @@ function loadLibrary(): MediaItem[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed as MediaItem[];
+    return (parsed as MediaItem[]).map((item) => ({
+      ...item,
+      status: item.status ?? "ready",
+    }));
   } catch {
     return [];
   }
 }
 
+/** Only finished images belong in localStorage; optimistic/error tiles are transient. */
+function isPersistable(item: MediaItem): boolean {
+  return !item.status || item.status === "ready";
+}
+
 function saveLibrary(items: MediaItem[]) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(items.filter(isPersistable))
+    );
   } catch {
     // quota exceeded — best effort
   }
@@ -126,6 +152,22 @@ export default function StudioPage() {
     saveLibrary(items);
   }, []);
 
+  /**
+   * Functional state update + persist in one place. Used for optimistic
+   * loading/error tiles so rapid sequential generates never clobber each
+   * other (no single global lock is held beyond the in-flight request).
+   */
+  const commitLibrary = useCallback(
+    (updater: (prev: MediaItem[]) => MediaItem[]) => {
+      setLibrary((prev) => {
+        const next = updater(prev);
+        saveLibrary(next);
+        return next;
+      });
+    },
+    []
+  );
+
   // Timer while generating
   useEffect(() => {
     if (generating) {
@@ -145,75 +187,97 @@ export default function StudioPage() {
 
   const dimensions = useMemo(() => ASPECT_MAP[aspect], [aspect]);
 
-  const handleGenerate = useCallback(async () => {
-    const trimmed = prompt.trim();
-    if (!trimmed) {
-      toast.error("Enter a prompt", "Describe what you want to generate.");
-      return;
-    }
+  /**
+   * Image mode — Pollinations free tier via lib/img-engine.
+   * Direct URL fallbacks first, same-origin /api/img-proxy as a last resort.
+   * Each run gets its own unique seed/id (see lib/img-engine) and the button
+   * lock is released in `finally`, so a failed or finished run never blocks
+   * retries. `overrides` lets an error-tile Retry reuse the same prompt/aspect.
+   */
+  const handleGenerate = useCallback(
+    async (overrides?: GenerateOverrides) => {
+      const trimmed = (overrides?.prompt ?? prompt).trim();
+      if (!trimmed) {
+        toast.error("Enter a prompt", "Describe what you want to generate.");
+        return;
+      }
 
-    if (mode === "video") {
-      setShowVideoModal(true);
-      return;
-    }
+      // Retry from an error tile is always an image generation, even if the
+      // user switched the mode toggle in the meantime.
+      if (mode === "video" && !overrides) {
+        setShowVideoModal(true);
+        return;
+      }
 
-    // IMAGE MODE — Pollinations free
-    setGenerating(true);
-    const seed = Date.now();
-    const { width, height } = ASPECT_MAP[aspect];
-    const modelParam = model === "default" ? "" : `&model=${encodeURIComponent(model)}`;
-    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-      trimmed
-    )}?width=${width}&height=${height}&nologo=true&seed=${seed}${modelParam}`;
+      const ratio = overrides?.aspect ?? aspect;
+      const modelChoice = overrides?.model ?? model;
+      const { width, height } = ASPECT_MAP[ratio];
+      const id = overrides?.id ?? crypto.randomUUID();
 
-    try {
-      // Wait for image to actually load — honest loading state
-      await new Promise<void>((resolve, reject) => {
-        const img = new window.Image();
-        // Pollinations needs crossOrigin anonymous for canvas safety
-        img.crossOrigin = "anonymous";
-        const timeout = setTimeout(() => {
-          reject(new Error("Image load timed out"));
-        }, 45000);
-        img.onload = () => {
-          clearTimeout(timeout);
-          resolve();
-        };
-        img.onerror = () => {
-          clearTimeout(timeout);
-          reject(new Error("Failed to load image"));
-        };
-        img.src = url;
-      });
-
-      const newItem: MediaItem = {
-        id: `${seed}`,
+      // Optimistic tile — spinner immediately, before the network round-trip.
+      const pending: MediaItem = {
+        id,
         type: "image",
         prompt: trimmed,
-        url,
+        url: "",
         createdAt: Date.now(),
-        aspectRatio: aspect,
-        model,
+        aspectRatio: ratio,
+        model: modelChoice,
         width,
         height,
+        status: "loading",
       };
+      setGenerating(true);
+      commitLibrary((prev) => [pending, ...prev]);
 
-      const updated = [newItem, ...loadLibrary()];
-      persist(updated);
-      toast.success("Image generated", `Added to your library — ${aspect} ${width}x${height}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      toast.error("Generation failed", msg);
-    } finally {
-      setGenerating(false);
-    }
-  }, [aspect, mode, model, persist, prompt, toast]);
+      try {
+        const result = await generateImage({
+          prompt: trimmed,
+          width,
+          height,
+          model: modelChoice,
+        });
+
+        const ready: MediaItem = {
+          ...pending,
+          url: result.url,
+          sourceUrl: result.viaProxy ? result.sourceUrl : undefined,
+          seed: result.seed,
+          model: result.model,
+          status: "ready",
+        };
+        commitLibrary((prev) => [ready, ...prev.filter((i) => i.id !== id)]);
+        toast.success(
+          "Image generated",
+          `Added to your library — ${ratio} ${width}x${height}${
+            result.viaProxy ? " (via image proxy)" : ""
+          }`
+        );
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "Image generation failed. Please try again.";
+        commitLibrary((prev) =>
+          prev.map((i) => (i.id === id ? { ...i, status: "error", error: msg } : i))
+        );
+        toast.error("Generation failed", msg);
+      } finally {
+        setGenerating(false);
+      }
+    },
+    [aspect, commitLibrary, mode, model, prompt, toast]
+  );
 
   const handleDownload = useCallback(
     async (item: MediaItem) => {
       try {
-        // Try blob fetch for proper download; fallback to opening URL
-        const res = await fetch(item.url, { mode: "cors" });
+        // Proxy direct Pollinations URLs through the same-origin proxy so the
+        // blob fetch is never blocked by CORS; proxied URLs are already same-origin.
+        const src = item.url.startsWith("/")
+          ? item.url
+          : `/api/img-proxy?url=${encodeURIComponent(item.url)}`;
+        const res = await fetch(src, { mode: "cors" });
         if (!res.ok) throw new Error("fetch failed");
         const blob = await res.blob();
         const blobUrl = URL.createObjectURL(blob);
@@ -237,7 +301,8 @@ export default function StudioPage() {
   const handleCopyUrl = useCallback(
     async (item: MediaItem) => {
       try {
-        await navigator.clipboard.writeText(item.url);
+        // Prefer the direct Pollinations URL so shared links work everywhere.
+        await navigator.clipboard.writeText(item.sourceUrl || item.url);
         toast.success("URL copied");
       } catch {
         toast.error("Copy failed", "Clipboard access denied");
@@ -540,60 +605,97 @@ export default function StudioPage() {
                     key={item.id}
                     className="group relative overflow-hidden rounded-2xl border border-white/[0.06] bg-white/[0.02] transition-all hover:border-white/[0.12] hover:bg-white/[0.04] hover:shadow-xl hover:shadow-black/20"
                   >
-                    {/* Image */}
+                    {/* Image / optimistic states */}
                     <div className="relative aspect-[4/3] w-full overflow-hidden bg-black/20">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={item.url}
-                        alt={item.prompt}
-                        loading="lazy"
-                        className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
-                        onClick={() => setPreviewItem(item)}
-                      />
-                      {/* Top badges */}
-                      <div className="absolute left-2 top-2 flex items-center gap-1.5">
-                        <span className="rounded-md border border-white/20 bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white backdrop-blur">
-                          {item.aspectRatio}
-                        </span>
-                        <span className="rounded-md border border-cyan-400/20 bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-medium text-cyan-100 backdrop-blur">
-                          {item.model || "flux"}
-                        </span>
-                      </div>
-                      {/* Hover overlay actions */}
-                      <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/60 opacity-0 backdrop-blur-[2px] transition-opacity group-hover:opacity-100">
-                        <button
-                          type="button"
-                          onClick={() => void handleDownload(item)}
-                          className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-zinc-900 shadow-lg transition-transform hover:scale-105"
-                          title="Download"
-                        >
-                          <DownloadIcon className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleCopyUrl(item)}
-                          className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-white ring-1 ring-white/20 backdrop-blur transition-transform hover:scale-105 hover:bg-white/20"
-                          title="Copy URL"
-                        >
-                          <LinkIcon className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
+                      {item.status === "loading" ? (
+                        <div className="flex h-full flex-col items-center justify-center gap-2 bg-black/20">
+                          <LoaderIcon className="h-6 w-6 animate-spin text-cyan-400" />
+                          <span className="text-xs font-medium text-cyan-300">
+                            Generating…
+                          </span>
+                          <span className="text-[10px] text-zinc-500">
+                            Pollinations • {item.width}×{item.height}
+                          </span>
+                        </div>
+                      ) : item.status === "error" ? (
+                        <div className="flex h-full flex-col items-center justify-center gap-2 bg-red-500/[0.03] px-4 text-center">
+                          <AlertIcon className="h-5 w-5 text-red-400" />
+                          <p className="line-clamp-3 text-[11px] leading-snug text-red-300">
+                            {item.error ?? "Generation failed"}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleGenerate({
+                                prompt: item.prompt,
+                                aspect: item.aspectRatio,
+                                model: (item.model as ModelOption) ?? model,
+                                id: item.id,
+                              })
+                            }
+                            className="rounded-lg bg-cyan-400 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-300"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      ) : (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={item.url}
+                          alt={item.prompt}
+                          loading="lazy"
+                          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
                           onClick={() => setPreviewItem(item)}
-                          className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-white ring-1 ring-white/20 backdrop-blur transition-transform hover:scale-105 hover:bg-white/20"
-                          title="Preview"
-                        >
-                          <ImageIcon className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(item.id)}
-                          className="flex h-9 w-9 items-center justify-center rounded-xl bg-red-500/90 text-white shadow-lg transition-transform hover:scale-105 hover:bg-red-500"
-                          title="Delete"
-                        >
-                          <TrashIcon className="h-4 w-4" />
-                        </button>
-                      </div>
+                        />
+                      )}
+                      {/* Top badges */}
+                      {item.status !== "loading" && item.status !== "error" && (
+                        <div className="absolute left-2 top-2 flex items-center gap-1.5">
+                          <span className="rounded-md border border-white/20 bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white backdrop-blur">
+                            {item.aspectRatio}
+                          </span>
+                          <span className="rounded-md border border-cyan-400/20 bg-cyan-500/20 px-1.5 py-0.5 text-[10px] font-medium text-cyan-100 backdrop-blur">
+                            {item.model || "flux"}
+                          </span>
+                        </div>
+                      )}
+                      {/* Hover overlay actions */}
+                      {item.status !== "loading" && item.status !== "error" && (
+                        <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/60 opacity-0 backdrop-blur-[2px] transition-opacity group-hover:opacity-100">
+                          <button
+                            type="button"
+                            onClick={() => void handleDownload(item)}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-zinc-900 shadow-lg transition-transform hover:scale-105"
+                            title="Download"
+                          >
+                            <DownloadIcon className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyUrl(item)}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-white ring-1 ring-white/20 backdrop-blur transition-transform hover:scale-105 hover:bg-white/20"
+                            title="Copy URL"
+                          >
+                            <LinkIcon className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPreviewItem(item)}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-white ring-1 ring-white/20 backdrop-blur transition-transform hover:scale-105 hover:bg-white/20"
+                            title="Preview"
+                          >
+                            <ImageIcon className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(item.id)}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl bg-red-500/90 text-white shadow-lg transition-transform hover:scale-105 hover:bg-red-500"
+                            title="Delete"
+                          >
+                            <TrashIcon className="h-4 w-4" />
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Meta */}
@@ -726,6 +828,14 @@ export default function StudioPage() {
                   <span className="text-zinc-500">Model</span>
                   <span className="font-medium text-zinc-300">{previewItem.model}</span>
                 </div>
+                {previewItem.seed && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-zinc-500">Seed</span>
+                    <span className="truncate font-mono text-[11px] font-medium text-zinc-300" title={previewItem.seed}>
+                      {previewItem.seed}
+                    </span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-zinc-500">Created</span>
                   <span className="font-medium text-zinc-300">{new Date(previewItem.createdAt).toLocaleString()}</span>
