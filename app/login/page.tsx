@@ -54,6 +54,10 @@ export default function LoginPage() {
         provider: "github",
         options: {
           redirectTo: `${window.location.origin}/auth/callback`,
+          // `repo` scope powers the D-Code Source Control panel (repo
+          // listing, pull and Git Data API push). Existing accounts simply
+          // re-authorize on their next GitHub sign-in.
+          scopes: "read:user user:email repo",
         },
       });
 

@@ -54,7 +54,35 @@ import {
   readBlobAsText,
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
-import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import { MonacoEditor, type DCodeMonacoEditor } from "@/components/dcode/MonacoEditor";
+import { ActivityBar, type SideView } from "@/components/dcode/ActivityBar";
+import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import { SourceControlPanel } from "@/components/dcode/SourceControlPanel";
+import { CommandPalette, QuickPickModal } from "@/components/dcode/CommandPalette";
+import { AiOutputPanel, type AiOutputState } from "@/components/dcode/AiOutputPanel";
+import { AgentCodePanel } from "@/components/dcode/AgentCodePanel";
+import { PairCoderPanel } from "@/components/dcode/PairCoderPanel";
+import { MarkdownPreviewPanel } from "@/components/dcode/MarkdownPreviewPanel";
+import {
+  activateEnabledExtensions,
+  deactivateAllExtensions,
+  onMonacoEditorReady,
+  setExtensionEnabled as runtimeSetExtensionEnabled,
+  getEnabledExtensionIdsCached,
+  commandRegistry,
+  COMMANDS_CHANGED_EVENT,
+  type CommandDefinition,
+  type DCodeExtensionUiApi,
+} from "@/lib/dcode/extensions/runtime";
+import type {
+  DCodeWorkspaceApi,
+  QuickPickItem,
+} from "@/lib/dcode/extensions/types";
+import { builtinExtensionById } from "@/lib/dcode/extensions/registry";
+import type { Monaco } from "@monaco-editor/react";
+import { formatText } from "@/lib/dcode/extensions/format";
+import { getFormatOnSave, getStoredTheme, setStoredTheme } from "@/lib/dcode/extensions/storage";
+import type { GithubBind } from "@/lib/dcode/github";
 import { useToast } from "@/components/Toast";
 import {
   BracesIcon,
@@ -96,7 +124,7 @@ export interface DCodeWorkspaceProps {
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 
 /** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
-const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
+const VALID_FILENAME = /^[a-zA-Z0-9_\-\.\/]+$/;
 
 interface GithubRepo {
   full_name: string;
@@ -464,9 +492,6 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     files[0]?.id ?? ""
   );
   const [isPublic, setIsPublic] = useState(project?.isPublic ?? false);
-  const [shareSlug, setShareSlug] = useState<string | null>(
-    project?.shareSlug ?? null
-  );
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(
     project ? new Date(project.updatedAt) : null
@@ -488,6 +513,44 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  /** Title input handle — soft-focused when the project is still untitled. */
+  const titleInputRef = useRef<HTMLInputElement>(null);
+
+  /* ---------------------- IDE chrome (extensions) state ------------------ */
+
+  const [sideView, setSideView] = useState<SideView>("explorer");
+  const [enabledExtensions, setEnabledExtensions] = useState<string[]>([]);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteCommands, setPaletteCommands] = useState<CommandDefinition[]>([]);
+  const [quickPick, setQuickPick] = useState<{
+    title: string;
+    items: QuickPickItem[];
+    resolve: (item: QuickPickItem | null) => void;
+  } | null>(null);
+  const [editorTheme, setEditorTheme] = useState<string>(() => getStoredTheme());
+  const [aiOutput, setAiOutput] = useState<AiOutputState | null>(null);
+  /** Which right-hand extension view is open (agent-code, pair-coder, …). */
+  const [extView, setExtView] = useState<string | null>(null);
+  /** GitHub bind for the Source Control panel. */
+  const [githubBind, setGithubBind] = useState<GithubBind | null>(
+    project?.githubRepoFullName
+      ? {
+          fullName: project.githubRepoFullName,
+          defaultBranch: project.githubDefaultBranch ?? "main",
+          lastSyncedSha: project.githubLastSyncedSha ?? null,
+        }
+      : null
+  );
+  const [commitFocusSignal] = useState(0);
+
+  /** Live Monaco handles (populated on editor mount) for extensions. */
+  const monacoRef = useRef<Monaco | null>(null);
+  const editorInstanceRef = useRef<DCodeMonacoEditor | null>(null);
+  const selectionRef = useRef<string>("");
+  /** Ref mirror of markDirty / handleSelectFile so the stable extension API
+   * always calls the freshest implementation. */
+  const markDirtyRef = useRef<() => void>(() => {});
+  const selectFileRef = useRef<(id: string) => void>(() => {});
 
   /**
    * Latest content seen from the Monaco editor for the ACTIVE file. Monaco
@@ -507,6 +570,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
     [files, activeFileId]
   );
+
+  /** Ref mirror of the active file id so the (stable) extension API never
+   * closes over a stale id after a tab switch. */
+  const activeFileIdRef = useRef(activeFileId);
+  useEffect(() => {
+    activeFileIdRef.current = activeFileId;
+  }, [activeFileId]);
 
   /**
    * Ingest guard for seed state (chat hand-off, an old project row, a draft
@@ -606,6 +676,47 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     [clearSaveErrorTimer, toast]
   );
 
+  /**
+   * Pre-save Prettier hook — runs ONLY when the dashy.prettier extension is
+   * enabled AND the user turned "Format on Save" on (Preferences persisted by
+   * the extension). Formats the ACTIVE file's flushed buffer, mirrors the
+   * result into editor state, and can never break the save itself: any
+   * failure falls through with the files untouched.
+   */
+  const maybeFormatOnSave = useCallback(
+    async (files: DCodeFile[]): Promise<DCodeFile[]> => {
+      try {
+        if (!getFormatOnSave()) return files;
+        if (!getEnabledExtensionIdsCached().includes("dashy.prettier")) return files;
+        const buffer = editorBufferRef.current;
+        const targetId = buffer?.fileId ?? activeFileIdRef.current;
+        const index = files.findIndex((f) => f.id === targetId);
+        if (index < 0) return files;
+        const file = files[index];
+        if (!file || file.content.startsWith("data:")) return files;
+        const source =
+          buffer && buffer.fileId === file.id ? buffer.content : file.content;
+        const result = await formatText(file.name, source);
+        if (!result.ok || result.text === undefined || result.text === source) {
+          return files;
+        }
+        const next = [...files];
+        next[index] = { ...file, content: result.text };
+        // Keep Monaco + the editor buffer in sync with what is being saved.
+        if (buffer && buffer.fileId === file.id) {
+          editorBufferRef.current = { fileId: file.id, content: result.text };
+        }
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: result.text! } : f))
+        );
+        return next;
+      } catch {
+        return files; // Formatting must never block a save.
+      }
+    },
+    []
+  );
+
   const persist = useCallback(
     async (mode: "autosave" | "manual"): Promise<void> => {
       const { projectId: id, title: t, files: rawFiles } = latestRef.current;
@@ -614,11 +725,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       // Flush any pending Monaco buffer into the snapshot being persisted so
       // an edit made in the last few milliseconds is never dropped.
       const buffer = editorBufferRef.current;
-      const fs = buffer
+      const flushed = buffer
         ? rawFiles.map((f) =>
             f.id === buffer.fileId ? { ...f, content: buffer.content } : f
           )
         : rawFiles;
+      // Optional Prettier pass (extension-gated, failure-isolated).
+      const fs = await maybeFormatOnSave(flushed);
 
       // Draft without a row yet → only an explicit save creates it.
       if (!id) {
@@ -667,7 +780,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         handleSaveFailure(error, mode);
       }
     },
-    [clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast]
+    [clearSaveErrorTimer, handleSaveFailure, maybeFormatOnSave, readOnly, router, toast]
   );
 
   /* Keep the retry timer pointed at the freshest persist implementation. */
@@ -714,6 +827,24 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [readOnly]);
+
+  /**
+   * Soft rename nudge: an editor that still carries the default
+   * "Untitled project" title (fresh draft, or first save just created the
+   * row and remounted us) gets its title input focused + selected once on
+   * mount — renaming is one keystroke away, never forced.
+   */
+  useEffect(() => {
+    if (readOnly) return;
+    if (title !== "Untitled project") return;
+    const t = window.setTimeout(() => {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    }, 150);
+    return () => window.clearTimeout(t);
+    // Intentionally mount-only: never steal focus while the user edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* Load the authenticated user's email for the terminal `whoami`. */
   useEffect(() => {
@@ -846,7 +977,11 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const validateFileName = useCallback(
     (name: string): boolean => {
       const isValid =
-        /^[a-zA-Z0-9_\-\.]+$/.test(name) && name.length > 0 && name.length <= 60;
+        VALID_FILENAME.test(name) &&
+        name.length > 0 && name.length <= 60 &&
+        !name.startsWith(".") && !name.endsWith(".") &&
+        !name.startsWith("/") && !name.endsWith("/") &&
+        !name.includes("//");
       if (isValid) return true;
       toast.show({
         type: "error",
@@ -969,8 +1104,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         return;
       }
       setDeletingFileId(id);
-      // No confirm dialog in MVP — the file is recoverable via undo of your
-      // own edits only; keep it snappy but guard the last file (above).
+      if (!window.confirm(`Delete “${files.find((f) => f.id === id)?.name ?? "this file"}”? This cannot be undone.`)) {
+        setDeletingFileId(null);
+        return;
+      }
       window.setTimeout(() => {
         setFiles((prev) => {
           const index = prev.findIndex((f) => f.id === id);
@@ -1108,11 +1245,6 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   /* --------------------------------- share -------------------------------- */
 
-  const shareUrl = useMemo(() => {
-    if (!shareSlug || typeof window === "undefined") return null;
-    return `${window.location.origin}/d-code/share/${shareSlug}`;
-  }, [shareSlug]);
-
   const handleShare = useCallback(async () => {
     if (savingShare) return;
     setSavingShare(true);
@@ -1124,44 +1256,46 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         id = latestRef.current.projectId;
         if (!id) throw new Error("Save the project before sharing.");
       }
-      if (!isPublic) {
-        const updated = await toggleProjectPublic(id, true);
-        setIsPublic(true);
-        setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
-        await navigator.clipboard.writeText(url);
-        toast.show({
-          type: "success",
-          title: "Public link copied",
-          message: "Anyone with the link can view this project.",
-        });
-      } else if (shareSlug) {
-        await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
-        );
-        toast.show({ type: "success", title: "Link copied" });
-      }
+
+      // Publicize BEFORE opening the Share Hub and await the write, so the
+      // link the Hub copies is already live for visitors. toggleProjectPublic
+      // is idempotent while public and returns the saved row — including the
+      // STABLE share slug (reused across private→public cycles, never
+      // rotated), so previously copied links keep working.
+      const saved = await toggleProjectPublic(id, true);
+      setIsPublic(saved.isPublic);
+
+      // Share key for the custom hub: stable slug when present, else the
+      // uuid — /d-code/share/<key> resolves either. Never the OS sheet:
+      // navigator.share lives inside the Hub only.
+      const shareKey = saved.shareSlug ?? id;
+      router.push(`/d-code/share/${shareKey}?open=1`);
     } catch (error) {
       toast.show({
         type: "error",
-        title: "Sharing failed",
+        title: "Opening Share Hub failed",
         message: error instanceof Error ? error.message : "Please try again.",
       });
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, savingShare, shareSlug, toast]);
+  }, [persist, router, savingShare, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;
     setSavingShare(true);
     try {
-      await toggleProjectPublic(projectId, false);
-      setIsPublic(false);
+      // Await the write, then mirror the RETURNED row (not an optimistic
+      // guess) so the toolbar state matches the database. The share slug
+      // stays assigned — the owner keeps opening the same hub URL, while
+      // visitors hit the private empty state again.
+      const saved = await toggleProjectPublic(projectId, false);
+      setIsPublic(saved.isPublic);
       toast.show({
         type: "info",
         title: "Project is private",
-        message: "The share link no longer works.",
+        message:
+          "Visitors can no longer open the share link — your Share Hub stays available.",
       });
     } catch (error) {
       toast.show({
@@ -1306,6 +1440,346 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     [closeGitHubModal, importingRepo, markDirty, persist, toast]
   );
 
+  /* ----------------------- extensions: workspace API --------------------- */
+
+  // Keep ref mirrors current so the STABLE workspace API (built once, captured
+  // by extensions at activation) always calls the freshest React logic.
+  useEffect(() => {
+    markDirtyRef.current = markDirty;
+    selectFileRef.current = handleSelectFile;
+  }, [markDirty, handleSelectFile]);
+
+  const activeFileFromRefs = useCallback((): DCodeFile | null => {
+    const bufId = editorBufferRef.current?.fileId;
+    const id = bufId || activeFileIdRef.current;
+    return (
+      latestRef.current.files.find((f) => f.id === id) ??
+      latestRef.current.files.find((f) => f.id === activeFileIdRef.current) ??
+      latestRef.current.files[0] ??
+      null
+    );
+  }, []);
+
+  /**
+   * Stable workspace API handed to every extension + AI panel. Built ONCE
+   * (empty deps) and reads all mutable state through refs, so a command
+   * registered at activation never sees stale files/selection after edits.
+   */
+  const workspaceApi = useMemo<DCodeWorkspaceApi>(() => {
+    return {
+      getActiveFile: () => activeFileFromRefs(),
+      getFiles: () => latestRef.current.files,
+      getSelectedText: () => selectionRef.current || null,
+      openFile: (fileId) => selectFileRef.current(fileId),
+      applyTheme: (themeId) => {
+        setStoredTheme(themeId);
+        setEditorTheme(themeId);
+        monacoRef.current?.editor.setTheme(themeId);
+      },
+      formatActiveFile: async () => {
+        const file = activeFileFromRefs();
+        if (!file) {
+          toast.show({ type: "info", title: "Nothing to format", message: "Open a file first." });
+          return false;
+        }
+        if (file.content.startsWith("data:")) return false;
+        const buffer = editorBufferRef.current;
+        const source = buffer && buffer.fileId === file.id ? buffer.content : file.content;
+        const result = await formatText(file.name, source);
+        if (!result.ok || result.text === undefined) {
+          toast.show({
+            type: "error",
+            title: "Format failed",
+            message: result.error ?? "Could not format this file.",
+          });
+          return false;
+        }
+        if (result.text === source) {
+          toast.show({ type: "info", title: "Already formatted", message: `${file.name} is clean.` });
+          return true;
+        }
+        editorBufferRef.current = { fileId: file.id, content: result.text };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: result.text! } : f))
+        );
+        markDirtyRef.current();
+        toast.show({ type: "success", title: "Formatted", message: `${file.name} formatted with Prettier.` });
+        return true;
+      },
+      getUserId: async () => {
+        try {
+          const supabase = createClient();
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+          return user?.id ?? null;
+        } catch {
+          return null;
+        }
+      },
+      showAiOutput: (title) => setAiOutput({ title, content: "", running: true }),
+      appendAiOutput: (text) =>
+        setAiOutput((prev) =>
+          prev ? { ...prev, content: prev.content + text } : { title: "DashyAI", content: text, running: true }
+        ),
+      finishAiOutput: () =>
+        setAiOutput((prev) => (prev ? { ...prev, running: false } : prev)),
+      saveActiveFile: async () => {
+        await persistRef.current("manual");
+      },
+      writeFile: (name, content, language) => {
+        const clean = name.trim();
+        const existing = latestRef.current.files.find(
+          (f) => f.name.toLowerCase() === clean.toLowerCase()
+        );
+        if (existing) {
+          editorBufferRef.current = { fileId: existing.id, content };
+          setFiles((prev) =>
+            prev.map((f) => (f.id === existing.id ? { ...f, content } : f))
+          );
+          setActiveFileId(existing.id);
+          markDirtyRef.current();
+          return existing.id;
+        }
+        const file: DCodeFile = {
+          id: newId(),
+          name: clean,
+          language: language || languageFromFilename(clean),
+          content,
+        };
+        setFiles((prev) => [...prev, file]);
+        setActiveFileId(file.id);
+        markDirtyRef.current();
+        return file.id;
+      },
+      replaceSelection: (text) => {
+        const editor = editorInstanceRef.current;
+        if (!editor) return false;
+        const selection = editor.getSelection();
+        if (!selection || selection.isEmpty()) return false;
+        editor.executeEdits("dashy.pair", [
+          { range: selection, text, forceMoveMarkers: true },
+        ]);
+        editor.focus();
+        return true;
+      },
+      setActiveFileContent: (content) => {
+        const file = activeFileFromRefs();
+        if (!file) return;
+        editorBufferRef.current = { fileId: file.id, content };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content } : f))
+        );
+        markDirtyRef.current();
+      },
+      getMonaco: () => monacoRef.current,
+      getEditor: () => editorInstanceRef.current,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ----------------------- extensions: UI api + palette ------------------ */
+
+  const extensionUi = useMemo<DCodeExtensionUiApi>(
+    () => ({
+      showQuickPick: (items, title) =>
+        new Promise((resolve) => {
+          setQuickPick({
+            title: title ?? "Select",
+            items,
+            resolve: (item) => {
+              setQuickPick(null);
+              resolve(item as (typeof items)[number] | null);
+            },
+          });
+        }),
+      notify: (message) => toast.show({ type: "info", title: "Extensions", message }),
+      showView: (viewId) => {
+        if (viewId === "extensions") {
+          setSideView("extensions");
+          return;
+        }
+        setExtView(viewId);
+      },
+    }),
+    [toast]
+  );
+
+  /** Refresh the palette command list from the shared registry. */
+  const refreshCommands = useCallback(() => {
+    setPaletteCommands(commandRegistry.getAll());
+  }, []);
+
+  /* Activate enabled extensions once on mount (read-only share view skips). */
+  useEffect(() => {
+    if (readOnly) return;
+    let cancelled = false;
+    void (async () => {
+      await activateEnabledExtensions(workspaceApi, extensionUi);
+      if (cancelled) return;
+      setEnabledExtensions(getEnabledExtensionIdsCached());
+      refreshCommands();
+    })();
+    const onChanged = () => refreshCommands();
+    window.addEventListener(COMMANDS_CHANGED_EVENT, onChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(COMMANDS_CHANGED_EVENT, onChanged);
+      void deactivateAllExtensions();
+    };
+    // Mount-only: the API/ui use refs internally so re-activation isn't needed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readOnly]);
+
+  /** Toggle (install/uninstall) an extension live. */
+  const handleToggleExtension = useCallback(
+    async (id: string, enabled: boolean) => {
+      await runtimeSetExtensionEnabled(id, enabled, workspaceApi, extensionUi);
+      setEnabledExtensions(getEnabledExtensionIdsCached());
+      refreshCommands();
+      const name = builtinExtensionById(id)?.manifest.name ?? id;
+      toast.show({
+        type: enabled ? "success" : "info",
+        title: enabled ? `${name} enabled` : `${name} disabled`,
+        message: enabled
+          ? "Its commands are live in the Command Palette."
+          : "Its commands left the Command Palette.",
+      });
+    },
+    [extensionUi, refreshCommands, toast, workspaceApi]
+  );
+
+  const runCommand = useCallback((command: CommandDefinition) => {
+    setPaletteOpen(false);
+    void commandRegistry.execute(command.id);
+  }, []);
+
+  /* Ctrl/Cmd+Shift+P opens the Command Palette. */
+  useEffect(() => {
+    if (readOnly) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "p"
+      ) {
+        event.preventDefault();
+        refreshCommands();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [readOnly, refreshCommands]);
+
+  /* Core (non-extension) D-Code commands live in the same registry so the
+   * palette is useful out of the box. Registered once on mount. */
+  useEffect(() => {
+    if (readOnly) return;
+    const core: CommandDefinition[] = [
+      {
+        id: "dcode.view.explorer",
+        title: "Show Explorer",
+        category: "View",
+        handler: () => setSideView("explorer"),
+      },
+      {
+        id: "dcode.view.scm",
+        title: "Show Source Control",
+        category: "View",
+        handler: () => setSideView("scm"),
+      },
+      {
+        id: "dcode.view.extensions",
+        title: "Show Extensions",
+        category: "View",
+        handler: () => setSideView("extensions"),
+      },
+      {
+        id: "dcode.file.save",
+        title: "Save",
+        category: "File",
+        handler: () => void persistRef.current("manual"),
+      },
+      {
+        id: "dcode.view.terminal",
+        title: "Toggle Terminal",
+        category: "View",
+        handler: () => setTerminalOpen((open) => !open),
+      },
+      {
+        id: "dcode.file.new",
+        title: "New File",
+        category: "File",
+        handler: () => {
+          setSideView("explorer");
+          setAddingFile(true);
+        },
+      },
+    ];
+    for (const cmd of core) commandRegistry.register(cmd);
+    refreshCommands();
+    return () => {
+      for (const cmd of core) commandRegistry.unregister(cmd.id);
+    };
+  }, [readOnly, refreshCommands]);
+
+  /* Persist the GitHub bind onto the project row (Source Control). */
+  const handleGithubBind = useCallback(
+    async (bind: GithubBind | null) => {
+      setGithubBind(bind);
+      const id = latestRef.current.projectId;
+      if (!id) return;
+      try {
+        await updateProject(id, {
+          github: {
+            fullName: bind?.fullName ?? null,
+            defaultBranch: bind?.defaultBranch ?? null,
+            lastSyncedSha: bind?.lastSyncedSha ?? null,
+          },
+        });
+      } catch {
+        toast.show({
+          type: "error",
+          title: "Bind not saved",
+          message: "Could not persist the repository binding.",
+        });
+      }
+    },
+    [toast]
+  );
+
+  const handleGithubPull = useCallback(
+    (pulledFiles: DCodeFile[], syncedSha: string) => {
+      setFiles(pulledFiles);
+      setActiveFileId(pulledFiles[0]?.id ?? "");
+      setGithubBind((prev) => (prev ? { ...prev, lastSyncedSha: syncedSha } : prev));
+      markDirty();
+    },
+    [markDirty]
+  );
+
+  const handleGithubConnect = useCallback(() => {
+    void (async () => {
+      try {
+        const supabase = createClient();
+        await supabase.auth.signInWithOAuth({
+          provider: "github",
+          options: {
+            scopes: "repo",
+            redirectTo: typeof window !== "undefined" ? window.location.href : undefined,
+          },
+        });
+      } catch {
+        toast.show({
+          type: "error",
+          title: "GitHub sign-in failed",
+          message: "Could not start the GitHub OAuth flow.",
+        });
+      }
+    })();
+  }, [toast]);
+
   /* ------------------------------ save status ----------------------------- */
 
   const statusLabel = () => {
@@ -1377,6 +1851,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           <h1 className="min-w-0 truncate text-sm font-semibold text-white">{title}</h1>
         ) : (
           <input
+            ref={titleInputRef}
             type="text"
             value={title}
             onChange={(e) => handleTitleChange(e.target.value)}
@@ -1460,18 +1935,16 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 type="button"
                 onClick={() => void handleShare()}
                 disabled={savingShare}
-                title={isPublic ? "Copy public link" : "Share — make public & copy link"}
-                aria-label={isPublic ? "Copy public link" : "Share project"}
+                title="Open Dashy Share Hub"
+                aria-label="Open Dashy Share Hub"
                 className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
                 {savingShare ? (
                   <LoaderIcon className="h-3 w-3 animate-spin" />
-                ) : isPublic ? (
-                  <GlobeIcon className="h-3 w-3" />
                 ) : (
                   <ShareIcon className="h-3 w-3" />
                 )}
-                {isPublic ? "Copy link" : "Share"}
+                Share
               </button>
             </>
           )}
@@ -1482,8 +1955,47 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         {/* Split: editor body gets 70% (flex-7) when the terminal is open,
             otherwise it fills the whole remaining column. */}
         <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
-        {/* File tree */}
-        <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+        {/* Activity bar — Explorer / Source Control / Extensions */}
+        {!readOnly && (
+          <ActivityBar
+            view={sideView}
+            onSelect={setSideView}
+            scmChangeCount={0}
+            enabledExtensionCount={enabledExtensions.length}
+          />
+        )}
+
+        {/* Source Control panel */}
+        {!readOnly && sideView === "scm" && (
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <SourceControlPanel
+              files={files}
+              bind={githubBind}
+              connected={githubConnected}
+              onConnect={handleGithubConnect}
+              onBind={handleGithubBind}
+              onPull={handleGithubPull}
+              commitFocusSignal={commitFocusSignal}
+            />
+          </aside>
+        )}
+
+        {/* Extensions panel (Installed + Discover) */}
+        {!readOnly && sideView === "extensions" && (
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <ExtensionsPanel
+              enabled={enabledExtensions}
+              onToggle={(id, enabled) => void handleToggleExtension(id, enabled)}
+            />
+          </aside>
+        )}
+
+        {/* File tree (Explorer) */}
+        <aside
+          className={`${
+            !readOnly && sideView !== "explorer" ? "hidden" : "flex"
+          } min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40`}
+        >
           <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
             Files
           </p>
@@ -1700,7 +2212,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                       : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
                   }`}
                 >
-                  {file.name}
+                  <span className="max-w-[24ch] truncate" title={file.name}>{file.name}</span>
                 </button>
               );
             })}
@@ -1716,8 +2228,20 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   key={`${activeFile.id}:${activeFile.language}`}
                   value={activeFile.content}
                   language={activeFile.language}
+                  theme={editorTheme}
                   onChange={readOnly ? undefined : updateActiveContent}
                   readOnly={readOnly}
+                  onEditorReady={(editor, monaco) => {
+                    editorInstanceRef.current = editor;
+                    monacoRef.current = monaco;
+                    // Monaco mounted (async CDN load / tab switch) — give
+                    // enabled Monaco-provider extensions (snippets, ghost
+                    // text) a chance to register against the live instance.
+                    void onMonacoEditorReady(workspaceApi, extensionUi);
+                  }}
+                  onSelectionChange={(text) => {
+                    selectionRef.current = text;
+                  }}
                 />
               )
             ) : (
@@ -1753,7 +2277,23 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
               </div>
             )}
           </div>
+
+          {/* DashyAI output drawer (Explain / Refactor results). */}
+          {aiOutput && (
+            <AiOutputPanel output={aiOutput} onClose={() => setAiOutput(null)} />
+          )}
         </div>
+
+        {/* Extension side panels (Agent Code / Pair Coder / Markdown Preview) */}
+        {!readOnly && extView === "agent-code" && (
+          <AgentCodePanel api={workspaceApi} onClose={() => setExtView(null)} />
+        )}
+        {!readOnly && extView === "pair-coder" && (
+          <PairCoderPanel api={workspaceApi} onClose={() => setExtView(null)} />
+        )}
+        {!readOnly && extView === "markdown-preview" && (
+          <MarkdownPreviewPanel api={workspaceApi} onClose={() => setExtView(null)} />
+        )}
         </div>
 
         {/* Mock terminal drawer — bottom 30% of the workspace when open. */}
@@ -1926,6 +2466,25 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           </div>
         </>
+      )}
+
+      {/* Command Palette (Ctrl/Cmd+Shift+P) — commands from enabled extensions. */}
+      {!readOnly && (
+        <CommandPalette
+          open={paletteOpen}
+          commands={paletteCommands}
+          onClose={() => setPaletteOpen(false)}
+          onRun={runCommand}
+        />
+      )}
+
+      {/* Generic quick pick (theme picker, extension toggles, …). */}
+      {quickPick && (
+        <QuickPickModal
+          title={quickPick.title}
+          items={quickPick.items}
+          onSelect={quickPick.resolve}
+        />
       )}
     </div>
   );
