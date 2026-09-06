@@ -37,11 +37,13 @@ import {
   BrainIcon,
   CodeIcon,
   FolderIcon,
+  ImageIcon,
   MessageIcon,
   MicIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
+  SparklesIcon,
   TrashIcon,
 } from "@/components/icons";
 
@@ -259,6 +261,13 @@ export function Sidebar() {
         <Link href="/knowledge" className={navItemClass(pathname === "/knowledge")}>
           <BookOpenIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Knowledge</span>
+        </Link>
+        <Link href="/studio" className={navItemClass(pathname === "/studio")}>
+          <ImageIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Studio</span>
+          <span className="ml-auto rounded-md bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-cyan-300">
+            New
+          </span>
         </Link>
         <Link
           href="/settings#memory"

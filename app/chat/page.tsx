@@ -4,7 +4,7 @@
  * DashyCore v7 — chat workspace (old peak Dashy aesthetic).
  *
  * - Hero: logo mark, "How can I help you today?", 2×2 action cards
- * - Bottom-anchored input bar: attach (/api/digest/upload proxy) + textarea + cyan send
+ * - Bottom-anchored input bar: attach (dashy-digest) + textarea + cyan send
  * - Real streaming from the dashy-flow-state worker via lib/chat-client
  *   (POST /chat · { message, model, userId, agentMode, conversation_id,
  *   messages } — `messages` carries the FULL prior turn history)
@@ -32,9 +32,7 @@ import {
   EVENTS,
   emitChatTitle,
   getConversationAsync,
-  imgMessageUrlFromContent,
   newConversationId,
-  promptFromImageUrl,
   saveConversationAsync,
   titleFromContent,
   type Conversation,
@@ -43,7 +41,6 @@ import {
 import { getModelById } from "@/lib/models";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import { AttachmentButton } from "@/components/AttachmentButton";
-import ImgStudio from "@/components/img-engine/ImgStudio";
 import { useToast } from "@/components/Toast";
 import {
   ArrowUpRightIcon,
@@ -92,49 +89,6 @@ const ACTIONS = [
 
 const ACTIVE_CONVERSATION_KEY = "dashycore:active-conversation";
 
-/** HARD lifecycle rule: an <IMG> generation may never spin forever. */
-const IMG_LOAD_TIMEOUT_MS = 60_000;
-
-/**
- * Zero-cost <IMG> engine URL (pollinations.ai). The seed is regenerated on
- * EVERY call (crypto.randomUUID slice, else timestamp + random) so two
- * generations of the same prompt never share a cached image.
- */
-const POLLINATIONS_URL_BASE = "https://image.pollinations.ai/prompt/";
-
-function uniqueImageSeed(): string {
-  const random =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID().replace(/-/g, "")
-      : Math.random().toString(36).slice(2, 8);
-  return `${Date.now()}_${random.slice(0, 8)}`;
-}
-
-function buildImageUrl(prompt: string): string {
-  return `${POLLINATIONS_URL_BASE}${encodeURIComponent(
-    prompt
-  )}?width=1024&height=1024&nologo=true&seed=${uniqueImageSeed()}`;
-}
-
-/**
- * Returns the Pollinations URL for an assistant <IMG> message. Prefer the
- * structured `imageUrl` field (set at generation time) and fall back to the
- * persisted markdown line so cloud/local reloads still render the image.
- */
-function imgMessageUrl(message: HistoryMessage): string | null {
-  if (message.role !== "assistant") return null;
-  return message.imageUrl ?? imgMessageUrlFromContent(message.content);
-}
-
-/** Soft trigger: "/img <prompt>" or "/image <prompt>" (never plain words). */
-const IMG_COMMAND_RE = /^\/(?:img|image)\b[ \t]*(.*)$/i;
-
-/** True for the in-flight typing placeholder — never treat these as real replies. */
-function isPlaceholderAssistantContent(content: string): boolean {
-  const trimmed = content.trim();
-  return trimmed.length === 0 || trimmed === "..." || trimmed === "…";
-}
-
 function markActiveConversation(id: string | null): void {
   try {
     if (id) {
@@ -156,16 +110,11 @@ export default function ChatPage() {
   const [statuses, setStatuses] = useState<string[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [studioOpen, setStudioOpen] = useState(false);
-  const [studioPrompt, setStudioPrompt] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HistoryMessage[]>([]);
-  /** Serializes cloud/local saves so an empty placeholder cannot overwrite the final reply. */
-  const persistChainRef = useRef(Promise.resolve());
-  const persistGenerationRef = useRef(0);
   /** Title / creation time of the active conversation (cloud-agnostic). */
   const activeTitleRef = useRef<string>("New Chat");
   const activeCreatedAtRef = useRef<number>(Date.now());
@@ -229,7 +178,6 @@ export default function ChatPage() {
     abortControllerRef.current?.abort();
     setIsStreaming(false);
     setMessages([]);
-    messagesRef.current = [];
     setStatuses([]);
     setInput("");
     setActiveConversationId(null);
@@ -249,13 +197,7 @@ export default function ChatPage() {
     abortControllerRef.current?.abort();
     setIsStreaming(false);
     setStatuses([]);
-    const hydrated = conversation.messages.map((m) =>
-      m.role === "assistant" && isPlaceholderAssistantContent(m.content)
-        ? { ...m, content: "" }
-        : m
-    );
-    setMessages(hydrated);
-    messagesRef.current = hydrated;
+    setMessages(conversation.messages);
     setActiveConversationId(conversation.id);
     markActiveConversation(conversation.id);
     activeTitleRef.current = conversation.title;
@@ -310,7 +252,6 @@ export default function ChatPage() {
   const persistConversation = useCallback(
     (conversationId: string, msgs: HistoryMessage[], model: string, title?: string) => {
       if (title) activeTitleRef.current = title;
-      const generation = ++persistGenerationRef.current;
       const conversation: Conversation = {
         id: conversationId,
         title: activeTitleRef.current,
@@ -319,14 +260,8 @@ export default function ChatPage() {
         createdAt: activeCreatedAtRef.current,
         updatedAt: Date.now(),
       };
-      // Serialize writes and drop stale snapshots so the empty typing
-      // placeholder cannot race past the final streamed assistant text.
-      persistChainRef.current = persistChainRef.current
-        .catch(() => undefined)
-        .then(async () => {
-          if (generation !== persistGenerationRef.current) return;
-          await saveConversationAsync(conversation);
-        });
+      // Cloud-first: Supabase when signed in, localStorage when signed out.
+      void saveConversationAsync(conversation);
       return conversation;
     },
     []
@@ -354,17 +289,8 @@ export default function ChatPage() {
       abortControllerRef.current = controller;
       setStatuses([]);
 
-      const applyAssistantContent = (content: string) => {
-        const next = messagesRef.current.map((m) =>
-          m.id === assistantMessageId ? { ...m, content } : m
-        );
-        messagesRef.current = next;
-        setMessages(next);
-        return next;
-      };
-
       try {
-        const result = await sendChatMessage(
+        await sendChatMessage(
           {
             message: promptText,
             model,
@@ -377,15 +303,13 @@ export default function ChatPage() {
           },
           {
             onDelta: (delta) => {
-              setMessages((prev) => {
-                const next = prev.map((m) =>
+              setMessages((prev) =>
+                prev.map((m) =>
                   m.id === assistantMessageId
                     ? { ...m, content: m.content + delta }
                     : m
-                );
-                messagesRef.current = next;
-                return next;
-              });
+                )
+              );
             },
             onStatus: (next) => setStatuses(next.slice(-4)),
             onDone: () => {
@@ -393,10 +317,6 @@ export default function ChatPage() {
             },
           }
         );
-        // Source of truth: the aggregated stream result, not the typing placeholder.
-        if (!isPlaceholderAssistantContent(result.content)) {
-          applyAssistantContent(result.content);
-        }
       } catch (error) {
         if (error instanceof ChatClientError && error.kind === "aborted") {
           // User pressed stop — keep whatever has streamed so far.
@@ -405,12 +325,18 @@ export default function ChatPage() {
             error instanceof ChatClientError
               ? error.message
               : "Connection error to dashy-flow-state. Please try again.";
-          const current =
-            messagesRef.current.find((m) => m.id === assistantMessageId)?.content ?? "";
-          applyAssistantContent(
-            current.length > 0 && !isPlaceholderAssistantContent(current)
-              ? `${current}\n\n> ⚠️ ${message}`
-              : `⚠️ ${message}`
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? {
+                    ...m,
+                    content:
+                      m.content.length > 0
+                        ? `${m.content}\n\n> ⚠️ ${message}`
+                        : `⚠️ ${message}`,
+                  }
+                : m
+            )
           );
           toast.error("Message failed", message);
         }
@@ -423,135 +349,10 @@ export default function ChatPage() {
     [persistConversation, toast, userId]
   );
 
-  /**
-   * Zero-cost <IMG> engine (pollinations.ai) — NO dashy-flow-state call.
-   * Appends a user message + a NEW assistant message per generation (multi-IMG
-   * keeps every previous bubble). The assistant message stores the Pollinations
-   * URL as markdown so it survives reloads and cloud sync; ImgEngineBubble
-   * renders it with a live loading spinner and a fresh-seed retry path.
-   */
-  const handleGenerateImage = useCallback(
-    (promptFromComposer?: string) => {
-      const prompt = (promptFromComposer ?? input).trim();
-      if (!prompt) {
-        toast.error(
-          "Describe an image first",
-          "Type what you want to generate, then tap the <IMG> button (or use /img <prompt>)."
-        );
-        return;
-      }
-
-      setInput("");
-      setStatuses([]);
-
-      let conversationId = activeConversationId;
-      if (!conversationId) {
-        conversationId = newConversationId();
-        setActiveConversationId(conversationId);
-        markActiveConversation(conversationId);
-      }
-
-      const imageUrl = buildImageUrl(prompt);
-      const userMessage: HistoryMessage = {
-        id: newConversationId(),
-        role: "user",
-        content: prompt,
-        timestamp: Date.now(),
-      };
-      const assistantMessage: HistoryMessage = {
-        id: newConversationId(),
-        role: "assistant",
-        content: `![<IMG> generated](${imageUrl})`,
-        timestamp: Date.now(),
-        engine: "img",
-        contentType: "image",
-        prompt,
-        imageUrl,
-        imageStatus: "loading",
-      };
-
-      // Append (never overwrite) a NEW bubble. `messagesRef.current` is the
-      // latest thread, so rapid gen #1 → gen #2 cannot lose gen #1.
-      const withMessages = [...messagesRef.current, userMessage, assistantMessage];
-      setMessages(withMessages);
-      messagesRef.current = withMessages;
-
-      const firstUserMessage = messagesRef.current.find((m) => m.role === "user");
-      const title = firstUserMessage
-        ? titleFromContent(firstUserMessage.content)
-        : titleFromContent(prompt);
-      emitChatTitle(title);
-      persistConversation(conversationId, withMessages, selectedModel, title);
-
-      toast.success(
-        "<IMG> engine",
-        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
-      );
-    },
-    [activeConversationId, input, persistConversation, selectedModel, toast]
-  );
-
-  /**
-   * Retry a failed <IMG> bubble: rebuilds the URL with a FRESH seed (a new
-   * generation, not a cache refetch) and updates + persists the message in
-   * place. Still zero dashy-flow-state traffic.
-   */
-  const handleImageRetry = useCallback(
-    (messageId: string) => {
-      const message = messagesRef.current.find((m) => m.id === messageId);
-      if (!message) return;
-      const currentUrl = imgMessageUrl(message);
-      if (!currentUrl) return;
-      const prompt = message.prompt || promptFromImageUrl(currentUrl);
-      if (!prompt) return;
-
-      const nextUrl = buildImageUrl(prompt);
-      const next = messagesRef.current.map((m) =>
-        m.id === messageId
-          ? {
-              ...m,
-              content: `![<IMG> generated](${nextUrl})`,
-              engine: "img" as const,
-              contentType: "image" as const,
-              prompt,
-              imageUrl: nextUrl,
-              imageStatus: "loading" as const,
-              imageError: undefined,
-            }
-          : m
-      );
-      messagesRef.current = next;
-      setMessages(next);
-      const conversationId = activeConversationId;
-      if (conversationId) {
-        persistConversation(conversationId, next, selectedModel);
-      }
-    },
-    [activeConversationId, persistConversation, selectedModel]
-  );
-
-
   const handleSend = useCallback(
     async (textToSend?: string) => {
       const promptText = (textToSend ?? input).trim();
       if (!promptText || isStreaming) return;
-
-      // Soft /img · /image trigger — an EXPLICIT image command routes to the
-      // <IMG> engine. Ordinary words (like typing "image") are never hijacked
-      // and go to the chat model as usual.
-      const imgCommand = IMG_COMMAND_RE.exec(promptText);
-      if (imgCommand) {
-        const imgPrompt = imgCommand[1].trim();
-        if (!imgPrompt) {
-          toast.error(
-            "Describe an image first",
-            "Type a prompt after the command — e.g. /img a neon city at night."
-          );
-          return;
-        }
-        handleGenerateImage(imgPrompt);
-        return;
-      }
 
       setInput("");
       setStatuses([]);
@@ -579,7 +380,6 @@ export default function ChatPage() {
 
       const withUserMessage = [...messages, userMessage, assistantMessage];
       setMessages(withUserMessage);
-      messagesRef.current = withUserMessage;
 
       // FULL-HISTORY payload: every prior turn of this conversation
       // (user + assistant, in send order) plus the message being sent
@@ -596,9 +396,7 @@ export default function ChatPage() {
         ? titleFromContent(firstUserMessage.content)
         : titleFromContent(promptText);
       emitChatTitle(title);
-      // Persist the user turn immediately, but never write the empty typing
-      // placeholder — the final aggregated assistant text is saved on stream end.
-      persistConversation(conversationId, [...messages, userMessage], selectedModel, title);
+      persistConversation(conversationId, withUserMessage, selectedModel, title);
 
       let authToken: string | undefined;
       try {
@@ -623,14 +421,12 @@ export default function ChatPage() {
     },
     [
       activeConversationId,
-      handleGenerateImage,
       input,
       isStreaming,
       messages,
       persistConversation,
       selectedModel,
       streamAssistantReply,
-      toast,
     ]
   );
 
@@ -641,14 +437,6 @@ export default function ChatPage() {
       if (index <= 0) return;
       const userMessage = messages[index - 1];
       if (!userMessage || userMessage.role !== "user") return;
-
-      // Regenerating an <IMG> bubble re-runs the IMG engine with a fresh seed
-      // (new image, new bubble content) — it never falls through to a text
-      // LLM reply for an image generation.
-      if (imgMessageUrl(messages[index]) !== null) {
-        handleImageRetry(assistantMessageId);
-        return;
-      }
 
       const freshAssistant: HistoryMessage = {
         id: newConversationId(),
@@ -661,20 +449,13 @@ export default function ChatPage() {
         .filter((m) => m.id !== assistantMessageId)
         .concat(freshAssistant);
       setMessages(withoutOld);
-      messagesRef.current = withoutOld;
 
       const conversationId = activeConversationId ?? newConversationId();
       if (!activeConversationId) {
         setActiveConversationId(conversationId);
         markActiveConversation(conversationId);
       }
-      persistConversation(
-        conversationId,
-        withoutOld.filter(
-          (m) => m.role !== "assistant" || !isPlaceholderAssistantContent(m.content)
-        ),
-        selectedModel
-      );
+      persistConversation(conversationId, withoutOld, selectedModel);
 
       // FULL-HISTORY payload for regeneration: every turn before the one
       // being regenerated, ending with its user message — identical to
@@ -694,7 +475,6 @@ export default function ChatPage() {
     },
     [
       activeConversationId,
-      handleImageRetry,
       isStreaming,
       messages,
       persistConversation,
@@ -715,21 +495,27 @@ export default function ChatPage() {
     [toast]
   );
 
-  const handleOpenStudio = useCallback((prompt = input) => {
-    setStudioPrompt(prompt);
-    setStudioOpen(true);
-  }, [input]);
-
-  const handleStudioSend = useCallback((item: { prompt: string; url?: string }) => {
-    if (!item.url) return;
-    const conversationId = activeConversationId ?? newConversationId();
-    if (!activeConversationId) { setActiveConversationId(conversationId); markActiveConversation(conversationId); }
-    const imageMessage: HistoryMessage = { id: newConversationId(), role: "assistant", content: `![<IMG> ${item.prompt}](${item.url})\n\n*${item.prompt}*`, timestamp: Date.now(), engine: "img" };
-    const next = [...messages, imageMessage]; setMessages(next);
-    persistConversation(conversationId, next, selectedModel);
-    setStudioOpen(false);
-    toast.success("Sent to chat", "The verified image was saved to this conversation.");
-  }, [activeConversationId, messages, persistConversation, selectedModel, toast]);
+  /**
+   * DEPRECATED in-chat <IMG> bubble flow — now routes to Dashy Studio.
+   * Historical image bubbles (markdown ![...](https://image.pollinations...))
+   * continue to render via the MessageRow img renderer.
+   * New generations happen in /studio (first-class OS app).
+   */
+  const handleGenerateImage = useCallback(
+    (promptFromComposer?: string) => {
+      const prompt = (promptFromComposer ?? input).trim();
+      if (!prompt) {
+        toast.error(
+          "Describe an image first",
+          "Type what you want to generate, then tap the IMG button."
+        );
+        return;
+      }
+      // Carry prompt to Studio via ?prompt= query — Studio will prefill.
+      router.push(`/studio?prompt=${encodeURIComponent(prompt)}`);
+    },
+    [input, router, toast]
+  );
 
   /**
    * Hands a fenced code block to D-Code: stashes the snapshot in
@@ -793,12 +579,12 @@ export default function ChatPage() {
                 type="button"
                 onClick={() => {
                   if (image) {
-                    handleOpenStudio(prompt);
+                    handleGenerateImage(prompt);
                   } else {
                     void handleSend(prompt);
                   }
                 }}
-                disabled={!image && isStreaming}
+                disabled={isStreaming}
                 className="group flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-left transition-all hover:border-cyan-400/30 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-cyan-500/5 disabled:opacity-50"
               >
                 <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-cyan-500/10">
@@ -824,16 +610,15 @@ export default function ChatPage() {
       ) : (
         /* ---------------------------- MESSAGE THREAD ------------------------ */
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
-          {messages.map((message, index) => (
+          {messages.map((message) => (
             <MessageRow
               key={message.id}
               message={message}
-              isStreaming={isStreaming && index === messages.length - 1}
+              isStreaming={isStreaming}
               statuses={statuses}
               onCopy={() => void handleCopy(message.content)}
               onOpenInDcode={handleOpenInDcode}
               onRegenerate={() => handleRegenerate(message.id)}
-              onImageRetry={() => handleImageRetry(message.id)}
             />
           ))}
           <div ref={messagesEndRef} />
@@ -841,14 +626,11 @@ export default function ChatPage() {
       )}
 
       {/* --------------------- BOTTOM-ANCHORED INPUT BAR --------------------- */}
-      {studioOpen && <ImgStudio initialPrompt={studioPrompt} onClose={() => setStudioOpen(false)} onSendToChat={handleStudioSend} />}
-
       <div className="flex-shrink-0 border-t border-white/[0.06] bg-navy/70 p-4 backdrop-blur-2xl">
         <div className="mx-auto w-full max-w-3xl">
           <div className="flex items-end gap-2 rounded-2xl border border-white/[0.1] bg-white/[0.045] px-3 py-2.5 shadow-inner shadow-black/10 transition-colors focus-within:border-cyan-400/60 focus-within:ring-4 focus-within:ring-cyan-400/10">
             <AttachmentButton
               userId={userId}
-              origin="chat"
               disabled={isStreaming}
               className="h-8 w-8 flex-shrink-0"
             />
@@ -864,14 +646,24 @@ export default function ChatPage() {
             />
             <button
               type="button"
-onClick={() => handleOpenStudio()}
-              disabled={isStreaming}
-              aria-label="Open <IMG> Studio with <IMG> Engine"
-              title="Generate image with <IMG> Engine"
+              onClick={() => {
+                const p = input.trim();
+                if (!p) {
+                  toast.error(
+                    "Describe an image first",
+                    "Type what you want to generate, then tap Studio."
+                  );
+                  return;
+                }
+                router.push(`/studio?prompt=${encodeURIComponent(p)}`);
+              }}
+              disabled={!input.trim() || isStreaming}
+              aria-label="Open Dashy Studio with current prompt"
+              title="Open Studio — generate images in the dedicated Media Library"
               className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <ImageIcon className="h-4 w-4" />
-              IMG
+              Studio
             </button>
             {isStreaming ? (
               <button
@@ -916,7 +708,6 @@ function MessageRow({
   onCopy,
   onOpenInDcode,
   onRegenerate,
-  onImageRetry,
 }: {
   message: HistoryMessage;
   isStreaming: boolean;
@@ -924,18 +715,12 @@ function MessageRow({
   onCopy: () => void;
   onOpenInDcode: (code: string, language: string) => void;
   onRegenerate: () => void;
-  onImageRetry: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
-  const isAssistantEmpty = !isUser && isPlaceholderAssistantContent(message.content);
+  const isAssistantEmpty = !isUser && message.content.length === 0;
   const isThisStreaming = !isUser && isStreaming;
-  const showTypingLoader = isAssistantEmpty && isThisStreaming;
   const modelLabel = message.model ? getModelById(message.model).label : null;
-  // <IMG> engine message: engine flag OR a persisted Pollinations markdown
-  // image (covers cloud-synced reloads where the engine flag isn't stored).
-  const imgSrc = imgMessageUrl(message);
-  const isImgMessage = !isUser && imgSrc !== null;
 
   const handleCopyClick = async () => {
     onCopy();
@@ -954,9 +739,9 @@ function MessageRow({
 
       <div className={`max-w-[85%] min-w-0 space-y-2 ${isUser ? "flex flex-col items-end" : ""}`}>
         {/* Model / engine badge */}
-        {!isUser && (modelLabel || isImgMessage || message.engine === "img") && (
+        {!isUser && (modelLabel || message.engine === "img") && (
           <div className="flex items-center gap-2">
-            {isImgMessage || message.engine === "img" ? (
+            {message.engine === "img" ? (
               <span className="rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
                 &lt;IMG&gt; engine
               </span>
@@ -981,59 +766,12 @@ function MessageRow({
           <div className="rounded-2xl rounded-tr-sm border border-cyan-400/15 bg-cyan-500/10 px-4 py-3 text-sm leading-relaxed text-zinc-100">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
-        ) : isImgMessage && imgSrc ? (
-          /* <IMG> engine bubble: live spinner while Pollinations renders,
-             clean error + fresh-seed retry when it fails. */
-          <div className="relative">
-            <ImgEngineBubble url={imgSrc} onRetry={onImageRetry} />
-            <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 opacity-0 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100">
-              <button
-                type="button"
-                onClick={() => void handleCopyClick()}
-                title={copied ? "Copied" : "Copy image link"}
-                aria-label="Copy image link"
-                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-              >
-                {copied ? (
-                  <CheckIcon className="h-3.5 w-3.5 text-emerald-400" />
-                ) : (
-                  <CopyIcon className="h-3.5 w-3.5" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={onImageRetry}
-                title="Regenerate image (new seed)"
-                aria-label="Regenerate image"
-                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-              >
-                <RefreshIcon className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        ) : showTypingLoader ? (
+        ) : isAssistantEmpty ? (
           <div className="rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
             <div className="flex min-h-[20px] items-center gap-1.5 py-0.5">
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400" />
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:0.15s]" />
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400 [animation-delay:0.3s]" />
-            </div>
-          </div>
-        ) : isAssistantEmpty ? (
-          <div className="relative rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-            <p className="text-sm italic text-zinc-500">
-              This reply was not saved. Regenerate to try again.
-            </p>
-            <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 opacity-0 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100">
-              <button
-                type="button"
-                onClick={onRegenerate}
-                title="Regenerate response"
-                aria-label="Regenerate response"
-                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-              >
-                <RefreshIcon className="h-3.5 w-3.5" />
-              </button>
             </div>
           </div>
         ) : (
@@ -1043,16 +781,12 @@ function MessageRow({
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeSanitize]}
                 components={{
-                  // `node` is react-markdown's AST handle — never forward it
-                  // to the DOM element (React would warn about unknown props).
-                  a: ({ node: _node, ...props }) => (
+                  a: (props) => (
                     <a {...props} target="_blank" rel="noopener noreferrer" />
                   ),
-                  code: ({ node: _node, ...props }) => <CodeSpan {...props} />,
-                  pre: ({ node: _node, ...props }) => (
-                    <PreBlock {...props} onOpenInDcode={onOpenInDcode} />
-                  ),
-                  img: ({ node: _node, ...props }) => (
+                  code: (props) => <CodeSpan {...props} />,
+                  pre: (props) => <PreBlock {...props} onOpenInDcode={onOpenInDcode} />,
+                  img: (props) => (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       {...props}
@@ -1106,118 +840,6 @@ function MessageRow({
         <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-violet-500">
           <UserIcon className="h-4 w-4 text-white" />
         </div>
-      )}
-    </div>
-  );
-}
-
-/* ========================================================================== */
-/* <IMG> engine bubble                                                        */
-/* ========================================================================== */
-
-/**
- * Renders ONE Pollinations generation with real load/error states and a hard
- * 60s lifecycle:
- *  - while the URL loads → spinner overlay ("Rendering image…")
- *  - on load            → loading state is released, spinner hidden
- *  - on error / timeout → "Image failed, tap retry" + Retry (parent rebuilds
- *                         the URL with a FRESH seed — a brand-new generation)
- *
- * There is NO global image lock. Each bubble owns its own timer, so one stuck
- * generation can never block the next one.
- */
-function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void }) {
-  const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
-  const statusRef = useRef<"loading" | "loaded" | "error">("loading");
-  const imgRef = useRef<HTMLImageElement | null>(null);
-  const timerRef = useRef<number | null>(null);
-
-  const clearTimer = () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  };
-
-  const applyStatus = (next: "loading" | "loaded" | "error") => {
-    statusRef.current = next;
-    setStatus(next);
-    // HARD RULE: clear the lock/timer on load, error, and remount. The 60s
-    // timeout is the last-resort release; the first terminal event wins.
-    if (next !== "loading") clearTimer();
-  };
-
-  // A retry swaps the URL prop — reset to loading for the new seed, arm a 60s
-  // timeout, and release it as soon as the element loads/errors/unmounts.
-  useEffect(() => {
-    applyStatus("loading");
-    const img = imgRef.current;
-    if (img && img.complete) {
-      // Already cached (reload/retry): avoid a spinner that never clears because
-      // the cached image's load event can fire before React attaches onLoad.
-      applyStatus(img.naturalWidth > 0 ? "loaded" : "error");
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      if (statusRef.current === "loading") {
-        applyStatus("error");
-      }
-    }, IMG_LOAD_TIMEOUT_MS);
-    timerRef.current = timer;
-    return () => {
-      clearTimer();
-    };
-    // IMG_LOAD_TIMEOUT_MS is a module constant; url is the lifecycle key.
-  }, [url]);
-
-  const handleLoad = () => applyStatus("loaded");
-  const handleError = () => applyStatus("error");
-
-  return (
-    <div className="relative overflow-hidden rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] p-1.5">
-      {status === "error" ? (
-        <div className="flex min-h-[13rem] w-full min-w-[16rem] flex-col items-center justify-center gap-2.5 px-4 py-8 text-center">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-400/25 bg-red-400/10">
-            <ImageIcon className="h-5 w-5 text-red-300" />
-          </div>
-          <p className="text-sm font-medium text-zinc-200">Image failed, tap retry</p>
-          <p className="text-[11px] leading-relaxed text-zinc-500">
-            The &lt;IMG&gt; engine didn&apos;t respond. Retrying generates a
-            fresh image with a new seed.
-          </p>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="mt-1 flex items-center gap-1.5 rounded-xl bg-cyan-500 px-4 py-2 text-xs font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
-          >
-            <RefreshIcon className="h-3.5 w-3.5" />
-            Retry
-          </button>
-        </div>
-      ) : (
-        <>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            ref={imgRef}
-            src={url}
-            alt={promptFromImageUrl(url) || "<IMG> generated"}
-            onLoad={handleLoad}
-            onError={handleError}
-            className="block max-h-[70vh] min-h-[13rem] w-full max-w-full rounded-xl object-contain"
-          />
-          {status === "loading" && (
-            <div className="absolute inset-0 z-10 flex min-h-[13rem] flex-col items-center justify-center gap-3 rounded-2xl bg-[#0a0e1a]/85 px-4 py-10">
-              <span className="h-8 w-8 animate-spin rounded-full border-2 border-zinc-700 border-t-cyan-400" />
-              <p className="text-xs font-medium text-zinc-300">
-                Rendering image with the &lt;IMG&gt; engine…
-              </p>
-              <p className="text-[10px] text-zinc-600">
-                The free engine can take up to a minute — the image appears
-                here when it&apos;s ready.
-              </p>
-            </div>
-          )}
-        </>
       )}
     </div>
   );
