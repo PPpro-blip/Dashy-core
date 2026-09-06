@@ -496,70 +496,25 @@ export default function ChatPage() {
   );
 
   /**
-   * Zero-cost <IMG> engine (pollinations.ai) — NO dashy-flow-state call.
-   * Takes the composer prompt, then immediately appends a user message and an
-   * assistant message that renders the generated image as markdown.
+   * DEPRECATED in-chat <IMG> bubble flow — now routes to Dashy Studio.
+   * Historical image bubbles (markdown ![...](https://image.pollinations...))
+   * continue to render via the MessageRow img renderer.
+   * New generations happen in /studio (first-class OS app).
    */
   const handleGenerateImage = useCallback(
     (promptFromComposer?: string) => {
       const prompt = (promptFromComposer ?? input).trim();
-      if (!prompt || isStreaming) {
-        if (!prompt) {
-          toast.error(
-            "Describe an image first",
-            "Type what you want to generate, then tap the <IMG> button."
-          );
-        }
+      if (!prompt) {
+        toast.error(
+          "Describe an image first",
+          "Type what you want to generate, then tap the IMG button."
+        );
         return;
       }
-
-      setInput("");
-      setStatuses([]);
-
-      let conversationId = activeConversationId;
-      if (!conversationId) {
-        conversationId = newConversationId();
-        setActiveConversationId(conversationId);
-        markActiveConversation(conversationId);
-      }
-
-      const engine = "img" as const;
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-        prompt
-      )}?width=1024&height=1024&nologo=true&seed=${Math.floor(
-        Math.random() * 100000
-      )}`;
-
-      const userMessage: HistoryMessage = {
-        id: newConversationId(),
-        role: "user",
-        content: prompt,
-        timestamp: Date.now(),
-      };
-      const assistantMessage: HistoryMessage = {
-        id: newConversationId(),
-        role: "assistant",
-        content: `![<IMG> generated](${imageUrl})`,
-        timestamp: Date.now(),
-        engine,
-      };
-
-      const withMessages = [...messages, userMessage, assistantMessage];
-      setMessages(withMessages);
-
-      const firstUserMessage = messages.find((m) => m.role === "user");
-      const title = firstUserMessage
-        ? titleFromContent(firstUserMessage.content)
-        : titleFromContent(prompt);
-      emitChatTitle(title);
-      persistConversation(conversationId, withMessages, selectedModel, title);
-
-      toast.success(
-        "<IMG> engine",
-        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
-      );
+      // Carry prompt to Studio via ?prompt= query — Studio will prefill.
+      router.push(`/studio?prompt=${encodeURIComponent(prompt)}`);
     },
-    [activeConversationId, input, isStreaming, messages, persistConversation, selectedModel, toast]
+    [input, router, toast]
   );
 
   /**
@@ -691,14 +646,24 @@ export default function ChatPage() {
             />
             <button
               type="button"
-              onClick={() => handleGenerateImage()}
+              onClick={() => {
+                const p = input.trim();
+                if (!p) {
+                  toast.error(
+                    "Describe an image first",
+                    "Type what you want to generate, then tap Studio."
+                  );
+                  return;
+                }
+                router.push(`/studio?prompt=${encodeURIComponent(p)}`);
+              }}
               disabled={!input.trim() || isStreaming}
-              aria-label="Generate image with <IMG> Engine"
-              title="Generate image with <IMG> Engine"
+              aria-label="Open Dashy Studio with current prompt"
+              title="Open Studio — generate images in the dedicated Media Library"
               className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
             >
               <ImageIcon className="h-4 w-4" />
-              IMG
+              Studio
             </button>
             {isStreaming ? (
               <button
