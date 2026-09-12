@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useToast } from "@/components/Toast";
-import { generateImage } from "@/lib/img-engine";
+import { generateImage, GENERATION_DEADLINE_MS } from "@/lib/img-engine";
 import {
   AlertIcon,
   CheckIcon,
@@ -47,8 +47,13 @@ interface MediaItem {
   seed?: string;
   width: number;
   height: number;
-  /** Optimistic tile state; only `ready` (or legacy items) are persisted. */
-  status?: "loading" | "ready" | "error";
+  /**
+   * Optimistic tile state; only `ready` and `error` (plus legacy statusless
+   * items) are persisted. `generating` / `pending` are legacy states from
+   * older Studio builds that crashed mid-generation — they are recovered to
+   * `error` on mount by sanitizeLibrary().
+   */
+  status?: "loading" | "generating" | "pending" | "ready" | "error";
   error?: string;
 }
 
@@ -60,6 +65,10 @@ type GenerateOverrides = {
 };
 
 const STORAGE_KEY = "dashy.media.library";
+
+/** Message shown on tiles recovered from an interrupted generation. */
+const INTERRUPTED_MESSAGE =
+  "Recovered from an interrupted session — this generation never completed. Retry to regenerate it.";
 
 const ASPECT_MAP: Record<AspectRatio, { width: number; height: number; label: string }> = {
   "1:1": { width: 1024, height: 1024, label: "Square" },
@@ -88,9 +97,37 @@ function loadLibrary(): MediaItem[] {
   }
 }
 
-/** Only finished images belong in localStorage; optimistic/error tiles are transient. */
+/**
+ * Recovers items stuck in `loading` / `generating` / `pending` from previous
+ * crashes or refreshes (e.g. an old build that persisted optimistic tiles).
+ * Stuck tiles become retryable `error` tiles instead of spinning forever.
+ */
+function sanitizeLibrary(items: MediaItem[]): MediaItem[] {
+  return items.map((item) => {
+    if (item.status === "error") return item;
+    const stuck =
+      item.status === "loading" ||
+      item.status === "generating" ||
+      item.status === "pending" ||
+      !item.url;
+    if (stuck) {
+      return {
+        ...item,
+        status: "error" as const,
+        error: item.error ?? INTERRUPTED_MESSAGE,
+      };
+    }
+    return { ...item, status: "ready" as const, url: item.url };
+  });
+}
+
+/**
+ * Finished tiles persist; optimistic `loading` tiles are transient (a
+ * refresh mid-generation simply drops them — nothing left to spin).
+ * `error` tiles persist so Retry / Clear failed survive reloads.
+ */
 function isPersistable(item: MediaItem): boolean {
-  return !item.status || item.status === "ready";
+  return !item.status || item.status === "ready" || item.status === "error";
 }
 
 function saveLibrary(items: MediaItem[]) {
@@ -125,18 +162,41 @@ export default function StudioPage() {
   const [prompt, setPrompt] = useState("");
   const [aspect, setAspect] = useState<AspectRatio>("1:1");
   const [model, setModel] = useState<ModelOption>("flux");
-  const [generating, setGenerating] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [library, setLibrary] = useState<MediaItem[]>([]);
   const [showVideoModal, setShowVideoModal] = useState(false);
   const [previewItem, setPreviewItem] = useState<MediaItem | null>(null);
+  /** Number of in-flight generations (drives the generating UI + timer). */
+  const [activeCount, setActiveCount] = useState(0);
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** One AbortController + deadline per in-flight tile id. */
+  interface InflightRun {
+    controller: AbortController;
+    timedOut: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+    startedAt: number;
+  }
+  const inflightRef = useRef<Map<string, InflightRun>>(new Map());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load library + ?prompt carry-over from chat IMG button
+  // Load library + ?prompt carry-over from chat IMG button.
+  // Also sanitize localStorage: tiles stuck in `loading`/`generating`/
+  // `pending` from a previous crash or refresh are recovered to retryable
+  // `error` tiles instead of spinning endlessly.
   useEffect(() => {
-    setLibrary(loadLibrary());
+    const raw = loadLibrary();
+    const sanitized = sanitizeLibrary(raw);
+    const recovered = sanitized.filter((item) => item.status === "error").length;
+    setLibrary(sanitized);
+    if (JSON.stringify(sanitized) !== JSON.stringify(raw)) {
+      saveLibrary(sanitized);
+      if (recovered > 0) {
+        toast.info(
+          "Library recovered",
+          `${recovered} interrupted generation${recovered === 1 ? "" : "s"} flagged as failed — retry or clear them.`
+        );
+      }
+    }
     const qp = searchParams.get("prompt");
     if (qp) {
       setPrompt(qp);
@@ -144,6 +204,17 @@ export default function StudioPage() {
       setTimeout(() => textareaRef.current?.focus(), 100);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Abort any in-flight generations when the page unmounts (cleanup).
+  useEffect(() => {
+    return () => {
+      inflightRef.current.forEach((run) => {
+        if (run.timer) clearTimeout(run.timer);
+        run.controller.abort();
+      });
+      inflightRef.current.clear();
+    };
   }, []);
 
   // Persist whenever library changes (skip initial empty if not loaded? we load first)
@@ -168,31 +239,36 @@ export default function StudioPage() {
     []
   );
 
-  // Timer while generating
+  // Elapsed timer while any generation is in flight (oldest startedAt).
   useEffect(() => {
-    if (generating) {
-      const start = Date.now();
+    if (activeCount === 0) {
       setElapsed(0);
-      timerRef.current = setInterval(() => {
-        setElapsed(Math.floor((Date.now() - start) / 1000));
-      }, 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
+      return;
     }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+    const tick = () => {
+      let earliest = Infinity;
+      inflightRef.current.forEach((run) => {
+        earliest = Math.min(earliest, run.startedAt);
+      });
+      setElapsed(
+        Number.isFinite(earliest) ? Math.floor((Date.now() - earliest) / 1000) : 0
+      );
     };
-  }, [generating]);
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [activeCount]);
 
   const dimensions = useMemo(() => ASPECT_MAP[aspect], [aspect]);
 
   /**
    * Image mode — Pollinations free tier via lib/img-engine.
    * Direct URL fallbacks first, same-origin /api/img-proxy as a last resort.
-   * Each run gets its own unique seed/id (see lib/img-engine) and the button
-   * lock is released in `finally`, so a failed or finished run never blocks
-   * retries. `overrides` lets an error-tile Retry reuse the same prompt/aspect.
+   * Each run gets its own unique seed/id and its own AbortController with a
+   * HARD 45s setTimeout deadline: on timeout the fetch is aborted, the tile
+   * flips to a retryable `error` state and a clean toast explains why.
+   * The user can also abort immediately via the Cancel button. `overrides`
+   * lets an error-tile Retry reuse the same prompt/aspect/id.
    */
   const handleGenerate = useCallback(
     async (overrides?: GenerateOverrides) => {
@@ -214,6 +290,9 @@ export default function StudioPage() {
       const { width, height } = ASPECT_MAP[ratio];
       const id = overrides?.id ?? crypto.randomUUID();
 
+      // A tile can only have one in-flight generation at a time.
+      if (inflightRef.current.has(id)) return;
+
       // Optimistic tile — spinner immediately, before the network round-trip.
       const pending: MediaItem = {
         id,
@@ -227,16 +306,33 @@ export default function StudioPage() {
         height,
         status: "loading",
       };
-      setGenerating(true);
-      commitLibrary((prev) => [pending, ...prev]);
+      commitLibrary((prev) => [pending, ...prev.filter((i) => i.id !== id)]);
+
+      // Hard 45s deadline: abort the fetch and fail the tile cleanly.
+      const controller = new AbortController();
+      const run: InflightRun = {
+        controller,
+        timedOut: false,
+        timer: null,
+        startedAt: Date.now(),
+      };
+      run.timer = setTimeout(() => {
+        run.timedOut = true;
+        controller.abort();
+      }, GENERATION_DEADLINE_MS);
+      inflightRef.current.set(id, run);
+      setActiveCount(inflightRef.current.size);
 
       try {
-        const result = await generateImage({
-          prompt: trimmed,
-          width,
-          height,
-          model: modelChoice,
-        });
+        const result = await generateImage(
+          { prompt: trimmed, width, height, model: modelChoice },
+          {
+            signal: controller.signal,
+            // The handler's own 45s setTimeout is the strict deadline and
+            // fires first; this engine-side cap is the safety net (46s).
+            deadlineMs: GENERATION_DEADLINE_MS + 1000,
+          }
+        );
 
         const ready: MediaItem = {
           ...pending,
@@ -254,20 +350,54 @@ export default function StudioPage() {
           }`
         );
       } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : "Image generation failed. Please try again.";
+        let errorText: string;
+        if (run.timedOut) {
+          errorText = "Generation timed out";
+        } else if (controller.signal.aborted) {
+          errorText = "Generation cancelled";
+        } else {
+          errorText =
+            err instanceof Error
+              ? err.message
+              : "Image generation failed. Please try again.";
+        }
         commitLibrary((prev) =>
-          prev.map((i) => (i.id === id ? { ...i, status: "error", error: msg } : i))
+          prev.map((i) =>
+            i.id === id ? { ...i, status: "error", error: errorText } : i
+          )
         );
-        toast.error("Generation failed", msg);
+        if (run.timedOut) {
+          toast.error("Image generation timed out after 45s. Please retry.");
+        } else if (controller.signal.aborted) {
+          toast.info("Generation cancelled", "Retry from the failed tile anytime.");
+        } else {
+          toast.error("Generation failed", errorText);
+        }
       } finally {
-        setGenerating(false);
+        if (run.timer) clearTimeout(run.timer);
+        inflightRef.current.delete(id);
+        setActiveCount(inflightRef.current.size);
       }
     },
     [aspect, commitLibrary, mode, model, prompt, toast]
   );
+
+  /** Aborts every in-flight generation immediately (global Cancel). */
+  const handleCancel = useCallback(() => {
+    inflightRef.current.forEach((run) => {
+      run.timedOut = false;
+      run.controller.abort();
+    });
+  }, []);
+
+  /** Aborts a single tile's in-flight generation. */
+  const handleCancelOne = useCallback((id: string) => {
+    const run = inflightRef.current.get(id);
+    if (run) {
+      run.timedOut = false;
+      run.controller.abort();
+    }
+  }, []);
 
   const handleDownload = useCallback(
     async (item: MediaItem) => {
@@ -332,6 +462,17 @@ export default function StudioPage() {
     },
     [library, persist, previewItem, toast]
   );
+
+  /** Removes every errored tile from the library. */
+  const handleClearFailed = useCallback(() => {
+    const failed = library.filter((i) => i.status === "error").length;
+    if (failed === 0) return;
+    persist(library.filter((i) => i.status !== "error"));
+    toast.info(
+      "Failed items cleared",
+      `${failed} failed tile${failed === 1 ? "" : "s"} removed from your library.`
+    );
+  }, [library, persist, toast]);
 
   const handleUsePrompt = useCallback((p: string) => {
     setPrompt(p);
@@ -433,6 +574,44 @@ export default function StudioPage() {
               </div>
             </div>
 
+            {mode === "video" ? (
+              /* Honest video-mode banner — no fake generators, no infinite loaders. */
+              <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/40 backdrop-blur-xl">
+                <div className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-amber-400/10 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-16 -left-16 h-48 w-48 rounded-full bg-violet-500/10 blur-3xl" />
+                <div className="relative flex items-start gap-3">
+                  <span className="text-2xl leading-none" aria-hidden="true">
+                    📹
+                  </span>
+                  <div className="space-y-1.5">
+                    <p className="text-sm font-semibold leading-snug text-zinc-100">
+                      Real AI Video Generation requires API Keys (Luma / Runway /
+                      Replicate).
+                    </p>
+                    <p className="text-xs italic leading-relaxed text-zinc-400">
+                      Please add your API key in Settings or switch to Image Mode.
+                    </p>
+                  </div>
+                </div>
+                <div className="relative mt-4 flex flex-wrap gap-2 border-t border-white/[0.06] pt-4">
+                  <button
+                    type="button"
+                    onClick={() => router.push("/settings")}
+                    className="flex-1 rounded-xl bg-amber-400/90 px-4 py-2.5 text-sm font-semibold text-[#241a02] transition-colors hover:bg-amber-300"
+                  >
+                    Add API key in Settings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode("image")}
+                    className="flex-1 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
+                  >
+                    Switch to Image Mode
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
             {/* Aspect Ratio */}
             <div>
               <label className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">
@@ -503,28 +682,39 @@ export default function StudioPage() {
               <button
                 type="button"
                 onClick={() => void handleGenerate()}
-                disabled={generating || !prompt.trim()}
+                disabled={activeCount > 0 || !prompt.trim()}
                 className="group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-cyan-500 px-6 py-4 text-[15px] font-semibold text-[#06202a] shadow-xl shadow-cyan-500/20 transition-all hover:bg-cyan-400 hover:shadow-cyan-400/25 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
               >
-                {generating ? (
+                {activeCount > 0 ? (
                   <>
                     <LoaderIcon className="h-5 w-5 animate-spin" />
-                    Generating… {elapsed}s
+                    Generating… {elapsed}s / {GENERATION_DEADLINE_MS / 1000}s
                   </>
                 ) : (
                   <>
                     <SparklesIcon className="h-5 w-5 transition-transform group-hover:rotate-12" />
-                    Generate {mode === "image" ? "Image" : "Video"}
+                    Generate Image
                   </>
                 )}
                 <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
               </button>
 
-              {generating && (
-                <div className="flex items-center justify-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-500/5 px-4 py-2.5 text-xs text-cyan-300">
-                  <ClockIcon className="h-3.5 w-3.5 animate-pulse" />
-                  <span>Pollinations is rendering your masterpiece…</span>
-                  <span className="font-mono font-semibold">{elapsed}s</span>
+              {activeCount > 0 && (
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-cyan-400/20 bg-cyan-500/5 px-4 py-2.5 text-xs text-cyan-300">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <ClockIcon className="h-3.5 w-3.5 flex-shrink-0 animate-pulse" />
+                    <span className="truncate">
+                      Pollinations is rendering… {elapsed}s elapsed (max{" "}
+                      {GENERATION_DEADLINE_MS / 1000}s)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCancel}
+                    className="flex-shrink-0 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 font-semibold text-red-300 transition-colors hover:bg-red-500/20"
+                  >
+                    Cancel
+                  </button>
                 </div>
               )}
 
@@ -534,6 +724,8 @@ export default function StudioPage() {
                 Your media is stored locally in this browser.
               </p>
             </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -551,6 +743,15 @@ export default function StudioPage() {
               <p className="mt-0.5 text-[11px] text-zinc-500">Local library • {STORAGE_KEY}</p>
             </div>
             <div className="flex items-center gap-2">
+              {library.some((i) => i.status === "error") && (
+                <button
+                  type="button"
+                  onClick={handleClearFailed}
+                  className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:border-red-500/40 hover:bg-red-500/15"
+                >
+                  Clear failed
+                </button>
+              )}
               {library.length > 0 && (
                 <button
                   type="button"
@@ -607,7 +808,9 @@ export default function StudioPage() {
                   >
                     {/* Image / optimistic states */}
                     <div className="relative aspect-[4/3] w-full overflow-hidden bg-black/20">
-                      {item.status === "loading" ? (
+                      {item.status === "loading" ||
+                      item.status === "generating" ||
+                      item.status === "pending" ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2 bg-black/20">
                           <LoaderIcon className="h-6 w-6 animate-spin text-cyan-400" />
                           <span className="text-xs font-medium text-cyan-300">
@@ -616,6 +819,15 @@ export default function StudioPage() {
                           <span className="text-[10px] text-zinc-500">
                             Pollinations • {item.width}×{item.height}
                           </span>
+                          {inflightRef.current.has(item.id) && (
+                            <button
+                              type="button"
+                              onClick={() => handleCancelOne(item.id)}
+                              className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1 text-[11px] font-semibold text-red-300 transition-colors hover:bg-red-500/20"
+                            >
+                              Cancel
+                            </button>
+                          )}
                         </div>
                       ) : item.status === "error" ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2 bg-red-500/[0.03] px-4 text-center">
@@ -625,6 +837,7 @@ export default function StudioPage() {
                           </p>
                           <button
                             type="button"
+                            disabled={inflightRef.current.has(item.id)}
                             onClick={() =>
                               void handleGenerate({
                                 prompt: item.prompt,
@@ -633,7 +846,7 @@ export default function StudioPage() {
                                 id: item.id,
                               })
                             }
-                            className="rounded-lg bg-cyan-400 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-300"
+                            className="rounded-lg bg-cyan-400 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             Retry
                           </button>
@@ -760,12 +973,14 @@ export default function StudioPage() {
                 <div className="space-y-1">
                   <p className="text-sm font-medium text-amber-200">API key required</p>
                   <p className="text-xs leading-relaxed text-amber-200/70">
-                    Real AI video requires paid compute (Runway, Pika, Replicate). We are not faking an API.
+                    Real AI video requires paid compute (Luma, Runway, Replicate). We are not faking an API.
                   </p>
                 </div>
               </div>
               <p className="mt-4 text-sm leading-relaxed text-zinc-400">
-                Video generation requires a valid API key (Runway/Replicate). Add it in Settings to unlock.
+                Real AI Video Generation requires API Keys (Luma / Runway /
+                Replicate). Please add your API key in Settings or switch to
+                Image Mode.
               </p>
               <div className="mt-5 flex justify-end gap-2">
                 <button
