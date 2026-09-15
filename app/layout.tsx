@@ -4,11 +4,20 @@ import { ToastProvider } from "@/components/Toast";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: {
-    default: "DashyCore AI",
-    template: "%s · DashyCore AI",
+  title: "DashyCore — AI Workspace & Studio",
+  description: "Next-gen AI workspace featuring D-Code, Dashy Studio <IMG> engine, Knowledge Digest, and Custom Agents.",
+  openGraph: {
+    title: "DashyCore — AI Workspace & Studio",
+    description: "Next-gen AI workspace featuring D-Code, Dashy Studio <IMG> engine, Knowledge Digest, and Custom Agents.",
+    url: "https://dashy-core.vercel.app",
+    siteName: "DashyCore",
+    type: "website",
   },
-  description: "Next-gen AI Ecosystem & Model Routing",
+  twitter: {
+    card: "summary_large_image",
+    title: "DashyCore — AI Workspace & Studio",
+    description: "Next-gen AI workspace featuring D-Code, Dashy Studio <IMG> engine, Knowledge Digest, and Custom Agents.",
+  },
   icons: {
     icon: "/icon-512.png",
     apple: "/icon-512.png",
