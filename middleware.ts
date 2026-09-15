@@ -14,6 +14,6 @@ export const config = {
      * - favicon.ico / icons (static assets)
      * - public files with extensions (images, svg, png, jpg, etc.)
      */
-    "/((?!_next/static|_next/image|favicon.ico|icon-512.png|dcode-icon-512.png|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|icon-512.png|dcode-icon-512.png|api/img-proxy|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };

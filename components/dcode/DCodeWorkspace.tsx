@@ -1370,7 +1370,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   /* --------------------------------- render ------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
+    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#0b0f19]">
+      {/* VS Code-style application menu */}
+      <nav aria-label="Editor menu" className="flex flex-shrink-0 items-center gap-5 border-b border-white/[0.06] bg-[#111827] px-4 py-1.5 text-[11px] text-zinc-400">
+        <span className="mr-2 font-semibold text-cyan-300">D-Code</span>
+        {['File', 'Edit', 'Selection', 'View', 'Go', 'Run', 'Terminal', 'Help'].map((item) => <button key={item} type="button" className="transition-colors hover:text-white">{item}</button>)}
+      </nav>
       {/* Top bar: editable title + save status + share */}
       <div className="flex flex-shrink-0 items-center gap-3 border-b border-white/[0.06] bg-navy/60 px-4 py-2.5">
         {readOnly ? (
@@ -1479,6 +1484,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
+        {/* Breadcrumb navigation */}
+        <div className="flex h-7 flex-shrink-0 items-center gap-1 border-b border-white/[0.05] bg-[#0d1220] px-4 font-mono text-[11px] text-zinc-500">
+          <span>workspace</span><span>/</span><span>src</span><span>/</span><span className="text-zinc-200">{activeFile?.name ?? 'main.tsx'}</span>
+        </div>
         {/* Split: editor body gets 70% (flex-7) when the terminal is open,
             otherwise it fills the whole remaining column. */}
         <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
@@ -1700,7 +1709,8 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                       : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
                   }`}
                 >
-                  {file.name}
+                  <span className="text-cyan-300">{file.name.endsWith('.css') ? '◇' : 'TS'}</span>
+                  {file.name}<span className="ml-2 text-zinc-600">×</span>
                 </button>
               );
             })}
@@ -1756,6 +1766,14 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         </div>
         </div>
 
+        {/* VS Code bottom panel */}
+        <section className="flex h-28 flex-shrink-0 flex-col border-t border-white/[0.08] bg-[#0b101a]" aria-label="Bottom panel">
+          <div className="flex items-center gap-5 border-b border-white/[0.06] px-4 text-[10px] uppercase tracking-wide text-zinc-500">
+            <button type="button" className="border-b-2 border-cyan-400 py-2 text-cyan-300">Problems (0)</button>
+            <button type="button" className="py-2 hover:text-zinc-200">Output</button><button type="button" className="py-2 hover:text-zinc-200">Terminal</button><button type="button" className="py-2 hover:text-zinc-200">Debug Console</button>
+          </div>
+          <div className="flex-1 overflow-hidden px-4 py-2 font-mono text-[11px] text-zinc-500"><span className="text-cyan-300">$</span> dashy ready — terminal connected to workspace</div>
+        </section>
         {/* Mock terminal drawer — bottom 30% of the workspace when open. */}
         {terminalOpen && (
           <DCodeTerminal
@@ -1768,6 +1786,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           />
         )}
       </div>
+      <footer className="flex h-6 flex-shrink-0 items-center gap-5 bg-[#075985] px-3 font-mono text-[10px] text-sky-50">
+        <span>Ln 14, Col 32</span><span>UTF-8</span><span>TypeScript React</span><span>Prettier</span><span className="ml-auto">main*</span>
+      </footer>
 
       {/* GitHub connect / import modal */}
       {githubModalOpen && (
