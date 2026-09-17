@@ -517,6 +517,10 @@ export function DCodeTerminal({
         if (sub === "status" || sub === "") {
           const branch = "main";
           emit(`On branch ${branch}`, "accent");
+          emit(
+            "Note: this terminal git is a simulation — the Source Control panel commits & pushes via the real GitHub API.",
+            "muted"
+          );
           if (ahead > 0) {
             emit(
               `Your branch is ahead of 'origin/${branch}' by ${ahead} commit${

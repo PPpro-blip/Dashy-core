@@ -1486,7 +1486,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   /* --------------------------------- render ------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
+    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#0b0f19]">
+      {/* VS Code-style application menu */}
+      <nav aria-label="Editor menu" className="flex flex-shrink-0 items-center gap-5 border-b border-white/[0.06] bg-[#111827] px-4 py-1.5 text-[11px] text-zinc-400">
+        <span className="mr-2 font-semibold text-cyan-300">D-Code</span>
+        {['File', 'Edit', 'Selection', 'View', 'Go', 'Run', 'Terminal', 'Help'].map((item) => <button key={item} type="button" className="transition-colors hover:text-white">{item}</button>)}
+      </nav>
       {/* Top bar: editable title + save status + share */}
       <div className="flex flex-shrink-0 items-center gap-3 border-b border-white/[0.06] bg-navy/60 px-4 py-2.5">
         {readOnly ? (

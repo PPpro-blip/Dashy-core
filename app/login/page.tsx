@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
@@ -78,9 +78,18 @@ export default function LoginPage() {
   const [oauthBusy, setOauthBusy] = useState<"google" | "github" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const codeRefs = useRef<Array<HTMLInputElement | null>>([]);
 
   const busy = sending || verifying || oauthBusy !== null;
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [resendCooldown]);
 
   const handleOAuth = useCallback(
     async (provider: "google" | "github") => {
@@ -118,12 +127,16 @@ export default function LoginPage() {
         const supabase = createClient();
         const { error: otpError } = await supabase.auth.signInWithOtp({
           email: clean,
-          options: { shouldCreateUser: true },
+          options: {
+            shouldCreateUser: true,
+            emailRedirectTo: `${window.location.origin}/auth/callback`,
+          },
         });
         if (otpError) {
           setError(otpError.message);
         } else {
           setStep("otp");
+          setResendCooldown(45);
           setNotice(`We sent a 6-digit code to ${clean}.`);
           window.setTimeout(() => codeRefs.current[0]?.focus(), 60);
         }
@@ -441,10 +454,12 @@ export default function LoginPage() {
                   <button
                     type="button"
                     onClick={() => void handleSendCode()}
-                    disabled={busy}
+                    disabled={busy || resendCooldown > 0}
                     className="font-medium text-cyan-300 transition-colors hover:text-cyan-200 disabled:opacity-50"
                   >
-                    Resend code
+                    {resendCooldown > 0
+                      ? `Resend in ${resendCooldown}s`
+                      : "Resend code"}
                   </button>
                 </div>
               </>
