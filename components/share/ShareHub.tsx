@@ -21,6 +21,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DCodeFile } from "@/lib/dcode";
 import {
+  buildLinkedInUrl,
+  buildWhatsAppUrl,
+  buildXUrl,
   collectProjectImages,
   makeDefaultDraft,
   SHARE_APPS,
@@ -40,6 +43,7 @@ import {
   LinkIcon,
   LoaderIcon,
   LockIcon,
+  PenIcon,
   ShareIcon,
   XIcon,
 } from "@/components/icons";
@@ -151,7 +155,7 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
         : "Please copy manually.";
       toast.show({
         type: ok ? "success" : "error",
-        title: ok ? "Link copied" : "Copy failed",
+        title: ok ? "Link copied to clipboard!" : "Copy failed",
         message,
       });
     } finally {
@@ -201,6 +205,26 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
       message:
         "Choose an app below — your choice is remembered for one-tap sharing next time.",
     });
+  };
+
+  /**
+   * QUICK social export — direct share triggers for X / LinkedIn / WhatsApp.
+   * Opens the app's share intent immediately, prefilled with the formatted
+   * draft text; link previews come from the share page's OG tags.
+   */
+  const handleQuickShare = (appId: "x" | "linkedin" | "whatsapp") => {
+    if (!url || typeof window === "undefined") return;
+    const builders = {
+      x: buildXUrl,
+      linkedin: buildLinkedInUrl,
+      whatsapp: buildWhatsAppUrl,
+    } as const;
+    saveSharePrefs({
+      destination: appId,
+      caption: draft.caption,
+      tags: draft.tags,
+    });
+    window.open(builders[appId](draft), "_blank", "noopener,noreferrer");
   };
 
   const shareNowLabel = canDeviceShare
@@ -323,6 +347,17 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
             )}
           </div>
 
+          {/* Owner action — jump back into the editor for this project. */}
+          {privacy && project && (
+            <a
+              href={`/d-code/${project.id}`}
+              className="flex w-full items-center justify-center gap-2 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-6 py-3 text-sm font-semibold text-zinc-200 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+            >
+              <PenIcon className="h-4 w-4" />
+              Edit in D-Code
+            </a>
+          )}
+
           {/* PRIMARY action — one-tap share */}
           <button
             type="button"
@@ -346,6 +381,38 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
                 : "Pick an app below — remembered for next time"}
             </span>
           </button>
+
+          {/* Quick social export — one tap opens the app intent directly. */}
+          <div>
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+              Quick share
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              {(["x", "linkedin", "whatsapp"] as const).map((appId) => {
+                const app = SHARE_APP_MAP[appId];
+                return (
+                  <button
+                    key={appId}
+                    type="button"
+                    onClick={() => handleQuickShare(appId)}
+                    disabled={!url}
+                    title={`Open ${app.name} with this draft prefilled`}
+                    className="flex min-h-[3.5rem] flex-col items-center justify-center gap-1 rounded-2xl border p-2 transition-all hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-40"
+                    style={{
+                      borderColor: `${app.accent}55`,
+                      backgroundColor: `${app.badge}14`,
+                      color: app.accent,
+                    }}
+                  >
+                    <span className="text-[12px] font-bold">{app.name}</span>
+                    <span className="text-[9px] font-semibold uppercase tracking-wide opacity-70">
+                      Direct
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           {/* Owner privacy controls — hidden for plain visitors, who never
               see this prop at all. A private project still renders the full

@@ -196,7 +196,11 @@ export async function deactivateAllExtensions(): Promise<void> {
  * nothing. Re-running activate once a real editor is ready fixes
  * "enabled but does nothing".
  */
-const MONACO_PROVIDER_EXTENSION_IDS = ["dashy.snippets", "dashy.autocomplete"];
+const MONACO_PROVIDER_EXTENSION_IDS = [
+  "dashy.snippets",
+  "dashy.autocomplete",
+  "dashy.tailwind",
+];
 
 /**
  * Called from the workspace every time a Monaco editor instance becomes

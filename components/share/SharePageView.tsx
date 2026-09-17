@@ -30,7 +30,15 @@ import { createClient } from "@/lib/supabase/client";
 import { DCodeWorkspace } from "@/components/dcode/DCodeWorkspace";
 import { ShareHub } from "@/components/share/ShareHub";
 import { useToast } from "@/components/Toast";
-import { CodeIcon, GlobeIcon, LoaderIcon, ShareIcon } from "@/components/icons";
+import {
+  CodeIcon,
+  GlobeIcon,
+  LoaderIcon,
+  PenIcon,
+  ShareIcon,
+  SparklesIcon,
+} from "@/components/icons";
+import { buildShortShareUrl } from "@/lib/share-intents";
 
 interface LoadState {
   status: "loading" | "ready" | "missing";
@@ -81,7 +89,7 @@ export function SharePageView() {
   useEffect(() => {
     if (!state.project || typeof window === "undefined") return;
     const shareKey = state.project.shareSlug ?? state.project.id;
-    setShareUrl(`${window.location.origin}/d-code/share/${shareKey}`);
+    setShareUrl(buildShortShareUrl(window.location.origin, shareKey));
   }, [state.project]);
 
   useEffect(() => {
@@ -208,13 +216,32 @@ export function SharePageView() {
               ? "Private (owner view)"
               : "Public share"}
           </span>
-          <Link
-            href="/chat"
-            className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
-          >
-            <CodeIcon className="h-3 w-3" />
-            Open DashyCore
-          </Link>
+          {isOwner && state.project ? (
+            <>
+              <Link
+                href={`/d-code/${state.project.id}`}
+                className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
+              >
+                <PenIcon className="h-3 w-3" />
+                Edit in D-Code
+              </Link>
+              <Link
+                href="/studio"
+                className="flex items-center gap-1.5 rounded-lg border border-white/[0.10] bg-white/[0.03] px-3 py-1.5 text-[11px] font-semibold text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+              >
+                <SparklesIcon className="h-3 w-3" />
+                Open in Studio
+              </Link>
+            </>
+          ) : (
+            <Link
+              href="/chat"
+              className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
+            >
+              <CodeIcon className="h-3 w-3" />
+              Open DashyCore
+            </Link>
+          )}
         </div>
       </header>
 

@@ -50,29 +50,51 @@ export const CATALOG_CATEGORIES: CatalogCategory[] = [
 export const DISCOVER_CATALOG: CatalogEntry[] = [
   {
     id: "dashy.cline",
-    name: "Agent Code",
+    name: "Dashy Cline Assist",
     author: "DashyCore",
     description:
-      "Cline-style coding agent for the browser IDE. Reads your project, proposes multi-file edits as diffs, and applies them into Monaco on click.",
+      "Autonomous coding assistant mode (Web-safe). Reads your project, proposes multi-file edits as diffs, and applies them into Monaco on click.",
     version: "1.0.0",
     icon: "🤖",
     categories: ["AI", "Productivity"],
-    equivalentOf: "Cline",
     installs: "12.4k",
     rating: 4.8,
   },
   {
     id: "dashy.roo",
-    name: "Pair Coder",
+    name: "Dashy Roo Code",
     author: "DashyCore",
     description:
-      "Roo-style pair programming. Select code, chat about it with filename context, and apply a returned code block back over the selection.",
+      "Architect & context builder for multi-file edits. Select code, chat about it with filename context, and apply a returned code block back over the selection.",
     version: "1.0.0",
     icon: "👥",
     categories: ["AI", "Productivity"],
-    equivalentOf: "Roo Code",
     installs: "8.1k",
     rating: 4.7,
+  },
+  {
+    id: "dashy.tailwind",
+    name: "Tailwind Class IntelliSense",
+    author: "DashyCore",
+    description:
+      "Live CSS utility helper & previewer. Utility completions inside class attributes plus one-click Tailwind Play CDN injection for HTML files.",
+    version: "1.0.0",
+    icon: "🌊",
+    categories: ["Language", "Productivity"],
+    installs: "18.6k",
+    rating: 4.8,
+  },
+  {
+    id: "dashy.gitlens",
+    name: "Git Lens Preview",
+    author: "DashyCore",
+    description:
+      "Line history & diff inspector. Inspect the active line (file · line · selection) and copy review-ready line permalinks.",
+    version: "1.0.0",
+    icon: "🔍",
+    categories: ["Productivity"],
+    installs: "11.2k",
+    rating: 4.6,
   },
   {
     id: "dashy.ai",
@@ -112,10 +134,10 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
   },
   {
     id: "dashy.prettier",
-    name: "Prettier Format",
+    name: "Prettier Auto-Formatter",
     author: "DashyCore",
     description:
-      "Format JavaScript, TypeScript, JSON, CSS, HTML, Markdown and YAML with Prettier's browser build.",
+      "Code beautifier on save. Format JavaScript, TypeScript, JSON, CSS, HTML, Markdown and YAML with Prettier's browser build.",
     version: "1.0.0",
     icon: "💅",
     categories: ["Formatters"],

@@ -9,7 +9,9 @@
 
 import { DEFAULT_DCODE_THEME_ID } from "./themes";
 
-const ENABLED_KEY = "dashy.dcode.extensions.enabled";
+const ENABLED_KEY = "dashy.dcode.extensions";
+/** Previous enabled-set key — adopted once, then removed. */
+const LEGACY_ENABLED_KEY = "dashy.dcode.extensions.enabled";
 /** Ids the host has already offered to this user (so a user-disabled
  * extension is NOT silently re-enabled on the next load, while a brand-new
  * built-in still defaults to enabled). */
@@ -43,14 +45,31 @@ function writeJson(key: string, value: unknown): void {
  * Ids of enabled extensions. Unknown ids are ignored by the host; a missing
  * key means "all built-ins enabled except the ones that ship disabled by
  * default" (e.g. Ghost Suggestions). Persisted as a JSON string array under
- * `dashy.dcode.extensions.enabled`.
+ * `dashy.dcode.extensions` (the legacy `.enabled` suffixed key is adopted
+ * once for users upgrading from an older build, then removed).
  */
 export function getEnabledExtensionIds(
   allIds: string[],
   defaultDisabled: string[] = []
 ): string[] {
   const off = new Set(defaultDisabled);
-  const stored = readJson(ENABLED_KEY);
+  let stored = readJson(ENABLED_KEY);
+  if (!Array.isArray(stored) && typeof window !== "undefined") {
+    // One-time migration from the legacy key.
+    try {
+      const legacyRaw = window.localStorage.getItem(LEGACY_ENABLED_KEY);
+      if (legacyRaw) {
+        const legacy: unknown = JSON.parse(legacyRaw);
+        if (Array.isArray(legacy)) {
+          stored = legacy;
+          writeJson(ENABLED_KEY, stored);
+        }
+        window.localStorage.removeItem(LEGACY_ENABLED_KEY);
+      }
+    } catch {
+      // Corrupt legacy value — fall through to defaults.
+    }
+  }
   const seenRaw = readJson(SEEN_KEY);
   const seen = new Set(
     Array.isArray(seenRaw) ? seenRaw.filter((x): x is string => typeof x === "string") : []

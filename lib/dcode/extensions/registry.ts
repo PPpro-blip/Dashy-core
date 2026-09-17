@@ -14,20 +14,27 @@
 import { aiExtension } from "./builtins/ai";
 import { autocompleteExtension } from "./builtins/autocomplete";
 import { clineExtension } from "./builtins/cline";
+import { gitlensExtension } from "./builtins/gitlens";
 import { markdownPreviewExtension } from "./builtins/markdown-preview";
 import { prettierExtension } from "./builtins/prettier";
 import { rooExtension } from "./builtins/roo";
 import { snippetsExtension } from "./builtins/snippets";
+import { tailwindExtension } from "./builtins/tailwind";
 import { themesExtension } from "./builtins/themes";
 import type { ExtensionModule } from "./types";
 
-/** All built-in extensions, in display order. */
+/**
+ * All built-in extensions, in display order. The five first-party web-safe
+ * flagships (Cline Assist, Roo Code, Tailwind, Prettier, GitLens) lead.
+ */
 export const BUILTIN_EXTENSIONS: ExtensionModule[] = [
-  themesExtension,
-  prettierExtension,
-  aiExtension,
   clineExtension,
   rooExtension,
+  tailwindExtension,
+  prettierExtension,
+  gitlensExtension,
+  aiExtension,
+  themesExtension,
   autocompleteExtension,
   snippetsExtension,
   markdownPreviewExtension,

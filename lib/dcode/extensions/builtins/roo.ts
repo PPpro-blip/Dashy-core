@@ -1,8 +1,9 @@
 /**
- * DashyCore v7 — First-party extension: `dashy.roo` (Pair Coder).
+ * DashyCore v7 — First-party extension: `dashy.roo` (Dashy Roo Code).
  *
- * A Roo-style pair-programming assistant. It works on the CURRENT SELECTION:
- * you highlight code, it discusses it with the filename as context, and when
+ * Web-safe architect & context builder for multi-file edits. It works on the
+ * CURRENT SELECTION: you highlight code, it discusses it with the filename
+ * as context, and when
  * the reply contains a fenced code block you can apply it back over the
  * selection.
  *
@@ -21,10 +22,10 @@ import type { ExtensionModule } from "../types";
 export const rooExtension: ExtensionModule = {
   manifest: {
     id: "dashy.roo",
-    name: "Pair Coder",
+    name: "Dashy Roo Code",
     version: "1.0.0",
     description:
-      "Roo-style pair programming. Select code and chat about it with filename context; apply a returned code block straight back over your selection.",
+      "Architect & context builder for multi-file edits. Select code and chat about it with filename context; apply a returned code block straight back over your selection.",
     author: "DashyCore",
     icon: "👥",
     categories: ["AI", "Productivity"],

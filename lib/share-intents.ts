@@ -420,3 +420,12 @@ export function buildOgShareUrl(
 
 /** Dashy logo used as the fallback preview/OG image. */
 export const DASHY_LOGO = "/icon-512.png";
+
+/**
+ * Clean public short link for a share key (slug or project uuid).
+ * Served by app/s/[slug], which redirects to the canonical
+ * /d-code/share/[slug] viewer (query params preserved for OG previews).
+ */
+export function buildShortShareUrl(origin: string, shareKey: string): string {
+  return `${origin}/s/${encodeURIComponent(shareKey)}`;
+}
