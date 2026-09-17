@@ -46,6 +46,8 @@ export interface MonacoEditorProps {
   /** Extra editor options (merged over the D-Code defaults). */
   options?: Record<string, unknown>;
   className?: string;
+  /** Reports cursor moves (powers the VS Code-style status bar). */
+  onCursorPosition?: (line: number, column: number) => void;
 }
 
 export function MonacoEditor({
@@ -58,6 +60,7 @@ export function MonacoEditor({
   onSelectionChange,
   options,
   className,
+  onCursorPosition,
 }: MonacoEditorProps) {
   const themeId = theme ?? getStoredTheme();
 
@@ -74,9 +77,21 @@ export function MonacoEditor({
           );
         });
       }
+      if (onCursorPosition) {
+        const report = () => {
+          const position = editor.getPosition();
+          if (position) {
+            onCursorPosition(position.lineNumber, position.column);
+          }
+        };
+        report();
+        editor.onDidChangeCursorPosition((event) => {
+          onCursorPosition(event.position.lineNumber, event.position.column);
+        });
+      }
       onEditorReady?.(editor, monaco);
     },
-    [onEditorReady, onSelectionChange, themeId]
+    [onCursorPosition, onEditorReady, onSelectionChange, themeId]
   );
 
   return (

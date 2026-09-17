@@ -1,30 +1,87 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
+  BookOpenIcon,
+  CodeIcon,
   GithubIcon,
-  GoogleIcon,
-  ZapIcon,
-  SparklesIcon,
-  BrainIcon,
-  MailIcon,
-  ShieldCheckIcon,
-  AlertIcon,
-  ArrowRightIcon,
-  RefreshIcon,
+  ImageIcon,
 } from "@/components/icons";
+
+/**
+ * DashyCore — Authentication (modern split-screen OTP flow).
+ *
+ * Left panel (desktop): dark mesh gradient with cyan/purple glows, brand +
+ * feature cards. Right panel: passwordless email OTP (Send Code → 6-digit
+ * Verify) plus Google / GitHub OAuth. No passwords, no sign-up tabs.
+ */
+
+type Step = "email" | "otp";
+
+const FEATURES = [
+  {
+    icon: CodeIcon,
+    title: "D-Code IDE",
+    description: "Multi-file editor with terminal & GitHub import",
+    accent: "text-cyan-300",
+    ring: "border-cyan-400/20 bg-cyan-400/10",
+  },
+  {
+    icon: ImageIcon,
+    title: "Studio",
+    description: "Text-to-image generation with instant gallery",
+    accent: "text-fuchsia-300",
+    ring: "border-fuchsia-400/20 bg-fuchsia-400/10",
+  },
+  {
+    icon: BookOpenIcon,
+    title: "Knowledge Digest",
+    description: "Documents indexed into searchable workspace memory",
+    accent: "text-violet-300",
+    ring: "border-violet-400/20 bg-violet-400/10",
+  },
+];
+
+function GoogleMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47a5.57 5.57 0 0 1-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09A11.99 11.99 0 0 0 12 24z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.27 14.29A7.2 7.2 0 0 1 4.89 12c0-.8.14-1.57.38-2.29V6.62H1.29a12 12 0 0 0 0 10.76l3.98-3.09z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.69 1.29 6.62l3.98 3.09C6.22 6.86 8.87 4.75 12 4.75z"
+      />
+    </svg>
+  );
+}
 
 export default function LoginPage() {
   const router = useRouter();
+  const [step, setStep] = useState<Step>("email");
   const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [sent, setSent] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [code, setCode] = useState<string[]>(["", "", "", "", "", ""]);
+  const [sending, setSending] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState<"google" | "github" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [resendCooldown, setResendCooldown] = useState(0);
+  const codeRefs = useRef<Array<HTMLInputElement | null>>([]);
+
+  const busy = sending || verifying || oauthBusy !== null;
 
   useEffect(() => {
     if (resendCooldown <= 0) return;
@@ -34,421 +91,441 @@ export default function LoginPage() {
     return () => clearInterval(interval);
   }, [resendCooldown]);
 
-  const oauth = async (provider: "google" | "github") => {
-    setLoading(true);
-    setError(null);
-    try {
-      const { error: authError } = await createClient().auth.signInWithOAuth({
-        provider,
-        options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
-        },
-      });
-      if (authError) {
-        setError(authError.message);
-        setLoading(false);
+  const handleOAuth = useCallback(
+    async (provider: "google" | "github") => {
+      setOauthBusy(provider);
+      setError(null);
+      try {
+        const supabase = createClient();
+        const { error: oauthError } = await supabase.auth.signInWithOAuth({
+          provider,
+          options: {
+            redirectTo: `${window.location.origin}/auth/callback`,
+          },
+        });
+        if (oauthError) {
+          setError(oauthError.message);
+          setOauthBusy(null);
+        }
+      } catch {
+        setError("Network error. Please check your connection and try again.");
+        setOauthBusy(null);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "OAuth sign-in failed.");
-      setLoading(false);
-    }
-  };
+    },
+    []
+  );
 
-  const sendCode = async (event?: React.FormEvent) => {
-    if (event) event.preventDefault();
-    const cleanEmail = email.trim();
-    if (!cleanEmail) {
-      setError("Please enter a valid email address.");
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const { error: authError } = await createClient().auth.signInWithOtp({
-        email: cleanEmail,
-        options: {
-          shouldCreateUser: true,
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
-        },
-      });
-
-      if (authError) {
-        setError(authError.message);
-      } else {
-        setSent(true);
-        setResendCooldown(45);
+  const handleSendCode = useCallback(
+    async (event?: React.FormEvent) => {
+      event?.preventDefault();
+      const clean = email.trim();
+      if (!clean || sending) return;
+      setSending(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const supabase = createClient();
+        const { error: otpError } = await supabase.auth.signInWithOtp({
+          email: clean,
+          options: {
+            shouldCreateUser: true,
+            emailRedirectTo: `${window.location.origin}/auth/callback`,
+          },
+        });
+        if (otpError) {
+          setError(otpError.message);
+        } else {
+          setStep("otp");
+          setResendCooldown(45);
+          setNotice(`We sent a 6-digit code to ${clean}.`);
+          window.setTimeout(() => codeRefs.current[0]?.focus(), 60);
+        }
+      } catch {
+        setError("Network error. Please check your connection and try again.");
+      } finally {
+        setSending(false);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not send verification code.");
-    } finally {
-      setLoading(false);
-    }
-  };
+    },
+    [email, sending]
+  );
 
-  const verifyCode = async (event: React.FormEvent) => {
-    event.preventDefault();
-    const cleanCode = code.trim().replace(/\D/g, "");
-    if (cleanCode.length !== 6) {
-      setError("Please enter the 6-digit verification code.");
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const { data, error: authError } = await createClient().auth.verifyOtp({
-        email: email.trim(),
-        token: cleanCode,
-        type: "email",
-      });
-
-      if (authError) {
-        setError(authError.message);
-        setLoading(false);
-      } else if (data?.session) {
+  const handleVerify = useCallback(
+    async (event?: React.FormEvent) => {
+      event?.preventDefault();
+      const token = code.join("");
+      if (token.length !== 6 || verifying) return;
+      setVerifying(true);
+      setError(null);
+      try {
+        const supabase = createClient();
+        const { error: verifyError } = await supabase.auth.verifyOtp({
+          email: email.trim(),
+          token,
+          type: "email",
+        });
+        if (verifyError) {
+          setError(
+            verifyError.message ||
+              "That code didn't work — check it and try again."
+          );
+          setVerifying(false);
+          return;
+        }
         router.push("/chat");
         router.refresh();
-      } else {
-        router.push("/chat");
+      } catch {
+        setError("Network error. Please check your connection and try again.");
+        setVerifying(false);
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Verification failed.");
-      setLoading(false);
-    }
-  };
+    },
+    [code, email, router, verifying]
+  );
 
-  const resetEmailFlow = () => {
-    setSent(false);
-    setCode("");
+  const handleCodeChange = useCallback(
+    (index: number, value: string) => {
+      const digit = value.replace(/\D/g, "").slice(-1);
+      setCode((prev) => {
+        const next = [...prev];
+        next[index] = digit;
+        return next;
+      });
+      if (digit && index < 5) {
+        codeRefs.current[index + 1]?.focus();
+      }
+    },
+    []
+  );
+
+  const handleCodeKeyDown = useCallback(
+    (index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Backspace" && !code[index] && index > 0) {
+        event.preventDefault();
+        codeRefs.current[index - 1]?.focus();
+        setCode((prev) => {
+          const next = [...prev];
+          next[index - 1] = "";
+          return next;
+        });
+      }
+    },
+    [code]
+  );
+
+  const handleCodePaste = useCallback(
+    (event: React.ClipboardEvent<HTMLInputElement>) => {
+      const text = event.clipboardData.getData("text").replace(/\D/g, "");
+      if (!text) return;
+      event.preventDefault();
+      const digits = text.slice(0, 6).split("");
+      setCode((prev) => prev.map((_, i) => digits[i] ?? ""));
+      codeRefs.current[Math.min(digits.length, 5)]?.focus();
+    },
+    []
+  );
+
+  const handleBackToEmail = useCallback(() => {
+    setStep("email");
+    setCode(["", "", "", "", "", ""]);
     setError(null);
-  };
+    setNotice(null);
+  }, []);
 
   return (
-    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#070913] px-4 py-8 sm:px-6 md:px-8 lg:px-12">
-      {/* Background radial glow & grid */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -top-40 -left-40 h-96 w-96 rounded-full bg-cyan-500/10 blur-[120px]"
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute -bottom-40 -right-40 h-96 w-96 rounded-full bg-violet-600/10 blur-[120px]"
-      />
-      <div
-        aria-hidden
-        className="bg-grid pointer-events-none absolute inset-0 opacity-25"
-      />
+    <main className="flex min-h-screen bg-navy">
+      {/* ============ LEFT PANEL — brand showcase (desktop) ============ */}
+      <section className="relative hidden w-[60%] flex-col justify-between overflow-hidden p-12 lg:flex xl:p-16">
+        {/* Mesh gradient backdrop */}
+        <div aria-hidden="true" className="pointer-events-none absolute inset-0">
+          <div className="absolute inset-0 bg-[#070a14]" />
+          <div className="absolute -left-32 -top-32 h-[480px] w-[480px] rounded-full bg-cyan-500/20 blur-[140px]" />
+          <div className="absolute -bottom-40 right-[-120px] h-[520px] w-[520px] rounded-full bg-violet-600/25 blur-[150px]" />
+          <div className="absolute left-1/2 top-1/3 h-[300px] w-[300px] -translate-x-1/2 rounded-full bg-blue-500/10 blur-[120px]" />
+          <div
+            className="bg-grid absolute inset-0 opacity-60"
+            style={{
+              maskImage:
+                "radial-gradient(ellipse 80% 70% at 40% 40%, black 20%, transparent 75%)",
+              WebkitMaskImage:
+                "radial-gradient(ellipse 80% 70% at 40% 40%, black 20%, transparent 75%)",
+            }}
+          />
+        </div>
 
-      {/* Double Panel Main Card */}
-      <div className="relative z-10 w-full max-w-5xl">
-        <div className="grid grid-cols-1 overflow-hidden rounded-3xl border border-white/[0.09] bg-[#0c1020]/80 shadow-2xl shadow-black/90 backdrop-blur-2xl lg:grid-cols-12">
-          
-          {/* ============================================================ */}
-          {/* LEFT PANEL: Branding / Hero Showcase (Hidden on Mobile)     */}
-          {/* ============================================================ */}
-          <div className="relative hidden flex-col justify-between overflow-hidden border-r border-white/[0.08] bg-gradient-to-br from-[#0e162a]/95 via-[#0a0f1e]/90 to-[#070a14]/95 p-8 lg:col-span-5 lg:flex xl:p-10">
-            {/* Subtle glow accents */}
-            <div className="pointer-events-none absolute -top-16 -left-16 h-56 w-56 rounded-full bg-cyan-500/15 blur-3xl" />
-            <div className="pointer-events-none absolute -bottom-16 -right-16 h-56 w-56 rounded-full bg-violet-500/15 blur-3xl" />
-            <div className="pointer-events-none absolute inset-0 bg-grid opacity-20" />
+        {/* Logo row */}
+        <div className="relative z-10 flex items-center gap-3">
+          <Image
+            src="/icon-512.png"
+            alt="DashyCore Logo"
+            width={44}
+            height={44}
+            className="h-11 w-11"
+            priority
+          />
+          <span className="text-xl font-semibold tracking-tight text-white">
+            DashyCore
+          </span>
+        </div>
 
-            <div className="relative z-10 space-y-8">
-              {/* Brand Top Header */}
-              <div>
-                <div className="flex items-center gap-3">
-                  <div className="relative flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 to-violet-600 p-[1px] shadow-lg shadow-cyan-500/20">
-                    <div className="flex h-full w-full items-center justify-center rounded-[15px] bg-[#090e1a]">
-                      <Image
-                        src="/icon-512.png"
-                        alt="DashyCore Logo"
-                        width={28}
-                        height={28}
-                        priority
-                        className="rounded-lg object-contain"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <span className="text-xl font-bold tracking-tight text-white">
-                      Dashy<span className="text-gradient">Core</span>
-                    </span>
-                  </div>
-                </div>
-                <p className="mt-3 text-sm font-medium italic text-cyan-300/90">
-                  &ldquo;Your Unified AI Workspace&rdquo;
+        {/* Headline + features */}
+        <div className="relative z-10 max-w-xl">
+          <h1 className="text-5xl font-semibold leading-[1.05] tracking-tight text-white xl:text-6xl">
+            Your Unified
+            <br />
+            <span className="text-gradient">AI Workspace</span>
+          </h1>
+          <p className="mt-5 max-w-md text-base leading-relaxed text-zinc-400">
+            Chat, code, create and remember — every AI surface you need, wired
+            into one fast, private workspace.
+          </p>
+
+          <div className="mt-10 grid gap-3 sm:grid-cols-3">
+            {FEATURES.map((feature) => (
+              <div
+                key={feature.title}
+                className="rounded-2xl border border-white/[0.08] bg-white/[0.04] p-4 shadow-xl shadow-black/40 backdrop-blur-xl transition-colors hover:border-white/[0.16]"
+              >
+                <span
+                  className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border ${feature.ring}`}
+                >
+                  <feature.icon className={`h-4 w-4 ${feature.accent}`} />
+                </span>
+                <p className="mt-3 text-sm font-semibold text-white">
+                  {feature.title}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+                  {feature.description}
                 </p>
               </div>
+            ))}
+          </div>
+        </div>
 
-              {/* Tagline & Showcase List */}
-              <div className="space-y-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
-                  Everything you need to build & create
-                </p>
+        {/* Footer strip */}
+        <p className="relative z-10 text-xs text-zinc-600">
+          Passwordless by design — your inbox is your key.
+        </p>
+      </section>
 
-                <ul className="space-y-4">
-                  {/* Feature 1: D-Code */}
-                  <li className="group rounded-2xl border border-white/[0.06] bg-white/[0.025] p-3.5 transition-colors hover:border-cyan-400/30 hover:bg-white/[0.04]">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-cyan-400/20 bg-cyan-500/10 text-cyan-300">
-                        <ZapIcon className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-sm font-bold text-white">D-Code</span>
-                          <span className="text-xs text-zinc-400">⚡</span>
-                        </div>
-                        <p className="mt-0.5 text-xs leading-relaxed text-zinc-400">
-                          IDE with native VS Code experience, terminal, and AI pair coding.
-                        </p>
-                      </div>
-                    </div>
-                  </li>
+      {/* ============ RIGHT PANEL — OTP auth ============ */}
+      <section className="relative flex flex-1 items-center justify-center overflow-hidden px-6 py-12">
+        {/* Mobile glow (desktop keeps the right side calm) */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute left-1/2 top-0 h-[380px] w-[620px] -translate-x-1/2 rounded-full bg-gradient-to-b from-cyan-500/10 via-violet-500/[0.06] to-transparent blur-3xl lg:hidden"
+        />
 
-                  {/* Feature 2: Dashy Studio */}
-                  <li className="group rounded-2xl border border-white/[0.06] bg-white/[0.025] p-3.5 transition-colors hover:border-violet-400/30 hover:bg-white/[0.04]">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-violet-400/20 bg-violet-500/10 text-violet-300">
-                        <SparklesIcon className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-sm font-bold text-white">Dashy Studio</span>
-                          <span className="text-xs text-zinc-400">🎨</span>
-                        </div>
-                        <p className="mt-0.5 text-xs leading-relaxed text-zinc-400">
-                          Fast &lt;IMG&gt; generation & resilient media management.
-                        </p>
-                      </div>
-                    </div>
-                  </li>
-
-                  {/* Feature 3: Knowledge Digest */}
-                  <li className="group rounded-2xl border border-white/[0.06] bg-white/[0.025] p-3.5 transition-colors hover:border-emerald-400/30 hover:bg-white/[0.04]">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-emerald-400/20 bg-emerald-500/10 text-emerald-300">
-                        <BrainIcon className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-sm font-bold text-white">Knowledge Digest</span>
-                          <span className="text-xs text-zinc-400">🧠</span>
-                        </div>
-                        <p className="mt-0.5 text-xs leading-relaxed text-zinc-400">
-                          Multi-file context, semantic ingestion & RAG chat intelligence.
-                        </p>
-                      </div>
-                    </div>
-                  </li>
-                </ul>
-              </div>
-            </div>
-
-            {/* Bottom Security / Status Footer */}
-            <div className="relative z-10 pt-6">
-              <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-                <span className="flex h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px] shadow-emerald-400" />
-                <span>DashyCore v7.0 · Enterprise-grade encrypted auth</span>
-              </div>
-            </div>
+        <div className="relative z-10 w-full max-w-sm">
+          {/* Mobile brand row */}
+          <div className="mb-8 flex items-center justify-center gap-2.5 lg:hidden">
+            <Image
+              src="/icon-512.png"
+              alt="DashyCore Logo"
+              width={32}
+              height={32}
+              className="h-8 w-8"
+              priority
+            />
+            <span className="text-base font-semibold tracking-tight text-white">
+              DashyCore
+            </span>
           </div>
 
-          {/* ============================================================ */}
-          {/* RIGHT PANEL: Interactive Auth Form (Single Login Entry)     */}
-          {/* ============================================================ */}
-          <div className="flex flex-col justify-center p-6 sm:p-10 md:p-12 lg:col-span-7">
-            
-            {/* Mobile Header (Hidden on Desktop) */}
-            <div className="mb-6 flex flex-col items-center text-center lg:hidden">
-              <div className="mb-3 flex items-center justify-center gap-2.5">
-                <Image
-                  src="/icon-512.png"
-                  alt="DashyCore Logo"
-                  width={34}
-                  height={34}
-                  priority
-                  className="rounded-xl object-contain"
-                />
-                <span className="text-xl font-bold tracking-tight text-white">
-                  Dashy<span className="text-gradient">Core</span>
-                </span>
-              </div>
-              <p className="text-xs italic text-cyan-300/90">
-                &ldquo;Your Unified AI Workspace&rdquo;
-              </p>
-            </div>
+          <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-8 shadow-2xl shadow-black/80 backdrop-blur-xl">
+            {step === "email" ? (
+              <>
+                <h2 className="text-2xl font-semibold tracking-tight text-white">
+                  Welcome back
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                  Enter your email and we&apos;ll send you a one-time code —
+                  no password needed.
+                </p>
 
-            {/* Auth Title & Description */}
-            <div className="mb-6">
-              <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">
-                {sent ? "Check your inbox" : "Sign in to DashyCore"}
-              </h1>
-              <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-                {sent ? (
-                  <>
-                    We sent a 6-digit one-time code to{" "}
-                    <span className="font-semibold text-cyan-300">{email}</span>. Enter it below to enter your workspace.
-                  </>
-                ) : (
-                  "Welcome back! Sign in seamlessly with passwordless email OTP or your preferred OAuth provider."
-                )}
-              </p>
-            </div>
-
-            {/* OTP Form (Step 1: Email / Step 2: 6-digit OTP) */}
-            <form onSubmit={sent ? verifyCode : sendCode} className="space-y-4">
-              {!sent ? (
-                /* Step 1: Email Address Input */
-                <div className="space-y-1.5">
-                  <label
-                    htmlFor="email-input"
-                    className="block text-xs font-semibold uppercase tracking-wider text-zinc-300"
-                  >
-                    Email Address
-                  </label>
-                  <div className="relative">
-                    <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-zinc-500">
-                      <MailIcon className="h-4 w-4" />
-                    </div>
+                <form onSubmit={handleSendCode} className="mt-6 space-y-4">
+                  <div>
+                    <label
+                      htmlFor="auth-email"
+                      className="mb-2 block text-sm font-medium text-neutral-300"
+                    >
+                      Email
+                    </label>
                     <input
-                      id="email-input"
+                      id="auth-email"
                       type="email"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       required
-                      autoFocus
-                      disabled={loading}
-                      placeholder="name@company.com"
-                      className="w-full rounded-2xl border border-white/[0.1] bg-white/[0.04] py-3.5 pl-10 pr-4 text-sm text-white outline-none placeholder:text-zinc-500 transition-all focus:border-cyan-400/70 focus:bg-white/[0.06] focus:ring-2 focus:ring-cyan-400/20 disabled:opacity-60"
+                      disabled={busy}
+                      autoComplete="email"
+                      placeholder="you@example.com"
+                      className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] px-4 py-3 text-sm text-white placeholder-zinc-500 transition-colors focus:border-cyan-400/60 focus:outline-none focus:ring-1 focus:ring-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-60"
                     />
                   </div>
-                </div>
-              ) : (
-                /* Step 2: 6-digit OTP Code Input */
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label
-                      htmlFor="otp-input"
-                      className="block text-xs font-semibold uppercase tracking-wider text-zinc-300"
-                    >
-                      6-Digit Security Code
-                    </label>
-                    <button
-                      type="button"
-                      onClick={resetEmailFlow}
-                      className="text-xs text-cyan-300 hover:text-cyan-200 hover:underline"
-                    >
-                      Change email
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <input
-                      id="otp-input"
-                      type="text"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      pattern="[0-9]{6}"
-                      maxLength={6}
-                      value={code}
-                      onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                      required
-                      autoFocus
-                      disabled={loading}
-                      placeholder="000000"
-                      className="w-full rounded-2xl border border-cyan-400/40 bg-white/[0.05] py-3.5 text-center font-mono text-2xl font-bold tracking-[0.5em] text-white outline-none transition-all focus:border-cyan-400 focus:bg-white/[0.08] focus:ring-4 focus:ring-cyan-400/20 disabled:opacity-60"
-                    />
-                  </div>
-                </div>
-              )}
+                  <button
+                    type="submit"
+                    disabled={busy || !email.trim()}
+                    className="w-full rounded-xl bg-cyan-500 px-5 py-3.5 text-sm font-semibold text-[#06202a] shadow-md shadow-cyan-500/20 transition-all hover:bg-cyan-400 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {sending ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <span
+                          aria-hidden="true"
+                          className="h-4 w-4 animate-spin rounded-full border-2 border-[#06202a]/30 border-t-[#06202a]"
+                        />
+                        Sending code…
+                      </span>
+                    ) : (
+                      "Send Code"
+                    )}
+                  </button>
+                </form>
+              </>
+            ) : (
+              <>
+                <h2 className="text-2xl font-semibold tracking-tight text-white">
+                  Check your inbox
+                </h2>
+                <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+                  Enter the 6-digit code sent to{" "}
+                  <span className="font-medium text-zinc-200">
+                    {email.trim()}
+                  </span>
+                  .
+                </p>
 
-              {/* Main Submit Button */}
-              <button
-                type="submit"
-                disabled={loading || (!sent && !email.trim()) || (sent && code.length < 6)}
-                className="group relative flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-400 to-cyan-300 py-3.5 text-sm font-bold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:shadow-cyan-400/30 hover:brightness-105 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {loading ? (
-                  <>
-                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#06202a]/30 border-t-[#06202a]" />
-                    <span>Please wait…</span>
-                  </>
-                ) : sent ? (
-                  <>
-                    <ShieldCheckIcon className="h-4 w-4" />
-                    <span>Verify Code</span>
-                  </>
-                ) : (
-                  <>
-                    <span>Send One-Time Code</span>
-                    <ArrowRightIcon className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-                  </>
-                )}
-              </button>
+                <form onSubmit={handleVerify} className="mt-6 space-y-4">
+                  <div
+                    className="flex items-center justify-between gap-2"
+                    role="group"
+                    aria-label="6-digit verification code"
+                  >
+                    {code.map((digit, index) => (
+                      <input
+                        key={index}
+                        ref={(el) => {
+                          codeRefs.current[index] = el;
+                        }}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete={
+                          index === 0 ? "one-time-code" : "off"
+                        }
+                        maxLength={1}
+                        value={digit}
+                        disabled={busy}
+                        onChange={(e) =>
+                          handleCodeChange(index, e.target.value)
+                        }
+                        onKeyDown={(e) => handleCodeKeyDown(index, e)}
+                        onPaste={handleCodePaste}
+                        aria-label={`Digit ${index + 1}`}
+                        className="h-12 w-full rounded-lg border border-white/[0.1] bg-white/[0.04] text-center text-lg font-semibold text-white transition-colors focus:border-cyan-400/60 focus:outline-none focus:ring-1 focus:ring-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-60"
+                      />
+                    ))}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={busy || code.join("").length !== 6}
+                    className="w-full rounded-xl bg-cyan-500 px-5 py-3.5 text-sm font-semibold text-[#06202a] shadow-md shadow-cyan-500/20 transition-all hover:bg-cyan-400 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {verifying ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <span
+                          aria-hidden="true"
+                          className="h-4 w-4 animate-spin rounded-full border-2 border-[#06202a]/30 border-t-[#06202a]"
+                        />
+                        Verifying…
+                      </span>
+                    ) : (
+                      "Verify"
+                    )}
+                  </button>
+                </form>
 
-              {/* Resend actions when code is sent */}
-              {sent && (
-                <div className="flex items-center justify-center gap-1 pt-1 text-xs text-zinc-400">
-                  <span>Didn&apos;t receive it?</span>
+                <div className="mt-4 flex items-center justify-between text-xs">
                   <button
                     type="button"
-                    disabled={loading || resendCooldown > 0}
-                    onClick={() => sendCode()}
-                    className="font-medium text-cyan-300 transition hover:text-cyan-200 hover:underline disabled:cursor-not-allowed disabled:text-zinc-600 disabled:no-underline"
+                    onClick={handleBackToEmail}
+                    disabled={busy}
+                    className="font-medium text-zinc-500 transition-colors hover:text-zinc-200 disabled:opacity-50"
                   >
-                    {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend Code"}
+                    ← Use a different email
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSendCode()}
+                    disabled={busy || resendCooldown > 0}
+                    className="font-medium text-cyan-300 transition-colors hover:text-cyan-200 disabled:opacity-50"
+                  >
+                    {resendCooldown > 0
+                      ? `Resend in ${resendCooldown}s`
+                      : "Resend code"}
                   </button>
                 </div>
+              </>
+            )}
+
+            {/* Divider */}
+            <div className="my-6 flex items-center gap-4">
+              <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
+              <span className="text-xs text-neutral-500">or</span>
+              <div className="h-px flex-1 bg-gradient-to-r from-transparent via-white/[0.08] to-transparent" />
+            </div>
+
+            {/* Social */}
+            <button
+              type="button"
+              onClick={() => void handleOAuth("google")}
+              disabled={busy}
+              className="flex w-full items-center justify-center gap-3 rounded-xl bg-white px-5 py-3.5 text-sm font-medium text-neutral-950 shadow-md shadow-white/5 transition-all hover:bg-neutral-100 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {oauthBusy === "google" ? (
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-300 border-t-neutral-700"
+                />
+              ) : (
+                <GoogleMark />
               )}
-            </form>
+              <span>Continue with Google</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleOAuth("github")}
+              disabled={busy}
+              className="mt-3 flex w-full items-center justify-center gap-3 rounded-xl border border-white/[0.12] bg-[#24292f] px-5 py-3.5 text-sm font-medium text-white shadow-md shadow-black/30 transition-all hover:bg-[#2f353d] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {oauthBusy === "github" ? (
+                <span
+                  aria-hidden="true"
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                />
+              ) : (
+                <GithubIcon className="h-5 w-5 text-white" />
+              )}
+              <span>Continue with GitHub</span>
+            </button>
 
-            {/* OAuth Dividers & Buttons */}
-            <div className="my-6 flex items-center gap-3">
-              <div className="h-px flex-1 bg-white/[0.08]" />
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                Or continue with
-              </span>
-              <div className="h-px flex-1 bg-white/[0.08]" />
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {/* Google OAuth */}
-              <button
-                type="button"
-                onClick={() => oauth("google")}
-                disabled={loading}
-                className="flex items-center justify-center gap-2.5 rounded-2xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white transition-all hover:border-white/[0.18] hover:bg-white/[0.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <GoogleIcon className="h-4 w-4" />
-                <span>Google</span>
-              </button>
-
-              {/* GitHub OAuth */}
-              <button
-                type="button"
-                onClick={() => oauth("github")}
-                disabled={loading}
-                className="flex items-center justify-center gap-2.5 rounded-2xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 text-sm font-semibold text-white transition-all hover:border-white/[0.18] hover:bg-white/[0.08] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <GithubIcon className="h-4 w-4" />
-                <span>GitHub</span>
-              </button>
-            </div>
-
-            {/* Error Message Alert */}
+            {notice && !error && (
+              <p className="mt-4 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-4 py-2.5 text-xs leading-relaxed text-cyan-200">
+                {notice}
+              </p>
+            )}
             {error && (
-              <div
+              <p
                 role="alert"
-                className="mt-5 flex items-start gap-2.5 rounded-2xl border border-red-500/30 bg-red-500/10 p-3.5 text-xs text-red-300 animate-fade-in-up"
+                className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-xs leading-relaxed text-red-300"
               >
-                <AlertIcon className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-400" />
-                <div className="min-w-0 flex-1 leading-relaxed">{error}</div>
-              </div>
+                {error}
+              </p>
             )}
           </div>
+
+          <p className="mt-6 text-center text-[11px] leading-relaxed text-zinc-600">
+            By continuing you agree to the Terms & Privacy Policy.
+          </p>
         </div>
-      </div>
+      </section>
     </main>
   );
 }

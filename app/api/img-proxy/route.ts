@@ -1,9 +1,19 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 
-export async function GET(request: NextRequest) {
+/**
+ * DashyCore — image proxy (Studio fallback only).
+ *
+ * The Studio gallery loads provider URLs directly in an <img> tag.
+ * This route is ONLY a fallback when the direct load fails (hotlink block,
+ * CORS edge, transient upstream error). It streams raw image bytes — never
+ * JSON — so the response is consumable as an image source.
+ *
+ *   GET /api/img-proxy?url=<encoded-image-url>
+ */
+export async function GET(request: NextRequest): Promise<Response> {
   const rawUrl = request.nextUrl.searchParams.get("url");
   if (!rawUrl) {
-    return NextResponse.json({ error: "Missing url parameter" }, { status: 400 });
+    return new Response("Missing url parameter", { status: 400 });
   }
 
   let url: URL;
@@ -14,7 +24,7 @@ export async function GET(request: NextRequest) {
     }
   } catch (err) {
     console.error("[img-proxy] Invalid image URL provided:", rawUrl, err);
-    return NextResponse.json({ error: "Invalid image URL" }, { status: 400 });
+    return new Response("Invalid image URL", { status: 400 });
   }
 
   try {
@@ -32,46 +42,27 @@ export async function GET(request: NextRequest) {
       console.error(
         `[img-proxy] Provider failed with status ${response.status} (${response.statusText}) for URL: ${url.toString()}`
       );
-      return NextResponse.json(
-        {
-          error: `Image provider failed with status ${response.status}: ${response.statusText}`,
-          status: response.status,
-        },
-        { status: response.status >= 500 ? 502 : response.status }
-      );
+      return new Response("Upstream image fetch failed", { status: 502 });
     }
 
-    const contentType = response.headers.get("content-type") || "image/jpeg";
     const buffer = await response.arrayBuffer();
+    const contentType = response.headers.get("content-type") || "image/jpeg";
 
     const headers: Record<string, string> = {
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=3600, immutable",
+      "Cache-Control": "public, max-age=86400",
     };
-
     const contentLength = response.headers.get("content-length");
     if (contentLength) {
       headers["Content-Length"] = contentLength;
     }
 
-    return new NextResponse(buffer, {
+    return new Response(buffer, {
       status: 200,
       headers,
     });
   } catch (error) {
     console.error(`[img-proxy] Error fetching image URL: ${url.toString()}`, error);
-    const timedOut =
-      error instanceof Error &&
-      (error.name === "AbortError" || error.name === "TimeoutError");
-    return NextResponse.json(
-      {
-        error: timedOut
-          ? "Image request timed out (35s)"
-          : error instanceof Error
-            ? error.message
-            : "Could not fetch image",
-      },
-      { status: timedOut ? 504 : 502 }
-    );
+    return new Response("Image proxy failed", { status: 502 });
   }
 }

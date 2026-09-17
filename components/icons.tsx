@@ -407,6 +407,37 @@ export const TerminalIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const ExtensionsIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="7" height="7" x="3" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="3" rx="1" />
+    <rect width="7" height="7" x="14" y="14" rx="1" />
+    <rect width="7" height="7" x="3" y="14" rx="1" />
+  </Svg>
+);
+
+export const BranchIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <line x1="6" x2="6" y1="3" y2="15" />
+    <circle cx="18" cy="6" r="3" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M18 9a9 9 0 0 1-9 9" />
+  </Svg>
+);
+
+export const ChevronRightIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m9 18 6-6-6-6" />
+  </Svg>
+);
+
+export const BellIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+    <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+  </Svg>
+);
+
 export const FilesIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M15.5 2H8.6c-.4 0-.8.2-1.1.5L3.5 6.6c-.3.3-.5.7-.5 1.1v12.8c0 .8.7 1.5 1.5 1.5h11c.8 0 1.5-.7 1.5-1.5v-16c0-.8-.7-1.5-1.5-1.5Z" />

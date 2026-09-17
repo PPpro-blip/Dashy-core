@@ -76,7 +76,7 @@ function buildDirectUrl(
 ): string {
   return `https://image.pollinations.ai/prompt/${encodeURIComponent(
     prompt
-  )}?seed=${seed}&width=${width}&height=${height}&nologo=true`;
+  )}?seed=${seed}&width=${width}&height=${height}&nologo=true&model=flux`;
 }
 
 /** Same-origin fast proxy fallback for a direct URL that errored. */
