@@ -77,6 +77,8 @@ export interface MonacoEditorProps {
   /** Extra editor options (merged over the D-Code defaults). */
   options?: Record<string, unknown>;
   className?: string;
+  /** Reports cursor moves (powers the VS Code-style status bar). */
+  onCursorPosition?: (line: number, column: number) => void;
 }
 
 export function MonacoEditor({
@@ -86,11 +88,30 @@ export function MonacoEditor({
   readOnly = false,
   options,
   className,
+  onCursorPosition,
 }: MonacoEditorProps) {
-  const handleMount = useCallback<OnMount>((_editor, monaco) => {
-    defineDcodeTheme(monaco);
-    monaco.editor.setTheme(DCODE_THEME);
-  }, []);
+  const handleMount = useCallback<OnMount>(
+    (editor, monaco) => {
+      defineDcodeTheme(monaco);
+      monaco.editor.setTheme(DCODE_THEME);
+      if (onCursorPosition) {
+        const report = () => {
+          const position = editor.getPosition();
+          if (position) {
+            onCursorPosition(position.lineNumber, position.column);
+          }
+        };
+        report();
+        editor.onDidChangeCursorPosition((event) => {
+          onCursorPosition(
+            event.position.lineNumber,
+            event.position.column
+          );
+        });
+      }
+    },
+    [onCursorPosition]
+  );
 
   return (
     <div className={`h-full w-full ${className ?? ""}`}>
