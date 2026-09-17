@@ -76,6 +76,8 @@ export interface DCodeWorkspaceApi {
   getFiles(): DCodeFile[];
   /** The Monaco selection text of the active file, or null. */
   getSelectedText(): string | null;
+  /** Live cursor position in the active editor (null before first report). */
+  getCursorPosition?(): { line: number; column: number } | null;
   /** Opens a file by its D-Code id (tab switch). */
   openFile(fileId: string): void;
   /** Applies a contributed Monaco theme and persists the preference. */

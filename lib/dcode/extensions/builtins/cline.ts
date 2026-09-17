@@ -1,7 +1,7 @@
 /**
- * DashyCore v7 — First-party extension: `dashy.cline` (Agent Code).
+ * DashyCore v7 — First-party extension: `dashy.cline` (Dashy Cline Assist).
  *
- * A Cline-style coding agent for the browser IDE. It reads the in-memory
+ * Web-safe autonomous coding assistant for the browser IDE. It reads the
  * project (file list + contents), asks the worker (agentMode:true JSON path)
  * for structured file edits, and renders them as diff cards the user must
  * click "Apply" to write into Monaco buffers.
@@ -21,10 +21,10 @@ import type { ExtensionModule } from "../types";
 export const clineExtension: ExtensionModule = {
   manifest: {
     id: "dashy.cline",
-    name: "Agent Code",
+    name: "Dashy Cline Assist",
     version: "1.0.0",
     description:
-      "Cline-style coding agent for the browser IDE. Reads your project, proposes multi-file edits as diffs, and applies them into Monaco on click.",
+      "Autonomous coding assistant mode (Web-safe). Reads your project, proposes multi-file edits as diffs, and applies them into Monaco on click.",
     author: "DashyCore",
     icon: "🤖",
     categories: ["AI", "Productivity"],

@@ -54,7 +54,36 @@ import {
   readBlobAsText,
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
-import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import {
+  MonacoEditor,
+  type DCodeMonacoEditor,
+} from "@/components/dcode/MonacoEditor";
+import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import {
+  BUILTIN_EXTENSIONS,
+  DEFAULT_DISABLED_IDS,
+} from "@/lib/dcode/extensions/registry";
+import {
+  activateEnabledExtensions,
+  deactivateAllExtensions,
+  onMonacoEditorReady,
+  setExtensionEnabled,
+  type DCodeExtensionUiApi,
+} from "@/lib/dcode/extensions/runtime";
+import {
+  getEnabledExtensionIds,
+  getFormatOnSave,
+  getStoredTheme,
+  setExtensionEnabledState,
+  setStoredTheme,
+} from "@/lib/dcode/extensions/storage";
+import { DEFAULT_DCODE_THEME_ID } from "@/lib/dcode/extensions/themes";
+import { formatText } from "@/lib/dcode/extensions/format";
+import type {
+  DCodeMonacoNamespace,
+  DCodeWorkspaceApi,
+} from "@/lib/dcode/extensions/types";
+import { buildShortShareUrl } from "@/lib/share-intents";
 import { useToast } from "@/components/Toast";
 import {
   AlertIcon,
@@ -104,6 +133,41 @@ const AUTOSAVE_DEBOUNCE_MS = 1200;
 
 /** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
 const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
+
+/** All known built-in extension ids (toggle seeding + storage reads). */
+const BUILTIN_EXTENSION_IDS = BUILTIN_EXTENSIONS.map((m) => m.manifest.id);
+
+/** First-run enabled set (everything except the default-disabled ids). */
+function defaultEnabledExtensionIds(): string[] {
+  return BUILTIN_EXTENSION_IDS.filter(
+    (id) => !DEFAULT_DISABLED_IDS.includes(id)
+  );
+}
+
+/** Compact status-bar labels for enabled extensions. */
+const EXTENSION_SHORT_LABELS: Record<string, string> = {
+  "dashy.cline": "Cline",
+  "dashy.roo": "Roo",
+  "dashy.tailwind": "Tailwind",
+  "dashy.prettier": "Prettier",
+  "dashy.gitlens": "GitLens",
+  "dashy.ai": "AI",
+  "dashy.themes": "Themes",
+  "dashy.autocomplete": "Ghost",
+  "dashy.snippets": "Snippets",
+  "dashy.markdown-preview": "MD",
+};
+
+function extensionShortLabel(id: string): string {
+  if (EXTENSION_SHORT_LABELS[id]) return EXTENSION_SHORT_LABELS[id];
+  const found = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+  return found?.manifest.name ?? id;
+}
+
+function extensionFullName(id: string): string {
+  const found = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+  return found?.manifest.name ?? id;
+}
 
 interface GithubRepo {
   full_name: string;
@@ -514,6 +578,15 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   >("terminal");
   /** Live cursor position for the status bar. */
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  /**
+   * Enabled Dashy Extension ids. Pure-default first render (hydration-safe),
+   * then the persisted `dashy.dcode.extensions` set after mount.
+   */
+  const [enabledExtensions, setEnabledExtensions] = useState<string[]>(
+    defaultEnabledExtensionIds
+  );
+  /** Active Monaco theme id (persisted by the Theme Pack). */
+  const [themeId, setThemeId] = useState<string>(DEFAULT_DCODE_THEME_ID);
   /** Output channel lines (saves, imports, failures). */
   const [outputLines, setOutputLines] = useState<string[]>([
     "[D-Code] Output channel ready — saves, imports and errors log here.",
@@ -536,11 +609,30 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
    */
   const editorBufferRef = useRef<{ fileId: string; content: string } | null>(null);
 
-  /** Latest values for debounced/keyboard saves. */
-  const latestRef = useRef({ projectId, title, files });
+  /** Live editor handles + selection/cursor mirrors for the extensions host. */
+  const editorRef = useRef<DCodeMonacoEditor | null>(null);
+  const monacoRef = useRef<DCodeMonacoNamespace | null>(null);
+  const selectionRef = useRef<string>("");
+  const cursorRef = useRef<{ line: number; column: number }>({
+    line: 1,
+    column: 1,
+  });
+  /** Buffered DashyAI output chunks (flushed to the Output channel). */
+  const aiOutputRef = useRef<{ title: string; chunks: string[] } | null>(null);
+
+  /* Load persisted extension + theme prefs after mount (client-only). */
   useEffect(() => {
-    latestRef.current = { projectId, title, files };
-  }, [projectId, title, files]);
+    setEnabledExtensions(
+      getEnabledExtensionIds(BUILTIN_EXTENSION_IDS, DEFAULT_DISABLED_IDS)
+    );
+    setThemeId(getStoredTheme());
+  }, []);
+
+  /** Latest values for debounced/keyboard saves + the extensions host. */
+  const latestRef = useRef({ projectId, title, files, activeFileId });
+  useEffect(() => {
+    latestRef.current = { projectId, title, files, activeFileId };
+  }, [projectId, title, files, activeFileId]);
 
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
@@ -592,6 +684,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   }, [activeFileId]);
 
   const handleCursorPosition = useCallback((line: number, column: number) => {
+    cursorRef.current = { line, column };
     setCursor({ line, column });
   }, []);
 
@@ -708,6 +801,41 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           )
         : rawFiles;
 
+      // Prettier Auto-Formatter: when the extension is enabled and
+      // format-on-save is on, beautify text files before persisting.
+      let toSave = fs;
+      try {
+        const enabledNow = getEnabledExtensionIds(
+          BUILTIN_EXTENSION_IDS,
+          DEFAULT_DISABLED_IDS
+        );
+        if (enabledNow.includes("dashy.prettier") && getFormatOnSave()) {
+          const formatted = await Promise.all(
+            fs.map(async (f) => {
+              if (f.content.startsWith("data:")) return f;
+              const result = await formatText(f.name, f.content);
+              return result.ok && result.text !== undefined
+                ? { ...f, content: result.text }
+                : f;
+            })
+          );
+          // Sync state to what is saved — but never clobber keystrokes typed
+          // while Prettier was running (the live buffer wins in state and
+          // persists on the next save).
+          const liveBuffer = editorBufferRef.current;
+          setFiles(
+            formatted.map((f) =>
+              liveBuffer && f.id === liveBuffer.fileId
+                ? { ...f, content: liveBuffer.content }
+                : f
+            )
+          );
+          toSave = formatted;
+        }
+      } catch {
+        // Formatting is best-effort — save the snapshot as-is on failure.
+      }
+
       // Draft without a row yet → only an explicit save creates it.
       if (!id) {
         if (mode !== "manual") return;
@@ -715,15 +843,15 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         try {
           const created = await createProject({
             title: t,
-            language: fs[0]?.language ?? "typescript",
-            files: fs,
+            language: toSave[0]?.language ?? "typescript",
+            files: toSave,
           });
           setProjectId(created.id);
           latestRef.current.projectId = created.id;
           clearSaveErrorTimer();
           setSaveState("saved");
           setLastSavedAt(new Date(created.updatedAt));
-          appendOutput(`Project created — "${t}" (${fs.length} file${fs.length === 1 ? "" : "s"}).`);
+          appendOutput(`Project created — "${t}" (${toSave.length} file${toSave.length === 1 ? "" : "s"}).`);
           toast.show({
             type: "success",
             title: "Project created",
@@ -1242,20 +1370,26 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       }
       if (!isPublic) {
         const updated = await toggleProjectPublic(id, true);
+        if (!updated.shareSlug) {
+          throw new Error("Sharing succeeded but no link was assigned.");
+        }
         setIsPublic(true);
         setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
+        const url = buildShortShareUrl(
+          window.location.origin,
+          updated.shareSlug
+        );
         await navigator.clipboard.writeText(url);
         toast.show({
           type: "success",
-          title: "Public link copied",
+          title: "Link copied to clipboard!",
           message: "Anyone with the link can view this project.",
         });
       } else if (shareSlug) {
         await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
+          buildShortShareUrl(window.location.origin, shareSlug)
         );
-        toast.show({ type: "success", title: "Link copied" });
+        toast.show({ type: "success", title: "Link copied to clipboard!" });
       }
     } catch (error) {
       toast.show({
@@ -1380,6 +1514,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           projectId: current.projectId,
           title: isDraft ? newTitle : current.title,
           files: merged,
+          activeFileId: firstAdded?.id ?? current.activeFileId,
         };
 
         const notes = [
@@ -1420,6 +1555,226 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       }
     },
     [closeGitHubModal, importingRepo, markDirty, persist, toast]
+  );
+
+  /* ---------------------------- extensions host --------------------------- */
+
+  /**
+   * DCodeWorkspaceApi adapter — the entire surface Dashy Extensions may
+   * touch. Stable across renders (refs + stable callbacks only) so the
+   * extension host activates exactly once.
+   */
+  const workspaceApi = useMemo<DCodeWorkspaceApi>(
+    () => ({
+      getActiveFile: () => {
+        const { files: all, activeFileId: activeId } = latestRef.current;
+        return all.find((f) => f.id === activeId) ?? all[0] ?? null;
+      },
+      getFiles: () => latestRef.current.files,
+      getSelectedText: () => {
+        const text = selectionRef.current;
+        return text ? text : null;
+      },
+      getCursorPosition: () => ({ ...cursorRef.current }),
+      openFile: (fileId: string) => handleSelectFile(fileId),
+      applyTheme: (id: string) => {
+        setStoredTheme(id);
+        setThemeId(id);
+      },
+      formatActiveFile: async () => {
+        const { files: all, activeFileId: activeId } = latestRef.current;
+        const file = all.find((f) => f.id === activeId) ?? all[0];
+        if (!file || file.content.startsWith("data:")) {
+          toast.info("Format Document needs an active text file.");
+          return false;
+        }
+        const result = await formatText(file.name, file.content);
+        if (!result.ok || result.text === undefined) {
+          toast.error(
+            "Format failed",
+            result.error ?? "Could not format this file."
+          );
+          return false;
+        }
+        if (result.text === file.content) {
+          toast.info("Already formatted — no changes.");
+          return true;
+        }
+        const next = result.text;
+        editorBufferRef.current = { fileId: file.id, content: next };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: next } : f))
+        );
+        markDirty();
+        return true;
+      },
+      getUserId: async () => {
+        try {
+          const supabase = createClient();
+          const { data } = await supabase.auth.getUser();
+          return data.user?.id ?? null;
+        } catch {
+          return null;
+        }
+      },
+      // The AI Output drawer streams into the Output channel (bottom panel).
+      showAiOutput: (title: string) => {
+        aiOutputRef.current = { title, chunks: [] };
+        setBottomTab("output");
+        setTerminalOpen(true);
+        appendOutput(`── ${title} ──`);
+      },
+      appendAiOutput: (text: string) => {
+        aiOutputRef.current?.chunks.push(text);
+      },
+      finishAiOutput: () => {
+        const pending = aiOutputRef.current;
+        aiOutputRef.current = null;
+        if (!pending) return;
+        for (const line of pending.chunks.join("").split("\n")) {
+          appendOutput(line);
+        }
+        appendOutput("── done ──");
+      },
+      saveActiveFile: async () => {
+        flushActiveBuffer();
+        await persistRef.current("manual");
+      },
+      writeFile: (name: string, content: string, language?: string) => {
+        const clean = name.trim();
+        if (!clean || !VALID_FILENAME.test(clean) || clean.length > 60) {
+          toast.error(
+            "Invalid file name",
+            "Use letters, numbers, dashes, underscores, dots. Max 60 chars."
+          );
+          return "";
+        }
+        if (isBlockedPath(clean)) {
+          toast.error("Unsupported file", BLOCKED_FILE_MESSAGE);
+          return "";
+        }
+        if (isBinaryPath(clean)) {
+          toast.error(
+            "Binary files can't be created by extensions",
+            "Images/fonts import via “Upload” as Base64 previews."
+          );
+          return "";
+        }
+        const existing = latestRef.current.files.find(
+          (f) => f.name.toLowerCase() === clean.toLowerCase()
+        );
+        const id = existing?.id ?? newId();
+        const lang = language ?? languageFromFilename(clean);
+        setFiles((prev) => {
+          const found = prev.some((f) => f.id === id);
+          if (found) {
+            return prev.map((f) =>
+              f.id === id ? { ...f, name: clean, language: lang, content } : f
+            );
+          }
+          return [...prev, { id, name: clean, language: lang, content }];
+        });
+        setActiveFileId(id);
+        editorBufferRef.current = { fileId: id, content };
+        markDirty();
+        return id;
+      },
+      replaceSelection: (text: string) => {
+        const editor = editorRef.current;
+        if (!editor) return false;
+        const selection = editor.getSelection();
+        if (!selection) return false;
+        editor.executeEdits("dashy-extension", [
+          { range: selection, text, forceMoveMarkers: true },
+        ]);
+        editor.focus();
+        return true;
+      },
+      setActiveFileContent: (content: string) => {
+        const activeId = latestRef.current.activeFileId;
+        editorBufferRef.current = { fileId: activeId, content };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === activeId ? { ...f, content } : f))
+        );
+        markDirty();
+      },
+      getMonaco: () => monacoRef.current,
+      getEditor: () => editorRef.current,
+    }),
+    [appendOutput, flushActiveBuffer, handleSelectFile, markDirty, toast]
+  );
+
+  const extensionUi = useMemo<DCodeExtensionUiApi>(
+    () => ({
+      showQuickPick: async (items, title) => {
+        appendOutput(
+          `[extensions] quick pick requested (“${title ?? "options"}”, ${items.length} items) — no picker UI mounted`
+        );
+        toast.info(
+          title ?? "Pick an option",
+          "The quick-pick UI isn't mounted in this workspace yet."
+        );
+        return null;
+      },
+      notify: (message: string) => {
+        toast.info(message);
+      },
+      showView: (viewId: string) => {
+        appendOutput(`[extensions] view requested: ${viewId}`);
+        toast.info(
+          "Extension view",
+          `The “${viewId}” panel isn't mounted in this workspace yet.`
+        );
+      },
+    }),
+    [appendOutput, toast]
+  );
+
+  /* Activate enabled extensions once (skipped in read-only share views). */
+  useEffect(() => {
+    if (readOnly) return;
+    void activateEnabledExtensions(workspaceApi, extensionUi);
+    return () => {
+      void deactivateAllExtensions();
+    };
+  }, [extensionUi, readOnly, workspaceApi]);
+
+  /** Live editor refs for extensions + re-activation of Monaco providers. */
+  const handleEditorReady = useCallback(
+    (editor: DCodeMonacoEditor, monaco: DCodeMonacoNamespace) => {
+      editorRef.current = editor;
+      monacoRef.current = monaco;
+      if (!readOnly) void onMonacoEditorReady(workspaceApi, extensionUi);
+    },
+    [extensionUi, readOnly, workspaceApi]
+  );
+
+  const handleSelectionChange = useCallback((selectedText: string) => {
+    selectionRef.current = selectedText;
+  }, []);
+
+  /** Reliable enable/disable: persists + activates/deactivates live. */
+  const handleExtensionToggle = useCallback(
+    (id: string, enabled: boolean) => {
+      setEnabledExtensions((prev) =>
+        enabled
+          ? prev.includes(id)
+            ? prev
+            : [...prev, id]
+          : prev.filter((x) => x !== id)
+      );
+      if (readOnly) {
+        setExtensionEnabledState(
+          id,
+          enabled,
+          BUILTIN_EXTENSION_IDS,
+          DEFAULT_DISABLED_IDS
+        );
+        return;
+      }
+      void setExtensionEnabled(id, enabled, workspaceApi, extensionUi);
+    },
+    [extensionUi, readOnly, workspaceApi]
   );
 
   /* ------------------------------ save status ----------------------------- */
@@ -1899,43 +2254,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           </aside>
         )}
 
-        {/* Side panel — Extensions */}
+        {/* Side panel — Extensions (real Discover + Installed, web-safe) */}
         {activityView === "extensions" && (
-          <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
-            <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-              Extensions
-            </p>
-            <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-2 pb-2">
-              {[
-                { name: "Prettier", detail: "Code formatter · v3.1", on: true },
-                { name: "ESLint", detail: "Linting · v9.2", on: true },
-                { name: "Dashy AI", detail: "Inline completions · v1.0", on: false },
-              ].map((ext) => (
-                <li
-                  key={ext.name}
-                  className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5"
-                >
-                  <div className="flex items-center gap-2">
-                    <ExtensionsIcon className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400" />
-                    <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-200">
-                      {ext.name}
-                    </span>
-                    <span
-                      className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${
-                        ext.on ? "bg-emerald-400" : "bg-zinc-600"
-                      }`}
-                      title={ext.on ? "Installed" : "Not installed"}
-                    />
-                  </div>
-                  <p className="mt-1 truncate font-mono text-[10px] text-zinc-600">
-                    {ext.detail}
-                  </p>
-                </li>
-              ))}
-              <li className="px-2 py-4 text-center text-[11px] text-zinc-600">
-                Marketplace coming soon.
-              </li>
-            </ul>
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <ExtensionsPanel
+              enabled={enabledExtensions}
+              onToggle={handleExtensionToggle}
+            />
           </aside>
         )}
 
@@ -2029,6 +2354,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   language={activeFile.language}
                   onChange={readOnly ? undefined : updateActiveContent}
                   readOnly={readOnly}
+                  theme={themeId}
+                  onEditorReady={handleEditorReady}
+                  onSelectionChange={handleSelectionChange}
                   onCursorPosition={handleCursorPosition}
                 />
               )
@@ -2184,6 +2512,37 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           <AlertIcon className="h-3 w-3" />
           {problems.length}
         </button>
+        <button
+          type="button"
+          onClick={() => setActivityView("extensions")}
+          title={`${enabledExtensions.length} extensions enabled — open Extensions`}
+          className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
+        >
+          <ExtensionsIcon className="h-3 w-3" />
+          {enabledExtensions.length}
+        </button>
+        <span className="hidden items-center gap-1 md:flex">
+          {enabledExtensions.slice(0, 3).map((id) => (
+            <span
+              key={id}
+              title={extensionFullName(id)}
+              className="rounded bg-white/15 px-1.5 py-px text-[10px] font-semibold"
+            >
+              {extensionShortLabel(id)}
+            </span>
+          ))}
+          {enabledExtensions.length > 3 && (
+            <span
+              className="text-[10px] opacity-80"
+              title={enabledExtensions
+                .slice(3)
+                .map(extensionFullName)
+                .join(", ")}
+            >
+              +{enabledExtensions.length - 3}
+            </span>
+          )}
+        </span>
         <span className="hidden items-center gap-1.5 opacity-90 sm:flex">
           {saveState === "saving"
             ? "Saving…"

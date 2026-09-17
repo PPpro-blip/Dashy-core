@@ -1,5 +1,5 @@
 /**
- * DashyCore v7 — First-party extension: `dashy.prettier` (Prettier Format).
+ * DashyCore v7 — First-party extension: `dashy.prettier` (Prettier Auto-Formatter).
  *
  * "Format Document" via the official Prettier browser build (see
  * lib/dcode/extensions/format.ts), wired to the Command Palette and to an
@@ -13,10 +13,10 @@ import type { ExtensionModule } from "../types";
 export const prettierExtension: ExtensionModule = {
   manifest: {
     id: "dashy.prettier",
-    name: "Prettier Format",
+    name: "Prettier Auto-Formatter",
     version: "1.0.0",
     description:
-      "Format JavaScript, TypeScript, JSON, CSS, HTML, Markdown and YAML with Prettier's browser build.",
+      "Code beautifier on save. Format JavaScript, TypeScript, JSON, CSS, HTML, Markdown and YAML with Prettier's browser build.",
     author: "DashyCore",
     categories: ["Formatters"],
     contributes: {
