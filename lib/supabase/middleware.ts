@@ -25,7 +25,7 @@ const PROTECTED_ROUTES = [
 ];
 
 /** Prefixes served without a session (exempt from the redirect above). */
-const PUBLIC_PREFIXES = ["/d-code/share/"];
+const PUBLIC_PREFIXES = ["/d-code/share/", "/s/"];
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });

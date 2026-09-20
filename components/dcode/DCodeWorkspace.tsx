@@ -54,12 +54,46 @@ import {
   readBlobAsText,
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
-import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import {
+  MonacoEditor,
+  type DCodeMonacoEditor,
+} from "@/components/dcode/MonacoEditor";
+import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import {
+  BUILTIN_EXTENSIONS,
+  DEFAULT_DISABLED_IDS,
+} from "@/lib/dcode/extensions/registry";
+import {
+  activateEnabledExtensions,
+  deactivateAllExtensions,
+  onMonacoEditorReady,
+  setExtensionEnabled,
+  type DCodeExtensionUiApi,
+} from "@/lib/dcode/extensions/runtime";
+import {
+  getEnabledExtensionIds,
+  getFormatOnSave,
+  getStoredTheme,
+  setExtensionEnabledState,
+  setStoredTheme,
+} from "@/lib/dcode/extensions/storage";
+import { DEFAULT_DCODE_THEME_ID } from "@/lib/dcode/extensions/themes";
+import { formatText } from "@/lib/dcode/extensions/format";
+import type {
+  DCodeMonacoNamespace,
+  DCodeWorkspaceApi,
+} from "@/lib/dcode/extensions/types";
+import { buildShortShareUrl } from "@/lib/share-intents";
 import { useToast } from "@/components/Toast";
 import {
+  AlertIcon,
+  BellIcon,
   BracesIcon,
+  BranchIcon,
   CheckIcon,
+  ChevronRightIcon,
   CodeIcon,
+  ExtensionsIcon,
   FileTextIcon,
   FolderIcon,
   GithubIcon,
@@ -70,6 +104,8 @@ import {
   PaperclipIcon,
   PenIcon,
   PlusIcon,
+  SearchIcon,
+  SettingsIcon,
   ShareIcon,
   TerminalIcon,
   TrashIcon,
@@ -97,6 +133,41 @@ const AUTOSAVE_DEBOUNCE_MS = 1200;
 
 /** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
 const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
+
+/** All known built-in extension ids (toggle seeding + storage reads). */
+const BUILTIN_EXTENSION_IDS = BUILTIN_EXTENSIONS.map((m) => m.manifest.id);
+
+/** First-run enabled set (everything except the default-disabled ids). */
+function defaultEnabledExtensionIds(): string[] {
+  return BUILTIN_EXTENSION_IDS.filter(
+    (id) => !DEFAULT_DISABLED_IDS.includes(id)
+  );
+}
+
+/** Compact status-bar labels for enabled extensions. */
+const EXTENSION_SHORT_LABELS: Record<string, string> = {
+  "dashy.cline": "Cline",
+  "dashy.roo": "Roo",
+  "dashy.tailwind": "Tailwind",
+  "dashy.prettier": "Prettier",
+  "dashy.gitlens": "GitLens",
+  "dashy.ai": "AI",
+  "dashy.themes": "Themes",
+  "dashy.autocomplete": "Ghost",
+  "dashy.snippets": "Snippets",
+  "dashy.markdown-preview": "MD",
+};
+
+function extensionShortLabel(id: string): string {
+  if (EXTENSION_SHORT_LABELS[id]) return EXTENSION_SHORT_LABELS[id];
+  const found = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+  return found?.manifest.name ?? id;
+}
+
+function extensionFullName(id: string): string {
+  const found = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+  return found?.manifest.name ?? id;
+}
 
 interface GithubRepo {
   full_name: string;
@@ -489,6 +560,47 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
+  /* ------------------------- VS Code chrome state ------------------------ */
+
+  /** Activity bar selection: which side panel is visible. */
+  const [activityView, setActivityView] = useState<
+    "explorer" | "search" | "extensions"
+  >("explorer");
+  /** Search panel query (file names + text contents). */
+  const [searchQuery, setSearchQuery] = useState("");
+  /** Open editor tabs (VS Code: tabs are a subset of explorer files). */
+  const [openFileIds, setOpenFileIds] = useState<string[]>(() =>
+    files[0]?.id ? [files[0].id] : []
+  );
+  /** Bottom panel tab: Terminal / Output / Problems. */
+  const [bottomTab, setBottomTab] = useState<
+    "terminal" | "output" | "problems"
+  >("terminal");
+  /** Live cursor position for the status bar. */
+  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  /**
+   * Enabled Dashy Extension ids. Pure-default first render (hydration-safe),
+   * then the persisted `dashy.dcode.extensions` set after mount.
+   */
+  const [enabledExtensions, setEnabledExtensions] = useState<string[]>(
+    defaultEnabledExtensionIds
+  );
+  /** Active Monaco theme id (persisted by the Theme Pack). */
+  const [themeId, setThemeId] = useState<string>(DEFAULT_DCODE_THEME_ID);
+  /** Output channel lines (saves, imports, failures). */
+  const [outputLines, setOutputLines] = useState<string[]>([
+    "[D-Code] Output channel ready — saves, imports and errors log here.",
+  ]);
+
+  const appendOutput = useCallback((line: string) => {
+    const stamp = new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    setOutputLines((prev) => [...prev.slice(-99), `[${stamp}] ${line}`]);
+  }, []);
+
   /**
    * Latest content seen from the Monaco editor for the ACTIVE file. Monaco
    * reports changes asynchronously; keeping the newest buffer here lets us
@@ -497,16 +609,84 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
    */
   const editorBufferRef = useRef<{ fileId: string; content: string } | null>(null);
 
-  /** Latest values for debounced/keyboard saves. */
-  const latestRef = useRef({ projectId, title, files });
+  /** Live editor handles + selection/cursor mirrors for the extensions host. */
+  const editorRef = useRef<DCodeMonacoEditor | null>(null);
+  const monacoRef = useRef<DCodeMonacoNamespace | null>(null);
+  const selectionRef = useRef<string>("");
+  const cursorRef = useRef<{ line: number; column: number }>({
+    line: 1,
+    column: 1,
+  });
+  /** Buffered DashyAI output chunks (flushed to the Output channel). */
+  const aiOutputRef = useRef<{ title: string; chunks: string[] } | null>(null);
+
+  /* Load persisted extension + theme prefs after mount (client-only). */
   useEffect(() => {
-    latestRef.current = { projectId, title, files };
-  }, [projectId, title, files]);
+    setEnabledExtensions(
+      getEnabledExtensionIds(BUILTIN_EXTENSION_IDS, DEFAULT_DISABLED_IDS)
+    );
+    setThemeId(getStoredTheme());
+  }, []);
+
+  /** Latest values for debounced/keyboard saves + the extensions host. */
+  const latestRef = useRef({ projectId, title, files, activeFileId });
+  useEffect(() => {
+    latestRef.current = { projectId, title, files, activeFileId };
+  }, [projectId, title, files, activeFileId]);
 
   const activeFile = useMemo(
     () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
     [files, activeFileId]
   );
+
+  /** Tabs rendered in the tab bar (open ids resolved against live files). */
+  const openFiles = useMemo(
+    () =>
+      openFileIds
+        .map((id) => files.find((f) => f.id === id))
+        .filter((f): f is DCodeFile => Boolean(f)),
+    [files, openFileIds]
+  );
+
+  /** Search panel results (names + non-binary contents, capped at 50). */
+  const searchResults = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return [];
+    return files
+      .filter(
+        (file) =>
+          file.name.toLowerCase().includes(query) ||
+          (!file.content.startsWith("data:") &&
+            file.content.toLowerCase().includes(query))
+      )
+      .slice(0, 50);
+  }, [files, searchQuery]);
+
+  /** Problems panel: skipped/unsupported files surface as warnings. */
+  const problems = useMemo(
+    () =>
+      (project?.skippedFiles ?? []).map((name) => ({
+        file: name,
+        message: "Skipped — unsupported or oversize file",
+        severity: "warning" as const,
+      })),
+    // project is a stable seed prop; skippedFiles only change per project.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project?.skippedFiles]
+  );
+
+  /* The active file always has a tab (imports and deletes repair the list). */
+  useEffect(() => {
+    if (!activeFileId) return;
+    setOpenFileIds((prev) =>
+      prev.includes(activeFileId) ? prev : [...prev, activeFileId]
+    );
+  }, [activeFileId]);
+
+  const handleCursorPosition = useCallback((line: number, column: number) => {
+    cursorRef.current = { line, column };
+    setCursor({ line, column });
+  }, []);
 
   /**
    * Ingest guard for seed state (chat hand-off, an old project row, a draft
@@ -574,6 +754,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     (error: unknown, mode: "autosave" | "manual") => {
       const info = describeSaveError(error);
       clearSaveErrorTimer();
+      appendOutput(`Save failed (${mode}): ${info.message}`);
 
       if (info.isAuth) {
         // Auth really is gone — keep the failure visible until re-sign-in.
@@ -603,7 +784,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         }, AUTOSAVE_DEBOUNCE_MS);
       }, 6000);
     },
-    [clearSaveErrorTimer, toast]
+    [appendOutput, clearSaveErrorTimer, toast]
   );
 
   const persist = useCallback(
@@ -620,6 +801,41 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           )
         : rawFiles;
 
+      // Prettier Auto-Formatter: when the extension is enabled and
+      // format-on-save is on, beautify text files before persisting.
+      let toSave = fs;
+      try {
+        const enabledNow = getEnabledExtensionIds(
+          BUILTIN_EXTENSION_IDS,
+          DEFAULT_DISABLED_IDS
+        );
+        if (enabledNow.includes("dashy.prettier") && getFormatOnSave()) {
+          const formatted = await Promise.all(
+            fs.map(async (f) => {
+              if (f.content.startsWith("data:")) return f;
+              const result = await formatText(f.name, f.content);
+              return result.ok && result.text !== undefined
+                ? { ...f, content: result.text }
+                : f;
+            })
+          );
+          // Sync state to what is saved — but never clobber keystrokes typed
+          // while Prettier was running (the live buffer wins in state and
+          // persists on the next save).
+          const liveBuffer = editorBufferRef.current;
+          setFiles(
+            formatted.map((f) =>
+              liveBuffer && f.id === liveBuffer.fileId
+                ? { ...f, content: liveBuffer.content }
+                : f
+            )
+          );
+          toSave = formatted;
+        }
+      } catch {
+        // Formatting is best-effort — save the snapshot as-is on failure.
+      }
+
       // Draft without a row yet → only an explicit save creates it.
       if (!id) {
         if (mode !== "manual") return;
@@ -627,14 +843,15 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         try {
           const created = await createProject({
             title: t,
-            language: fs[0]?.language ?? "typescript",
-            files: fs,
+            language: toSave[0]?.language ?? "typescript",
+            files: toSave,
           });
           setProjectId(created.id);
           latestRef.current.projectId = created.id;
           clearSaveErrorTimer();
           setSaveState("saved");
           setLastSavedAt(new Date(created.updatedAt));
+          appendOutput(`Project created — "${t}" (${toSave.length} file${toSave.length === 1 ? "" : "s"}).`);
           toast.show({
             type: "success",
             title: "Project created",
@@ -656,6 +873,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         clearSaveErrorTimer();
         setSaveState("saved");
         setLastSavedAt(new Date(updated.updatedAt));
+        appendOutput(`Saved "${t}" — ${fs.length} file${fs.length === 1 ? "" : "s"} (${mode}).`);
         if (mode === "manual") {
           toast.show({
             type: "success",
@@ -667,7 +885,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         handleSaveFailure(error, mode);
       }
     },
-    [clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast]
+    [appendOutput, clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast]
   );
 
   /* Keep the retry timer pointed at the freshest persist implementation. */
@@ -830,9 +1048,32 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         return;
       }
       flushActiveBuffer();
+      setOpenFileIds((prev) =>
+        prev.includes(fileId) ? prev : [...prev, fileId]
+      );
       setActiveFileId(fileId);
     },
     [flushActiveBuffer, toast]
+  );
+
+  /**
+   * Closes an editor tab (VS Code: the file stays in the explorer).
+   * The last tab stays pinned — a workspace always shows one file.
+   */
+  const handleCloseTab = useCallback(
+    (fileId: string) => {
+      flushActiveBuffer();
+      if (openFileIds.length <= 1) return;
+      const index = openFileIds.indexOf(fileId);
+      const remaining = openFileIds.filter((id) => id !== fileId);
+      setOpenFileIds(remaining);
+      if (fileId === activeFileId) {
+        const next =
+          remaining[Math.min(Math.max(index - 1, 0), remaining.length - 1)];
+        if (next) setActiveFileId(next);
+      }
+    },
+    [activeFileId, flushActiveBuffer, openFileIds]
   );
 
   const handleTitleChange = useCallback(
@@ -980,6 +1221,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           }
           return next;
         });
+        // Drop the deleted file's tab (the active-tab effect re-opens the
+        // neighbor if the tab list would otherwise go empty).
+        setOpenFileIds((prev) => prev.filter((openId) => openId !== id));
         setDeletingFileId(null);
         markDirty();
       }, 200);
@@ -1126,20 +1370,26 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       }
       if (!isPublic) {
         const updated = await toggleProjectPublic(id, true);
+        if (!updated.shareSlug) {
+          throw new Error("Sharing succeeded but no link was assigned.");
+        }
         setIsPublic(true);
         setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
+        const url = buildShortShareUrl(
+          window.location.origin,
+          updated.shareSlug
+        );
         await navigator.clipboard.writeText(url);
         toast.show({
           type: "success",
-          title: "Public link copied",
+          title: "Link copied to clipboard!",
           message: "Anyone with the link can view this project.",
         });
       } else if (shareSlug) {
         await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
+          buildShortShareUrl(window.location.origin, shareSlug)
         );
-        toast.show({ type: "success", title: "Link copied" });
+        toast.show({ type: "success", title: "Link copied to clipboard!" });
       }
     } catch (error) {
       toast.show({
@@ -1264,6 +1514,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           projectId: current.projectId,
           title: isDraft ? newTitle : current.title,
           files: merged,
+          activeFileId: firstAdded?.id ?? current.activeFileId,
         };
 
         const notes = [
@@ -1304,6 +1555,226 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       }
     },
     [closeGitHubModal, importingRepo, markDirty, persist, toast]
+  );
+
+  /* ---------------------------- extensions host --------------------------- */
+
+  /**
+   * DCodeWorkspaceApi adapter — the entire surface Dashy Extensions may
+   * touch. Stable across renders (refs + stable callbacks only) so the
+   * extension host activates exactly once.
+   */
+  const workspaceApi = useMemo<DCodeWorkspaceApi>(
+    () => ({
+      getActiveFile: () => {
+        const { files: all, activeFileId: activeId } = latestRef.current;
+        return all.find((f) => f.id === activeId) ?? all[0] ?? null;
+      },
+      getFiles: () => latestRef.current.files,
+      getSelectedText: () => {
+        const text = selectionRef.current;
+        return text ? text : null;
+      },
+      getCursorPosition: () => ({ ...cursorRef.current }),
+      openFile: (fileId: string) => handleSelectFile(fileId),
+      applyTheme: (id: string) => {
+        setStoredTheme(id);
+        setThemeId(id);
+      },
+      formatActiveFile: async () => {
+        const { files: all, activeFileId: activeId } = latestRef.current;
+        const file = all.find((f) => f.id === activeId) ?? all[0];
+        if (!file || file.content.startsWith("data:")) {
+          toast.info("Format Document needs an active text file.");
+          return false;
+        }
+        const result = await formatText(file.name, file.content);
+        if (!result.ok || result.text === undefined) {
+          toast.error(
+            "Format failed",
+            result.error ?? "Could not format this file."
+          );
+          return false;
+        }
+        if (result.text === file.content) {
+          toast.info("Already formatted — no changes.");
+          return true;
+        }
+        const next = result.text;
+        editorBufferRef.current = { fileId: file.id, content: next };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: next } : f))
+        );
+        markDirty();
+        return true;
+      },
+      getUserId: async () => {
+        try {
+          const supabase = createClient();
+          const { data } = await supabase.auth.getUser();
+          return data.user?.id ?? null;
+        } catch {
+          return null;
+        }
+      },
+      // The AI Output drawer streams into the Output channel (bottom panel).
+      showAiOutput: (title: string) => {
+        aiOutputRef.current = { title, chunks: [] };
+        setBottomTab("output");
+        setTerminalOpen(true);
+        appendOutput(`── ${title} ──`);
+      },
+      appendAiOutput: (text: string) => {
+        aiOutputRef.current?.chunks.push(text);
+      },
+      finishAiOutput: () => {
+        const pending = aiOutputRef.current;
+        aiOutputRef.current = null;
+        if (!pending) return;
+        for (const line of pending.chunks.join("").split("\n")) {
+          appendOutput(line);
+        }
+        appendOutput("── done ──");
+      },
+      saveActiveFile: async () => {
+        flushActiveBuffer();
+        await persistRef.current("manual");
+      },
+      writeFile: (name: string, content: string, language?: string) => {
+        const clean = name.trim();
+        if (!clean || !VALID_FILENAME.test(clean) || clean.length > 60) {
+          toast.error(
+            "Invalid file name",
+            "Use letters, numbers, dashes, underscores, dots. Max 60 chars."
+          );
+          return "";
+        }
+        if (isBlockedPath(clean)) {
+          toast.error("Unsupported file", BLOCKED_FILE_MESSAGE);
+          return "";
+        }
+        if (isBinaryPath(clean)) {
+          toast.error(
+            "Binary files can't be created by extensions",
+            "Images/fonts import via “Upload” as Base64 previews."
+          );
+          return "";
+        }
+        const existing = latestRef.current.files.find(
+          (f) => f.name.toLowerCase() === clean.toLowerCase()
+        );
+        const id = existing?.id ?? newId();
+        const lang = language ?? languageFromFilename(clean);
+        setFiles((prev) => {
+          const found = prev.some((f) => f.id === id);
+          if (found) {
+            return prev.map((f) =>
+              f.id === id ? { ...f, name: clean, language: lang, content } : f
+            );
+          }
+          return [...prev, { id, name: clean, language: lang, content }];
+        });
+        setActiveFileId(id);
+        editorBufferRef.current = { fileId: id, content };
+        markDirty();
+        return id;
+      },
+      replaceSelection: (text: string) => {
+        const editor = editorRef.current;
+        if (!editor) return false;
+        const selection = editor.getSelection();
+        if (!selection) return false;
+        editor.executeEdits("dashy-extension", [
+          { range: selection, text, forceMoveMarkers: true },
+        ]);
+        editor.focus();
+        return true;
+      },
+      setActiveFileContent: (content: string) => {
+        const activeId = latestRef.current.activeFileId;
+        editorBufferRef.current = { fileId: activeId, content };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === activeId ? { ...f, content } : f))
+        );
+        markDirty();
+      },
+      getMonaco: () => monacoRef.current,
+      getEditor: () => editorRef.current,
+    }),
+    [appendOutput, flushActiveBuffer, handleSelectFile, markDirty, toast]
+  );
+
+  const extensionUi = useMemo<DCodeExtensionUiApi>(
+    () => ({
+      showQuickPick: async (items, title) => {
+        appendOutput(
+          `[extensions] quick pick requested (“${title ?? "options"}”, ${items.length} items) — no picker UI mounted`
+        );
+        toast.info(
+          title ?? "Pick an option",
+          "The quick-pick UI isn't mounted in this workspace yet."
+        );
+        return null;
+      },
+      notify: (message: string) => {
+        toast.info(message);
+      },
+      showView: (viewId: string) => {
+        appendOutput(`[extensions] view requested: ${viewId}`);
+        toast.info(
+          "Extension view",
+          `The “${viewId}” panel isn't mounted in this workspace yet.`
+        );
+      },
+    }),
+    [appendOutput, toast]
+  );
+
+  /* Activate enabled extensions once (skipped in read-only share views). */
+  useEffect(() => {
+    if (readOnly) return;
+    void activateEnabledExtensions(workspaceApi, extensionUi);
+    return () => {
+      void deactivateAllExtensions();
+    };
+  }, [extensionUi, readOnly, workspaceApi]);
+
+  /** Live editor refs for extensions + re-activation of Monaco providers. */
+  const handleEditorReady = useCallback(
+    (editor: DCodeMonacoEditor, monaco: DCodeMonacoNamespace) => {
+      editorRef.current = editor;
+      monacoRef.current = monaco;
+      if (!readOnly) void onMonacoEditorReady(workspaceApi, extensionUi);
+    },
+    [extensionUi, readOnly, workspaceApi]
+  );
+
+  const handleSelectionChange = useCallback((selectedText: string) => {
+    selectionRef.current = selectedText;
+  }, []);
+
+  /** Reliable enable/disable: persists + activates/deactivates live. */
+  const handleExtensionToggle = useCallback(
+    (id: string, enabled: boolean) => {
+      setEnabledExtensions((prev) =>
+        enabled
+          ? prev.includes(id)
+            ? prev
+            : [...prev, id]
+          : prev.filter((x) => x !== id)
+      );
+      if (readOnly) {
+        setExtensionEnabledState(
+          id,
+          enabled,
+          BUILTIN_EXTENSION_IDS,
+          DEFAULT_DISABLED_IDS
+        );
+        return;
+      }
+      void setExtensionEnabled(id, enabled, workspaceApi, extensionUi);
+    },
+    [extensionUi, readOnly, workspaceApi]
   );
 
   /* ------------------------------ save status ----------------------------- */
@@ -1370,7 +1841,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   /* --------------------------------- render ------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
+    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#0b0f19]">
+      {/* VS Code-style application menu */}
+      <nav aria-label="Editor menu" className="flex flex-shrink-0 items-center gap-5 border-b border-white/[0.06] bg-[#111827] px-4 py-1.5 text-[11px] text-zinc-400">
+        <span className="mr-2 font-semibold text-cyan-300">D-Code</span>
+        {['File', 'Edit', 'Selection', 'View', 'Go', 'Run', 'Terminal', 'Help'].map((item) => <button key={item} type="button" className="transition-colors hover:text-white">{item}</button>)}
+      </nav>
       {/* Top bar: editable title + save status + share */}
       <div className="flex flex-shrink-0 items-center gap-3 border-b border-white/[0.06] bg-navy/60 px-4 py-2.5">
         {readOnly ? (
@@ -1414,8 +1890,8 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
               <button
                 type="button"
                 onClick={() => setTerminalOpen((open) => !open)}
-                title="Toggle terminal (Ctrl + `)"
-                aria-label="Toggle terminal"
+                title="Toggle bottom panel (Ctrl + `)"
+                aria-label="Toggle bottom panel"
                 className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
                   terminalOpen
                     ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
@@ -1478,11 +1954,54 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col">
-        {/* Split: editor body gets 70% (flex-7) when the terminal is open,
-            otherwise it fills the whole remaining column. */}
-        <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
-        {/* File tree */}
+      {/* VS Code body: activity bar + side panel + editor column */}
+      <div className="flex min-h-0 flex-1">
+        {/* Activity bar */}
+        <nav
+          aria-label="Activity bar"
+          className="flex w-12 flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0a0e1a]/80 py-2"
+        >
+          {(
+            [
+              { id: "explorer", label: "Explorer", Icon: FolderIcon },
+              { id: "search", label: "Search", Icon: SearchIcon },
+              { id: "extensions", label: "Extensions", Icon: ExtensionsIcon },
+            ] as const
+          ).map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              title={label}
+              aria-label={label}
+              aria-pressed={activityView === id}
+              onClick={() => setActivityView(id)}
+              className={`relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+                activityView === id
+                  ? "bg-cyan-500/10 text-cyan-300"
+                  : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200"
+              }`}
+            >
+              {activityView === id && (
+                <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-cyan-400" />
+              )}
+              <Icon className="h-5 w-5" />
+            </button>
+          ))}
+          <div className="mt-auto">
+            <button
+              type="button"
+              title="Settings"
+              aria-label="Settings"
+              onClick={() => router.push("/settings")}
+              className="flex h-10 w-10 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
+            >
+              <SettingsIcon className="h-5 w-5" />
+            </button>
+          </div>
+        </nav>
+
+        {/* Side panel — Explorer (file tree) */}
+        {activityView === "explorer" && (
         <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
           <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
             Files
@@ -1682,28 +2201,145 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           )}
         </aside>
+        )}
+
+        {/* Side panel — Search */}
+        {activityView === "search" && (
+          <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+              Search
+            </p>
+            <div className="flex-shrink-0 px-2 pb-2">
+              <div className="relative">
+                <SearchIcon className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-500" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search files…"
+                  aria-label="Search files"
+                  spellCheck={false}
+                  className="h-8 w-full rounded-lg border border-white/[0.06] bg-white/[0.03] pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-600 outline-none transition-colors focus:border-cyan-400/40"
+                />
+              </div>
+            </div>
+            <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+              {searchResults.map((file) => {
+                const { Icon: FileIcon, color: fileColor } = fileIconFor(file.name);
+                return (
+                  <li key={file.id}>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectFile(file.id)}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
+                        activeFile?.id === file.id
+                          ? "bg-cyan-500/10 text-cyan-300"
+                          : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
+                      }`}
+                    >
+                      <FileIcon className={`h-3.5 w-3.5 flex-shrink-0 ${fileColor}`} />
+                      <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                    </button>
+                  </li>
+                );
+              })}
+              {searchResults.length === 0 && (
+                <li className="px-2 py-6 text-center text-xs leading-relaxed text-zinc-600">
+                  {searchQuery.trim()
+                    ? "No matching files."
+                    : "Type to search file names and contents."}
+                </li>
+              )}
+            </ul>
+          </aside>
+        )}
+
+        {/* Side panel — Extensions (real Discover + Installed, web-safe) */}
+        {activityView === "extensions" && (
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <ExtensionsPanel
+              enabled={enabledExtensions}
+              onToggle={handleExtensionToggle}
+            />
+          </aside>
+        )}
 
         {/* Editor column */}
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* Tabs */}
-          <div className="flex flex-shrink-0 items-center gap-1 overflow-x-auto border-b border-white/[0.06] bg-[#0d1220]/60 px-2 py-1.5">
-            {files.map((file) => {
+     
+          {/* Tab bar (VS Code chrome) */}
+          <div
+            role="tablist"
+            aria-label="Open files"
+            className="flex flex-shrink-0 items-end gap-0.5 overflow-x-auto border-b border-white/[0.06] bg-[#0d1220]/60 px-2 pt-1.5"
+          >
+            {openFiles.map((file) => {
               const isActive = activeFile?.id === file.id;
+              const { Icon: TabIcon, color: tabColor } = fileIconFor(file.name);
               return (
-                <button
+                <div
                   key={file.id}
-                  type="button"
-                  onClick={() => handleSelectFile(file.id)}
-                  className={`flex flex-shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[11px] transition-colors ${
+                  role="tab"
+                  aria-selected={isActive}
+                  className={`group flex flex-shrink-0 items-center gap-1 rounded-t-lg border-x border-t px-2.5 py-1.5 font-mono text-[11px] transition-colors ${
                     isActive
-                      ? "bg-cyan-500/10 text-cyan-300"
-                      : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
+                      ? "border-white/[0.08] bg-[#0a0e1a] text-zinc-100"
+                      : "border-transparent text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
                   }`}
                 >
-                  {file.name}
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectFile(file.id)}
+                    className="flex items-center gap-1.5"
+                    aria-label={`Open ${file.name}`}
+                  >
+                    <TabIcon className={`h-3.5 w-3.5 ${tabColor}`} />
+                    {file.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCloseTab(file.id);
+                    }}
+                    aria-label={`Close ${file.name}`}
+                    title={`Close ${file.name}`}
+                    className={`rounded p-0.5 transition-all hover:bg-white/10 hover:text-zinc-100 ${
+                      isActive
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100"
+                    }`}
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                </div>
               );
             })}
+          </div>
+
+          {/* Breadcrumbs (VS Code chrome) */}
+          <div className="flex flex-shrink-0 items-center gap-1 border-b border-white/[0.06] bg-[#0a0e1a]/60 px-3 py-1 text-[11px]">
+            <span className="max-w-[12rem] truncate font-medium text-zinc-400">
+              {title.trim() || "Untitled project"}
+            </span>
+            <ChevronRightIcon className="h-3 w-3 flex-shrink-0 text-zinc-600" />
+            {activeFile ? (
+              <span className="flex min-w-0 items-center gap-1 truncate text-zinc-200">
+                {(() => {
+                  const { Icon: CrumbIcon, color: crumbColor } = fileIconFor(
+                    activeFile.name
+                  );
+                  return (
+                    <CrumbIcon
+                      className={`h-3 w-3 flex-shrink-0 ${crumbColor}`}
+                    />
+                  );
+                })()}
+                <span className="truncate">{activeFile.name}</span>
+              </span>
+            ) : (
+              <span className="text-zinc-600">no file open</span>
+            )}
           </div>
 
           {/* Monaco (or binary asset preview for images/fonts) */}
@@ -1718,6 +2354,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   language={activeFile.language}
                   onChange={readOnly ? undefined : updateActiveContent}
                   readOnly={readOnly}
+                  theme={themeId}
+                  onEditorReady={handleEditorReady}
+                  onSelectionChange={handleSelectionChange}
+                  onCursorPosition={handleCursorPosition}
                 />
               )
             ) : (
@@ -1756,18 +2396,185 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
         </div>
         </div>
 
-        {/* Mock terminal drawer — bottom 30% of the workspace when open. */}
-        {terminalOpen && (
-          <DCodeTerminal
-            files={files}
-            projectTitle={title}
-            userEmail={userEmail}
-            onOpenFile={handleSelectFile}
-            onClose={() => setTerminalOpen(false)}
-            className="flex-[3] min-h-0"
-          />
-        )}
-      </div>
+      {/* Bottom panel — Terminal / Output / Problems (VS Code chrome) */}
+      {terminalOpen && (
+        <div
+          className="flex h-64 flex-shrink-0 flex-col border-t border-white/[0.06]"
+          style={{ backgroundColor: "#05070d" }}
+        >
+          <div className="flex flex-shrink-0 items-center gap-1 border-b border-white/[0.06] bg-[#0a0e1a] px-2 py-1">
+            {(
+              [
+                { id: "terminal", label: "Terminal" },
+                { id: "output", label: "Output" },
+                {
+                  id: "problems",
+                  label: `Problems${problems.length > 0 ? ` (${problems.length})` : ""}`,
+                },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setBottomTab(tab.id)}
+                aria-pressed={bottomTab === tab.id}
+                className={`rounded-md px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors ${
+                  bottomTab === tab.id
+                    ? "bg-white/[0.06] text-cyan-300"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <span className="ml-1 hidden font-mono text-[10px] text-zinc-600 sm:inline">
+              Ctrl + `
+            </span>
+            <button
+              type="button"
+              onClick={() => setTerminalOpen(false)}
+              aria-label="Close panel"
+              title="Close panel (Ctrl + `)"
+              className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+            >
+              <XIcon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1">
+            {bottomTab === "terminal" ? (
+              <DCodeTerminal
+                bare
+                files={files}
+                projectTitle={title}
+                userEmail={userEmail}
+                onOpenFile={handleSelectFile}
+                onClose={() => setTerminalOpen(false)}
+              />
+            ) : bottomTab === "output" ? (
+              <div className="h-full overflow-y-auto px-3 py-2 font-mono text-[12px] leading-relaxed">
+                {outputLines.map((line, index) => (
+                  <div
+                    key={index}
+                    className="whitespace-pre-wrap text-zinc-300"
+                  >
+                    {line || " "}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="h-full overflow-y-auto px-3 py-2 text-[12px]">
+                {problems.length === 0 ? (
+                  <div className="flex h-full items-center justify-center gap-2 text-zinc-500">
+                    <CheckIcon className="h-4 w-4 text-emerald-400" />
+                    <span>No problems detected in this workspace.</span>
+                  </div>
+                ) : (
+                  problems.map((problem, index) => (
+                    <div
+                      key={index}
+                      className="flex items-center gap-2 border-b border-white/[0.04] py-1.5"
+                    >
+                      <AlertIcon className="h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
+                      <span className="font-mono text-zinc-200">
+                        {problem.file}
+                      </span>
+                      <span className="truncate text-zinc-500">
+                        {problem.message}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Status bar (VS Code chrome) */}
+      <footer className="flex h-7 flex-shrink-0 items-center gap-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 px-3 text-[11px] font-medium text-white">
+        <span
+          className="flex items-center gap-1.5"
+          title={isPublic ? "Public project" : "Private project"}
+        >
+          <BranchIcon className="h-3 w-3" />
+          main{saveState === "dirty" || saveState === "saving" ? "*" : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            setBottomTab("problems");
+            setTerminalOpen(true);
+          }}
+          title="Show problems"
+          className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
+        >
+          <AlertIcon className="h-3 w-3" />
+          {problems.length}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActivityView("extensions")}
+          title={`${enabledExtensions.length} extensions enabled — open Extensions`}
+          className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
+        >
+          <ExtensionsIcon className="h-3 w-3" />
+          {enabledExtensions.length}
+        </button>
+        <span className="hidden items-center gap-1 md:flex">
+          {enabledExtensions.slice(0, 3).map((id) => (
+            <span
+              key={id}
+              title={extensionFullName(id)}
+              className="rounded bg-white/15 px-1.5 py-px text-[10px] font-semibold"
+            >
+              {extensionShortLabel(id)}
+            </span>
+          ))}
+          {enabledExtensions.length > 3 && (
+            <span
+              className="text-[10px] opacity-80"
+              title={enabledExtensions
+                .slice(3)
+                .map(extensionFullName)
+                .join(", ")}
+            >
+              +{enabledExtensions.length - 3}
+            </span>
+          )}
+        </span>
+        <span className="hidden items-center gap-1.5 opacity-90 sm:flex">
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "dirty"
+              ? projectId
+                ? "Unsaved changes"
+                : "Draft — press ⌘S to save"
+              : saveState === "error"
+                ? "Save failed"
+                : "Saved"}
+        </span>
+        <div className="ml-auto flex items-center gap-3">
+          <span>
+            Ln {cursor.line}, Col {cursor.column}
+          </span>
+          <span className="hidden sm:inline">Spaces: 2</span>
+          <span className="hidden sm:inline">UTF-8</span>
+          <span className="hidden capitalize md:inline">
+            {activeFile?.language ?? "plaintext"}
+          </span>
+          <button
+            type="button"
+            onClick={() => setTerminalOpen((open) => !open)}
+            title="Toggle panel (Ctrl + `)"
+            aria-label="Toggle panel"
+            className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
+          >
+            <TerminalIcon className="h-3 w-3" />
+          </button>
+          <BellIcon className="hidden h-3 w-3 opacity-80 sm:block" />
+        </div>
+      </footer>
 
       {/* GitHub connect / import modal */}
       {githubModalOpen && (
