@@ -22,10 +22,18 @@ const PROTECTED_ROUTES = [
   "/knowledge",
   "/agents",
   "/voice",
+  "/studio",
 ];
 
-/** Prefixes served without a session (exempt from the redirect above). */
-const PUBLIC_PREFIXES = ["/d-code/share/"];
+/**
+ * Prefixes served without a session (exempt from the redirect above).
+ *  - /d-code/share/<slug> — public read-only project viewer
+ *  - /s/<slug>            — short share link (redirects to the viewer)
+ *  - /api/img-proxy       — server-side image engine (the <img> tag has no
+ *                           auth context; blocking it would break Studio
+ *                           AND any shared page embedding generated images)
+ */
+const PUBLIC_PREFIXES = ["/d-code/share/", "/s/", "/api/img-proxy"];
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });

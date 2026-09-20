@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1020"/>
+      <stop offset="100%" stop-color="#090b16"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="50%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g stroke="rgba(148,163,184,0.06)" stroke-width="1">
+    <path d="M0 128h1024M0 256h1024M0 384h1024M0 512h1024M0 640h1024M0 768h1024M0 896h1024"/>
+    <path d="M128 0v1024M256 0v1024M384 0v1024M512 0v1024M640 0v1024M768 0v1024M896 0v1024"/>
+  </g>
+  <g transform="translate(512 430)">
+    <rect x="-110" y="-110" width="220" height="220" rx="44" fill="rgba(6,182,212,0.08)" stroke="rgba(34,211,238,0.35)" stroke-width="3"/>
+    <rect x="-72" y="-72" width="144" height="144" rx="20" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="6"/>
+    <circle cx="-30" cy="-32" r="14" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="6"/>
+    <path d="M-66 46 L-14 -8 L20 26 L44 2 L70 30" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <line x1="-96" y1="96" x2="96" y2="-96" stroke="#f87171" stroke-width="8" stroke-linecap="round"/>
+  </g>
+  <text x="512" y="672" text-anchor="middle" font-family="Inter, -apple-system, Segoe UI, sans-serif" font-size="42" font-weight="600" fill="#e4e4e7">Image generation failed</text>
+  <text x="512" y="724" text-anchor="middle" font-family="Inter, -apple-system, Segoe UI, sans-serif" font-size="26" fill="#71717a">The engine timed out — try Generate again</text>
+  <text x="512" y="800" text-anchor="middle" font-family="Inter, -apple-system, Segoe UI, sans-serif" font-size="24" font-weight="600" fill="url(#accent)">DashyCore Studio</text>
+</svg>

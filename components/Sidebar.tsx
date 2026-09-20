@@ -37,6 +37,7 @@ import {
   BrainIcon,
   CodeIcon,
   FolderIcon,
+  ImageIcon,
   MessageIcon,
   MicIcon,
   PlusIcon,
@@ -251,6 +252,10 @@ export function Sidebar() {
         >
           <CodeIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">D-Code</span>
+        </Link>
+        <Link href="/studio" className={navItemClass(pathname === "/studio")}>
+          <ImageIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Studio</span>
         </Link>
         <Link href="/projects" className={navItemClass(pathname === "/projects")}>
           <FolderIcon className="h-4 w-4 flex-shrink-0" />
