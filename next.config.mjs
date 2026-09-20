@@ -9,6 +9,17 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  async rewrites() {
+    return [
+      // The <IMG> engine's "Buster" fallback is documented/wired as
+      // /api/img-proxy; tolerate the doubled /api/api/img-proxy spelling
+      // too so a stale client build can never 404 its fallback lane.
+      {
+        source: "/api/api/img-proxy",
+        destination: "/api/img-proxy",
+      },
+    ];
+  },
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
