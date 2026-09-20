@@ -8,6 +8,16 @@ const nextConfig = {
   reactStrictMode: true,
   images: {
     unoptimized: true,
+    // Documents the upstream image engine. Harmless while `unoptimized`
+    // is true (no Next optimization pass runs), and keeps next/image
+    // working if optimization is ever re-enabled.
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "image.pollinations.ai",
+        pathname: "/**",
+      },
+    ],
   },
   async rewrites() {
     return [

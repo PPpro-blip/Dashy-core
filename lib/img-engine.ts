@@ -11,9 +11,11 @@
  *     CORS-checked loads fail on anonymous/error responses even when the
  *     image itself is reachable. The tile is only marked `ready` after
  *     `onload` actually fires.
- *  3. generateImage() tries every direct URL, then retries through the
- *     same-origin /api/img-proxy (server-side fetch, no CORS, 15s strict
- *     server timeout) before giving up with a descriptive error.
+ *  3. generateImage() is PROXY-FIRST: lane 0 loads the prompt-mode
+ *     /api/img-proxy URL (the server waits up to 45s upstream, then
+ *     streams finished bytes), and only on a fast failure does it fall
+ *     through to the direct URLs and finally the ?url= proxy retries
+ *     before giving up with a descriptive error.
  *  4. A HARD overall deadline (45s) plus caller-supplied AbortSignals mean
  *     a hung generation can never spin forever: every wait in this engine
  *     (preflight, retry delay, proxy load) observes the combined signal and
@@ -76,6 +78,12 @@ export type GenerateImageOptions = {
   retryDelayMs?: number;
   /** Retry direct URLs through the same-origin proxy. Default true. */
   useProxyFallback?: boolean;
+  /**
+   * Try the prompt-mode /api/img-proxy lane FIRST (server waits up to 45s
+   * upstream). Default true — set false only for callers that must stay
+   * direct-first.
+   */
+  useProxyFirst?: boolean;
   /** Caller-owned signal (e.g. a Cancel button). Abort propagates instantly. */
   signal?: AbortSignal;
 };
@@ -87,6 +95,12 @@ const DEFAULT_HEIGHT = 1024;
 export const GENERATION_DEADLINE_MS = 45_000;
 /** Strict per-attempt preflight timeout (direct + proxied URLs). */
 export const PER_ATTEMPT_TIMEOUT_MS = 15_000;
+/**
+ * Preflight budget for the lane-0 prompt-mode proxy attempt. The route
+ * waits up to 45s upstream, so the browser must hold the connection at
+ * least that long (the combined deadline signal still caps everything).
+ */
+export const PROXY_PROMPT_TIMEOUT_MS = 45_000;
 
 /** Aspect map used by Studio + <IMG> Studio (1:1 / 16:9 / 9:16). */
 export const ASPECT_SIZES: Record<string, [number, number]> = {
@@ -113,6 +127,63 @@ function alternateSeed(): string {
  */
 export function proxyUrlFor(directUrl: string): string {
   return `/api/img-proxy?url=${encodeURIComponent(directUrl)}`;
+}
+
+/**
+ * Mission-canonical prompt-mode proxy URL (PROXY-FIRST lane): the server
+ * renders via pollinations.ai with a 45s upstream wait, then streams the
+ * finished bytes. Single source of truth shared by Studio tiles, the chat
+ * <IMG> bubble and generateImage()'s lane 0.
+ */
+export function proxyPromptUrlFor(params: {
+  prompt: string;
+  seed?: string | number;
+  width?: number;
+  height?: number;
+  /** true (default) = fast turbo model, false = flux. */
+  turbo?: boolean;
+}): string {
+  const query = new URLSearchParams({
+    prompt: params.prompt,
+    seed: params.seed === undefined || params.seed === "" ? freshSeed() : String(params.seed),
+    width: String(params.width ?? DEFAULT_WIDTH),
+    height: String(params.height ?? DEFAULT_HEIGHT),
+    turbo: params.turbo === false ? "false" : "true",
+  });
+  return `/api/img-proxy?${query.toString()}`;
+}
+
+/**
+ * Derives the prompt-mode proxy URL from a DIRECT pollinations URL
+ * (`https://image.pollinations.ai/prompt/{prompt}?width=&height=&seed=
+ * &model=`). Returns null for anything else (legacy/foreign URLs keep
+ * their existing direct-first rendering).
+ *
+ * This upgrades persisted generations (chat history stores direct URLs)
+ * to proxy-first without a data migration.
+ */
+export function proxyPromptUrlFromDirect(directUrl: string): string | null {
+  const match = /^https?:\/\/image\.pollinations\.ai\/prompt\/([^?]+)(\?.*)?$/.exec(
+    directUrl.trim()
+  );
+  if (!match) return null;
+  let prompt: string;
+  try {
+    prompt = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  if (!prompt.trim()) return null;
+  const query = new URLSearchParams(match[2] ?? "");
+  const width = Number.parseInt(query.get("width") ?? "", 10);
+  const height = Number.parseInt(query.get("height") ?? "", 10);
+  return proxyPromptUrlFor({
+    prompt,
+    seed: query.get("seed") ?? undefined,
+    width: Number.isFinite(width) ? width : undefined,
+    height: Number.isFinite(height) ? height : undefined,
+    turbo: (query.get("model") ?? "turbo") !== "flux",
+  });
 }
 
 function resolveSeed(seed?: string | number): string {
@@ -331,9 +402,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Generates an image: tries every direct Pollinations URL until one loads,
- * then retries through the same-origin /api/img-proxy, then throws an error
- * describing every failure. First success wins.
+ * Generates an image: lane 0 loads the prompt-mode /api/img-proxy URL
+ * first (server-side 45s render wait); on a fast failure it tries every
+ * direct Pollinations URL, then retries those through the same-origin
+ * /api/img-proxy ?url= lane, then throws an error describing every
+ * failure. First success wins.
  *
  * The tile must only be marked complete when the image ACTUALLY loads —
  * every accepted URL (direct or proxied) has passed an Image() onload
@@ -350,6 +423,7 @@ export async function generateImage(
     deadlineMs = GENERATION_DEADLINE_MS,
     retryDelayMs = 500,
     useProxyFallback = true,
+    useProxyFirst = true,
   } = options;
 
   const signal = combineSignals(options.signal, AbortSignal.timeout(deadlineMs));
@@ -357,6 +431,41 @@ export async function generateImage(
   const attempted: string[] = [];
   const errors: string[] = [];
   let lastReason = "no attempt made";
+
+  // LANE 0 (proxy-first): the prompt-mode proxy renders server-side with a
+  // 45s upstream wait. A fast failure (route down, upstream 5xx) falls
+  // through to the direct lanes below with the remaining deadline budget;
+  // a slow render simply consumes the budget and wins on onload.
+  if (useProxyFirst && !signal.aborted) {
+    const prompt = params.prompt.trim();
+    const laneSeed = resolveSeed(params.seed);
+    const proxyPromptUrl = proxyPromptUrlFor({
+      prompt,
+      seed: laneSeed,
+      width: params.width,
+      height: params.height,
+      turbo: (params.model ?? "turbo") !== "flux",
+    });
+    attempted.push(proxyPromptUrl);
+    if (process.env.NODE_ENV !== "production") {
+      console.info(`[img-engine] lane 0 (proxy-first): ${proxyPromptUrl}`);
+    }
+    try {
+      await loadImage(proxyPromptUrl, PROXY_PROMPT_TIMEOUT_MS, signal);
+      return {
+        url: proxyPromptUrl,
+        sourceUrl: attempts[0]?.url ?? proxyPromptUrl,
+        seed: laneSeed,
+        model: params.model ?? "turbo",
+        viaProxy: true,
+        attempted,
+      };
+    } catch (error) {
+      if (isAbortError(error) || signal.aborted) throw error;
+      lastReason = errorMessage(error);
+      errors.push(`${proxyPromptUrl} → ${lastReason}`);
+    }
+  }
 
   for (let i = 0; i < attempts.length; i++) {
     if (signal.aborted) throw abortError("Generation was aborted.");

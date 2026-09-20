@@ -44,7 +44,9 @@ import {
   LoaderIcon,
   LockIcon,
   PenIcon,
+  RefreshIcon,
   ShareIcon,
+  TrashIcon,
   XIcon,
 } from "@/components/icons";
 
@@ -59,19 +61,38 @@ export interface ShareHubPrivacy {
   onToggle: (next: boolean) => void;
 }
 
+/**
+ * Owner-only link management surfaced inside the Hub. Omitted for plain
+ * visitors — regenerating/revoking is an owner action (RLS enforces it
+ * server-side regardless).
+ */
+export interface ShareHubManagement {
+  /** Which management action is in flight (disables the row). */
+  busy: "regenerate" | "revoke" | null;
+  /** False while the project is private with no slug to manage. */
+  canManage: boolean;
+  /** Mint a fresh slug — the project stays public under the new link. */
+  onRegenerate: () => void;
+  /** Go private + wipe the slug — the current link can never work again. */
+  onRevoke: () => void;
+}
+
 interface ShareHubProps {
   onClose: () => void;
   project: { id: string; title: string; files: DCodeFile[] } | null;
   shareUrl: string | null;
   privacy?: ShareHubPrivacy;
+  management?: ShareHubManagement;
 }
 
-export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps) {
+export function ShareHub({ onClose, project, shareUrl, privacy, management }: ShareHubProps) {
   const toast = useToast();
   const [selectedApp, setSelectedApp] = useState<ShareAppId | null>(null);
   const [copying, setCopying] = useState(false);
   const [sharingNow, setSharingNow] = useState(false);
   const [showQr, setShowQr] = useState(false);
+  /** Two-step confirm for the destructive revoke action. */
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
 
   const imageOptions = useMemo(
@@ -99,6 +120,12 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
       prefs
     )
   );
+
+  useEffect(() => {
+    if (!confirmingRevoke) return;
+    const timer = window.setTimeout(() => setConfirmingRevoke(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [confirmingRevoke]);
 
   // Keep the composer's permalink in sync with the canonical share URL —
   // e.g. the owner hits "Make public" while the hub is open and the freshly
@@ -469,6 +496,60 @@ export function ShareHub({ onClose, project, shareUrl, privacy }: ShareHubProps)
                 )}
                 {privacy.isPublic ? "Make private" : "Make public"}
               </button>
+            </div>
+          )}
+
+          {management && (
+            <div>
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                Manage link
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={management.onRegenerate}
+                  disabled={management.busy !== null || !management.canManage}
+                  title="Generate a new link — the old one stops working"
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {management.busy === "regenerate" ? (
+                    <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshIcon className="h-3.5 w-3.5" />
+                  )}
+                  Regenerate slug
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirmingRevoke) {
+                      management.onRevoke();
+                      setConfirmingRevoke(false);
+                    } else {
+                      setConfirmingRevoke(true);
+                    }
+                  }}
+                  disabled={management.busy !== null || !management.canManage}
+                  title="Take the project private and permanently kill this link"
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                    confirmingRevoke
+                      ? "border-red-400/50 bg-red-500/15 text-red-200"
+                      : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:border-red-400/40 hover:text-red-300"
+                  }`}
+                >
+                  {management.busy === "revoke" ? (
+                    <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <TrashIcon className="h-3.5 w-3.5" />
+                  )}
+                  {confirmingRevoke ? "Click again to revoke" : "Revoke link"}
+                </button>
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-600">
+                Regenerating keeps the project public under a new link.
+                Revoking makes it private and the current link can never work
+                again.
+              </p>
             </div>
           )}
 

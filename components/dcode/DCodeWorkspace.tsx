@@ -26,6 +26,8 @@ import {
   createProject,
   languageFromFilename,
   newId,
+  regenerateShareSlug,
+  revokeShareLink,
   toggleProjectPublic,
   updateProject,
   type DCodeFile,
@@ -53,13 +55,13 @@ import {
   readBlobAsDataUrl,
   readBlobAsText,
 } from "@/lib/dcode-binary";
-import { copyText } from "@/lib/clipboard";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import {
   MonacoEditor,
   type DCodeMonacoEditor,
 } from "@/components/dcode/MonacoEditor";
 import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import { ShareHub } from "@/components/share/ShareHub";
 import {
   BUILTIN_EXTENSIONS,
   DEFAULT_DISABLED_IDS,
@@ -544,6 +546,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     project ? new Date(project.updatedAt) : null
   );
   const [savingShare, setSavingShare] = useState(false);
+  const [shareHubOpen, setShareHubOpen] = useState(false);
+  const [hubBusy, setHubBusy] = useState<
+    "toggle" | "regenerate" | "revoke" | "opening" | null
+  >(null);
   const [newFileName, setNewFileName] = useState("");
   const [addingFile, setAddingFile] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
@@ -1358,57 +1364,133 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     return `${window.location.origin}/d-code/share/${shareSlug}`;
   }, [shareSlug]);
 
-  const handleShare = useCallback(async () => {
-    if (savingShare) return;
-    setSavingShare(true);
-    try {
-      // Draft without a row: save first so there is something to share.
-      let id = latestRef.current.projectId;
-      if (!id) {
+  /** Canonical short link handed to the Share Hub (null until a slug exists). */
+  const hubShareUrl = useMemo(() => {
+    if (!shareSlug || typeof window === "undefined") return null;
+    return buildShortShareUrl(window.location.origin, shareSlug);
+  }, [shareSlug]);
+
+  /**
+   * Opens the Share Hub (link card, preview, composers, privacy, link
+   * management). A draft without a row is persisted first so the hub
+   * always manages a real project id.
+   */
+  const openShareHub = useCallback(async () => {
+    if (hubBusy) return;
+    if (!latestRef.current.projectId) {
+      setHubBusy("opening");
+      try {
         await persist("manual");
-        id = latestRef.current.projectId;
-        if (!id) throw new Error("Save the project before sharing.");
+      } finally {
+        setHubBusy(null);
       }
-      if (!isPublic) {
-        const updated = await toggleProjectPublic(id, true);
-        if (!updated.shareSlug) {
-          throw new Error("Sharing succeeded but no link was assigned.");
+      if (!latestRef.current.projectId) {
+        toast.show({
+          type: "error",
+          title: "Save the project before sharing.",
+        });
+        return;
+      }
+    }
+    setShareHubOpen(true);
+  }, [hubBusy, persist, toast]);
+
+  /** Share Hub privacy toggle — updates the DB in real time. */
+  const handleHubTogglePublic = useCallback(
+    async (next: boolean) => {
+      const id = latestRef.current.projectId;
+      if (!id || hubBusy) return;
+      setHubBusy("toggle");
+      try {
+        if (next) {
+          // Re-sharing a project that still has a slug keeps the SAME link;
+          // a first-time (or post-revoke) share mints a fresh slug.
+          const updated = shareSlug
+            ? await updateProject(id, { isPublic: true })
+            : await toggleProjectPublic(id, true);
+          if (!updated.shareSlug) {
+            throw new Error("Sharing succeeded but no link was assigned.");
+          }
+          setIsPublic(true);
+          setShareSlug(updated.shareSlug);
+          toast.show({
+            type: "success",
+            title: "Project is public 🎉",
+            message: "Anyone with the link can view it — no login needed.",
+          });
+        } else {
+          // Going private keeps the slug so re-enabling restores the link.
+          // (True revocation — killing the slug — is the Revoke action.)
+          await updateProject(id, { isPublic: false });
+          setIsPublic(false);
+          toast.show({
+            type: "info",
+            title: "Project is private",
+            message: "The share link no longer works.",
+          });
         }
-        setIsPublic(true);
-        setShareSlug(updated.shareSlug);
-        const url = buildShortShareUrl(
-          window.location.origin,
-          updated.shareSlug
-        );
-        // copyText() has a textarea fallback — a clipboard permission denial
-        // must never fail a share that ALREADY SUCCEEDED in the database.
-        const copied = await copyText(url);
+      } catch (error) {
         toast.show({
-          type: "success",
-          title: copied ? "Link copied to clipboard!" : "Project is public 🎉",
-          message: copied
-            ? "Anyone with the link can view this project."
-            : "Couldn't auto-copy — the Share Hub has the link (tap Share again to open it).",
+          type: "error",
+          title: "Could not update sharing",
+          message: error instanceof Error ? error.message : "Please try again.",
         });
-      } else if (shareSlug) {
-        const copied = await copyText(
-          buildShortShareUrl(window.location.origin, shareSlug)
-        );
-        toast.show({
-          type: "success",
-          title: copied ? "Link copied to clipboard!" : "Share link ready",
-        });
+      } finally {
+        setHubBusy(null);
       }
+    },
+    [hubBusy, shareSlug, toast]
+  );
+
+  /** Share Hub "Regenerate slug" — new link, stays public. */
+  const handleHubRegenerate = useCallback(async () => {
+    const id = latestRef.current.projectId;
+    if (!id || hubBusy) return;
+    setHubBusy("regenerate");
+    try {
+      const updated = await regenerateShareSlug(id);
+      setIsPublic(true);
+      setShareSlug(updated.shareSlug);
+      toast.show({
+        type: "success",
+        title: "New share link generated",
+        message: "The old link stopped working immediately.",
+      });
     } catch (error) {
       toast.show({
         type: "error",
-        title: "Sharing failed",
+        title: "Could not regenerate the link",
         message: error instanceof Error ? error.message : "Please try again.",
       });
     } finally {
-      setSavingShare(false);
+      setHubBusy(null);
     }
-  }, [isPublic, persist, savingShare, shareSlug, toast]);
+  }, [hubBusy, toast]);
+
+  /** Share Hub "Revoke link" — private + slug wiped, irreversible. */
+  const handleHubRevoke = useCallback(async () => {
+    const id = latestRef.current.projectId;
+    if (!id || hubBusy) return;
+    setHubBusy("revoke");
+    try {
+      await revokeShareLink(id);
+      setIsPublic(false);
+      setShareSlug(null);
+      toast.show({
+        type: "info",
+        title: "Share link revoked",
+        message: "The project is private and the old link can never work again.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not revoke the link",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setHubBusy(null);
+    }
+  }, [hubBusy, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;
@@ -1942,20 +2024,20 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
               )}
               <button
                 type="button"
-                onClick={() => void handleShare()}
-                disabled={savingShare}
-                title={isPublic ? "Copy public link" : "Share — make public & copy link"}
-                aria-label={isPublic ? "Copy public link" : "Share project"}
+                onClick={() => void openShareHub()}
+                disabled={hubBusy !== null}
+                title="Open the Share Hub — link, preview, composers & privacy"
+                aria-label="Open share hub"
                 className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
-                {savingShare ? (
+                {hubBusy === "opening" ? (
                   <LoaderIcon className="h-3 w-3 animate-spin" />
                 ) : isPublic ? (
                   <GlobeIcon className="h-3 w-3" />
                 ) : (
                   <ShareIcon className="h-3 w-3" />
                 )}
-                {isPublic ? "Copy link" : "Share"}
+                Share
               </button>
             </>
           )}
@@ -2741,6 +2823,29 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           </div>
         </>
+      )}
+
+      {/* Share Hub — owner-only (visitors get it via the public share page). */}
+      {shareHubOpen && !readOnly && (
+        <ShareHub
+          key={shareSlug ?? "private"}
+          project={
+            projectId ? { id: projectId, title, files } : null
+          }
+          shareUrl={hubShareUrl}
+          privacy={{
+            isPublic,
+            busy: hubBusy === "toggle",
+            onToggle: (next) => void handleHubTogglePublic(next),
+          }}
+          management={{
+            busy: hubBusy === "regenerate" || hubBusy === "revoke" ? hubBusy : null,
+            canManage: isPublic || shareSlug !== null,
+            onRegenerate: () => void handleHubRegenerate(),
+            onRevoke: () => void handleHubRevoke(),
+          }}
+          onClose={() => setShareHubOpen(false)}
+        />
       )}
     </div>
   );

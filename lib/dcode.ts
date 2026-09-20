@@ -687,6 +687,58 @@ export async function toggleProjectPublic(
   throw new Error("Could not allocate a share slug — try again.");
 }
 
+/**
+ * Mints a fresh share slug for a project that is ALREADY public. The old
+ * link stops working immediately; the project stays public under the new
+ * slug. Slug collisions are retried (same loop as toggleProjectPublic).
+ */
+export async function regenerateShareSlug(
+  id: string
+): Promise<DCodeProject> {
+  const supabase = createClient();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const slug = newShareSlug();
+    const { data, error } = await supabase
+      .from("dcode_projects")
+      .update({
+        is_public: true,
+        share_slug: slug,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (!error) return rowToProject(data as DCodeProjectRow);
+    const message = error.message ?? "";
+    if (!/duplicate key|unique constraint/i.test(message)) {
+      throw classError(error);
+    }
+    // Slug collision — loop and try a new one.
+  }
+  throw new Error("Could not allocate a share slug — try again.");
+}
+
+/**
+ * Fully revokes a share link: the project goes private AND its slug is
+ * cleared, so the old URL can never work again — even if the project is
+ * re-shared later (which mints a brand-new slug).
+ */
+export async function revokeShareLink(id: string): Promise<DCodeProject> {
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("dcode_projects")
+    .update({
+      is_public: false,
+      share_slug: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+    .select("*")
+    .single();
+  if (error) throw classError(error);
+  return rowToProject(data as DCodeProjectRow);
+}
+
 /** Deletes a project (files live inline, so this is one call). */
 export async function deleteProject(id: string): Promise<void> {
   const supabase = createClient();

@@ -3,16 +3,17 @@
 /**
  * Dashy Studio — Turbo image generation with a Media Library.
  *
- * Pipeline (Turbo, direct-first):
- *  1. Build the DIRECT Turbo Pollinations URL:
- *     https://image.pollinations.ai/prompt/{encodedPrompt}?width=&height=&seed=&nologo=true&model=turbo
- *     That endpoint returns RAW IMAGE BYTES (JPEG/PNG), NOT JSON — so it is
- *     loaded straight from the browser with `new Image()` (never fetch+JSON).
+ * Pipeline (Turbo, PROXY-FIRST):
+ *  1. Build the prompt-mode proxy URL:
+ *     /api/img-proxy?prompt=&seed=&width=&height=&turbo=true
+ *     The server waits up to 45s for the upstream render, then streams the
+ *     finished bytes — the browser sees one fast, complete download.
  *  2. `onload` flips the asset from `generating` -> `ready` and its imgUrl is
  *     saved to the `dashy.media.library` localStorage store.
- *  3. `onerror` retries the SAME url through the fast same-origin
- *     `/api/img-proxy` fallback; if that fails too the tile errors out.
- *  4. A hard 15-second timer bounds every generation — slow jobs flip to
+ *  3. `onerror` retries through the DIRECT Turbo Pollinations URL
+ *     (disjoint failure mode: provider lane when the proxy lane fails); if
+ *     that fails too the tile errors out.
+ *  4. A hard 50-second timer bounds every generation — slow jobs flip to
  *     `error` with a "Retry Turbo" button. Pending jobs clean up on unmount.
  *  5. On mount, a sanitizer resets legacy stuck entries (`generating` /
  *     `pending` / `loading`) in `dashy.media.library` to `error` so they can
@@ -24,7 +25,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { proxyUrlFor } from "@/lib/img-engine";
+import { proxyPromptUrlFor } from "@/lib/img-engine";
 import { copyText } from "@/lib/clipboard";
 import {
   SparklesIcon,
@@ -47,13 +48,13 @@ export interface Tile {
   width: number;
   height: number;
   seed?: string | number;
-  /** True when the displayed URL is the same-origin /api/img-proxy fallback. */
+  /** True when the displayed URL is a same-origin /api/img-proxy render. */
   viaProxy?: boolean;
 }
 
-/** Hard 30-second ceiling per Turbo generation (matches the proxy's
- * 30s upstream timeout — Pollinations cold starts often exceed 15s). */
-const STUDIO_TIMEOUT_MS = 30_000;
+/** Hard 50-second ceiling per Turbo generation: the proxy-first lane
+ * waits up to 45s upstream, leaving a 5s+ window for the direct buster. */
+const STUDIO_TIMEOUT_MS = 50_000;
 
 /** localStorage-backed Media Library (survives reloads). */
 const LIBRARY_KEY = "dashy.media.library";
@@ -232,8 +233,16 @@ export default function StudioPage() {
       const { width, height } = ASPECT_OPTIONS[key];
       const id = crypto.randomUUID();
       const seed = Date.now();
+      // PROXY-FIRST: the prompt-mode lane renders server-side (45s wait).
+      const proxyUrl = proxyPromptUrlFor({
+        prompt: text,
+        seed,
+        width,
+        height,
+        turbo: true,
+      });
+      // Buster lane: the direct provider URL (disjoint failure mode).
       const directUrl = buildDirectUrl(text, seed, width, height);
-      const proxyUrl = proxyUrlFor(directUrl);
 
       const newTile: Tile = {
         id,
@@ -252,19 +261,19 @@ export default function StudioPage() {
       setBusy(true);
 
       let finished = false;
-      let directImg: HTMLImageElement | null = null;
-      let proxyImg: HTMLImageElement | null = null;
+      let primaryImg: HTMLImageElement | null = null;
+      let busterImg: HTMLImageElement | null = null;
 
       const cleanup = () => {
-        if (directImg) {
-          directImg.onload = null;
-          directImg.onerror = null;
-          directImg = null;
+        if (primaryImg) {
+          primaryImg.onload = null;
+          primaryImg.onerror = null;
+          primaryImg = null;
         }
-        if (proxyImg) {
-          proxyImg.onload = null;
-          proxyImg.onerror = null;
-          proxyImg = null;
+        if (busterImg) {
+          busterImg.onload = null;
+          busterImg.onerror = null;
+          busterImg = null;
         }
         const job = activeJobsRef.current.get(id);
         if (job) {
@@ -299,7 +308,7 @@ export default function StudioPage() {
         setBusy(false);
       };
 
-      // Hard 15-second timer — slow Turbo jobs flip to `error` with Retry.
+      // Hard 50-second timer — slow Turbo jobs flip to `error` with Retry.
       const timer = setTimeout(() => {
         console.warn(
           `[Studio] Turbo generation timed out after ${STUDIO_TIMEOUT_MS / 1000}s for prompt: "${text}"`
@@ -317,42 +326,43 @@ export default function StudioPage() {
 
       activeJobsRef.current.set(id, { timer, cancel });
 
-      // Fast same-origin proxy fallback, armed when the direct load errors.
-      const tryProxyFallback = () => {
+      // Direct-provider buster, armed when the proxy-first load errors.
+      const tryDirectBuster = () => {
         if (finished || typeof window === "undefined") return;
         console.info(
-          `[Studio] Direct Turbo load failed — retrying through fast proxy: ${proxyUrl}`
+          `[Studio] Proxy lane failed — retrying direct: ${directUrl}`
         );
         const fallback = new window.Image();
-        proxyImg = fallback;
+        busterImg = fallback;
         fallback.onload = () => {
-          finish("ready", proxyUrl, true);
+          finish("ready", directUrl, false);
         };
         fallback.onerror = () => {
-          // If the proxy load also fails, mark as error
+          // If the direct load also fails, mark as error
           console.error(
-            `[Studio] Proxy fallback also failed for seed ${seed}`
+            `[Studio] Direct buster also failed for seed ${seed}`
           );
           finish("error");
         };
         fallback.decoding = "async";
-        fallback.src = proxyUrl;
+        fallback.src = directUrl;
       };
 
-      // DIRECT TURBO LOAD — image.pollinations.ai answers with raw image
-      // bytes, so the browser preloads the URL natively with `new Image()`
-      // (no fetch/JSON). `onload` flips generating -> ready.
+      // PROXY-FIRST LOAD — /api/img-proxy renders server-side (45s upstream
+      // wait) and streams finished bytes, so the browser preloads the URL
+      // natively with `new Image()` (no fetch/JSON). `onload` flips
+      // generating -> ready.
       const img = new window.Image();
-      directImg = img;
+      primaryImg = img;
       img.onload = () => {
-        finish("ready", directUrl, false);
+        finish("ready", proxyUrl, true);
       };
       img.onerror = () => {
-        // Retry with fast proxy fallback or mark error
-        tryProxyFallback();
+        // Retry with the direct provider buster or mark error
+        tryDirectBuster();
       };
       img.decoding = "async";
-      img.src = directUrl;
+      img.src = proxyUrl;
     },
     [prompt, aspect]
   );
