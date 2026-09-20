@@ -22,6 +22,7 @@ const PROTECTED_ROUTES = [
   "/knowledge",
   "/agents",
   "/voice",
+  "/studio",
 ];
 
 /** Prefixes served without a session (exempt from the redirect above). */

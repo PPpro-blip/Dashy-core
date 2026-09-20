@@ -496,9 +496,13 @@ export default function ChatPage() {
   );
 
   /**
-   * Zero-cost <IMG> engine (pollinations.ai) — NO dashy-flow-state call.
-   * Takes the composer prompt, then immediately appends a user message and an
-   * assistant message that renders the generated image as markdown.
+   * Zero-cost <IMG> engine — NO dashy-flow-state call.
+   *
+   * Server-side proxy first: the markdown image points at OUR
+   * /api/img-proxy, which waits up to 45s for the upstream pollinations.ai
+   * render and then streams the finished bytes back. The browser therefore
+   * sees one fast, complete download instead of a slow trickle it might
+   * abandon — no more "failed to load" images.
    */
   const handleGenerateImage = useCallback(
     (promptFromComposer?: string) => {

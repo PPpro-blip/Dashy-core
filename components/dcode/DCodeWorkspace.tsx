@@ -26,6 +26,8 @@ import {
   createProject,
   languageFromFilename,
   newId,
+  regenerateShareSlug,
+  revokeShareLink,
   toggleProjectPublic,
   updateProject,
   type DCodeFile,
@@ -55,6 +57,7 @@ import {
 } from "@/lib/dcode-binary";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
+import { ShareHubModal, type HubBusyKind } from "@/components/dcode/ShareHubModal";
 import { useToast } from "@/components/Toast";
 import {
   BracesIcon,
@@ -447,6 +450,44 @@ function BinaryAssetPreview({ file }: { file: DCodeFile }) {
   );
 }
 
+/**
+ * One icon in the VS Code-style activity bar: a tall hit-target with a
+ * cyan active indicator on the left edge.
+ */
+function ActivityButton({
+  active,
+  onClick,
+  title,
+  label,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={label}
+      aria-pressed={active}
+      className={`relative flex h-11 w-full items-center justify-center transition-colors ${
+        active ? "text-cyan-300" : "text-zinc-600 hover:text-zinc-300"
+      }`}
+    >
+      <span
+        className={`absolute left-0 top-1/2 h-6 w-[2px] -translate-y-1/2 rounded-full transition-opacity ${
+          active ? "bg-cyan-400 opacity-100" : "opacity-0"
+        }`}
+      />
+      {children}
+    </button>
+  );
+}
+
 export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorkspaceProps) {
   const router = useRouter();
   const toast = useToast();
@@ -471,7 +512,10 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(
     project ? new Date(project.updatedAt) : null
   );
-  const [savingShare, setSavingShare] = useState(false);
+  const [shareHubOpen, setShareHubOpen] = useState(false);
+  const [hubBusy, setHubBusy] = useState<HubBusyKind>(null);
+  /** VS Code sidebar visibility — toggled from the activity bar. */
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [newFileName, setNewFileName] = useState("");
   const [addingFile, setAddingFile] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
@@ -1113,66 +1157,123 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     return `${window.location.origin}/d-code/share/${shareSlug}`;
   }, [shareSlug]);
 
-  const handleShare = useCallback(async () => {
-    if (savingShare) return;
-    setSavingShare(true);
-    try {
-      // Draft without a row: save first so there is something to share.
-      let id = latestRef.current.projectId;
-      if (!id) {
+  /**
+   * Opens the Share Hub. A draft without a row is persisted first so the
+   * hub always manages a real project id.
+   */
+  const openShareHub = useCallback(async () => {
+    if (hubBusy) return;
+    if (!latestRef.current.projectId) {
+      setHubBusy("opening");
+      try {
         await persist("manual");
-        id = latestRef.current.projectId;
-        if (!id) throw new Error("Save the project before sharing.");
+      } finally {
+        setHubBusy(null);
       }
-      if (!isPublic) {
-        const updated = await toggleProjectPublic(id, true);
-        setIsPublic(true);
-        setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
-        await navigator.clipboard.writeText(url);
+      if (!latestRef.current.projectId) {
         toast.show({
-          type: "success",
-          title: "Public link copied",
-          message: "Anyone with the link can view this project.",
+          type: "error",
+          title: "Save the project before sharing.",
         });
-      } else if (shareSlug) {
-        await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
-        );
-        toast.show({ type: "success", title: "Link copied" });
+        return;
       }
+    }
+    setShareHubOpen(true);
+  }, [hubBusy, persist, toast]);
+
+  /** Share Hub privacy toggle — updates the DB in real time. */
+  const handleHubTogglePublic = useCallback(
+    async (next: boolean) => {
+      const id = latestRef.current.projectId;
+      if (!id || hubBusy) return;
+      setHubBusy("toggle");
+      try {
+        if (next) {
+          // Re-sharing a project that still has a slug keeps the SAME link;
+          // a first-time (or post-revoke) share mints a fresh slug.
+          const updated = shareSlug
+            ? await updateProject(id, { isPublic: true })
+            : await toggleProjectPublic(id, true);
+          setIsPublic(true);
+          setShareSlug(updated.shareSlug);
+          toast.show({
+            type: "success",
+            title: "Project is public",
+            message: "Anyone with the link can view it — no login needed.",
+          });
+        } else {
+          // Going private keeps the slug so re-enabling restores the link.
+          // (True revocation — killing the slug — is the Revoke action.)
+          await updateProject(id, { isPublic: false });
+          setIsPublic(false);
+          toast.show({
+            type: "info",
+            title: "Project is private",
+            message: "The share link no longer works.",
+          });
+        }
+      } catch (error) {
+        toast.show({
+          type: "error",
+          title: "Could not update sharing",
+          message: error instanceof Error ? error.message : "Please try again.",
+        });
+      } finally {
+        setHubBusy(null);
+      }
+    },
+    [hubBusy, shareSlug, toast]
+  );
+
+  /** Share Hub "Regenerate slug" — new link, stays public. */
+  const handleHubRegenerate = useCallback(async () => {
+    const id = latestRef.current.projectId;
+    if (!id || hubBusy) return;
+    setHubBusy("regenerate");
+    try {
+      const updated = await regenerateShareSlug(id);
+      setIsPublic(true);
+      setShareSlug(updated.shareSlug);
+      toast.show({
+        type: "success",
+        title: "New share link generated",
+        message: "The old link stopped working immediately.",
+      });
     } catch (error) {
       toast.show({
         type: "error",
-        title: "Sharing failed",
+        title: "Could not regenerate the link",
         message: error instanceof Error ? error.message : "Please try again.",
       });
     } finally {
-      setSavingShare(false);
+      setHubBusy(null);
     }
-  }, [isPublic, persist, savingShare, shareSlug, toast]);
+  }, [hubBusy, toast]);
 
-  const handleUnshare = useCallback(async () => {
-    if (!projectId || savingShare) return;
-    setSavingShare(true);
+  /** Share Hub "Revoke link" — private + slug wiped, irreversible. */
+  const handleHubRevoke = useCallback(async () => {
+    const id = latestRef.current.projectId;
+    if (!id || hubBusy) return;
+    setHubBusy("revoke");
     try {
-      await toggleProjectPublic(projectId, false);
+      await revokeShareLink(id);
       setIsPublic(false);
+      setShareSlug(null);
       toast.show({
         type: "info",
-        title: "Project is private",
-        message: "The share link no longer works.",
+        title: "Share link revoked",
+        message: "The project is private and the old link can never work again.",
       });
     } catch (error) {
       toast.show({
         type: "error",
-        title: "Could not update sharing",
+        title: "Could not revoke the link",
         message: error instanceof Error ? error.message : "Please try again.",
       });
     } finally {
-      setSavingShare(false);
+      setHubBusy(null);
     }
-  }, [projectId, savingShare, toast]);
+  }, [hubBusy, toast]);
 
   /* --------------------------------- github ------------------------------- */
 
@@ -1439,46 +1540,87 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 />
                 Connect GitHub
               </button>
-              {isPublic && (
-                <button
-                  type="button"
-                  onClick={() => void handleUnshare()}
-                  disabled={savingShare}
-                  title="Make private (revokes the share link)"
-                  aria-label="Make private"
-                  className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200 disabled:opacity-50"
-                >
-                  {savingShare ? (
-                    <LoaderIcon className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <LockIcon className="h-3 w-3" />
-                  )}
-                  Make private
-                </button>
-              )}
               <button
                 type="button"
-                onClick={() => void handleShare()}
-                disabled={savingShare}
-                title={isPublic ? "Copy public link" : "Share — make public & copy link"}
-                aria-label={isPublic ? "Copy public link" : "Share project"}
+                onClick={() => void openShareHub()}
+                disabled={hubBusy !== null}
+                title="Open the Share Hub — link, privacy, preview & socials"
+                aria-label="Open share hub"
                 className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
-                {savingShare ? (
+                {hubBusy === "opening" ? (
                   <LoaderIcon className="h-3 w-3 animate-spin" />
                 ) : isPublic ? (
                   <GlobeIcon className="h-3 w-3" />
                 ) : (
                   <ShareIcon className="h-3 w-3" />
                 )}
-                {isPublic ? "Copy link" : "Share"}
+                Share
               </button>
             </>
           )}
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1">
+        {/* Activity bar — VS Code's far-left icon strip. Explorer toggles
+            the file tree; the rest jump to terminal / GitHub / Share Hub. */}
+        <nav
+          aria-label="Activity bar"
+          className="flex w-12 flex-shrink-0 flex-col items-center gap-0.5 border-r border-white/[0.06] bg-[#080b14] py-2"
+        >
+          <ActivityButton
+            active={sidebarOpen}
+            onClick={() => setSidebarOpen((open) => !open)}
+            title="Explorer — toggle the file tree"
+            label="Toggle explorer sidebar"
+          >
+            <FolderIcon className="h-5 w-5" />
+          </ActivityButton>
+          {!readOnly && (
+            <>
+              <ActivityButton
+                active={terminalOpen}
+                onClick={() => setTerminalOpen((open) => !open)}
+                title="Terminal — toggle the drawer (Ctrl + `)"
+                label="Toggle terminal"
+              >
+                <TerminalIcon className="h-5 w-5" />
+              </ActivityButton>
+              <ActivityButton
+                active={githubModalOpen}
+                onClick={openGitHubModal}
+                title="Source control — connect GitHub / import a repo"
+                label="Connect GitHub"
+              >
+                <GithubIcon className="h-[18px] w-[18px]" />
+              </ActivityButton>
+              <ActivityButton
+                active={shareHubOpen}
+                onClick={() => void openShareHub()}
+                title="Share Hub — link, privacy, preview & socials"
+                label="Open share hub"
+              >
+                <ShareIcon className="h-5 w-5" />
+              </ActivityButton>
+            </>
+          )}
+          <div className="mt-auto flex flex-col items-center gap-2 pb-1">
+            {isPublic && (
+              <span title="Public — link sharing on">
+                <GlobeIcon className="h-3.5 w-3.5 text-cyan-400" />
+              </span>
+            )}
+            <span
+              title={userEmail ?? (readOnly ? "Public share view" : "Signed in")}
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-[10px] font-semibold text-white"
+            >
+              {(userEmail?.[0] ?? "D").toUpperCase()}
+            </span>
+          </div>
+        </nav>
+
+        <div className="flex min-h-0 flex-1 flex-col">
         {/* Split: editor body gets 70% (flex-7) when the terminal is open,
             otherwise it fills the whole remaining column. */}
         <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
@@ -1696,11 +1838,17 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                   onClick={() => handleSelectFile(file.id)}
                   className={`flex flex-shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 font-mono text-[11px] transition-colors ${
                     isActive
-                      ? "bg-cyan-500/10 text-cyan-300"
+                      ? "bg-cyan-500/10 text-cyan-300 shadow-[inset_0_2px_0_0_#22d3ee]"
                       : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
                   }`}
                 >
                   {file.name}
+                  {isActive && !readOnly && (saveState === "dirty" || saveState === "saving") && (
+                    <span
+                      title="Unsaved changes"
+                      className="h-1.5 w-1.5 rounded-full bg-amber-400"
+                    />
+                  )}
                 </button>
               );
             })}
@@ -1767,7 +1915,71 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             className="flex-[3] min-h-0"
           />
         )}
+        </div>
       </div>
+
+      {/* Status bar — VS Code's bottom info strip. Turns red while a save
+          has genuinely failed so the failure is visible at a glance. */}
+      <footer
+        className={`flex h-6 flex-shrink-0 items-center gap-4 px-3 text-[11px] font-medium ${
+          saveState === "error" && !readOnly
+            ? "bg-red-600 text-white"
+            : "bg-cyan-500 text-[#06202a]"
+        }`}
+      >
+        <span className="flex items-center gap-1">
+          {readOnly ? (
+            <>
+              <GlobeIcon className="h-3 w-3" />
+              Read-only
+            </>
+          ) : isPublic ? (
+            <>
+              <GlobeIcon className="h-3 w-3" />
+              Public
+            </>
+          ) : (
+            <>
+              <LockIcon className="h-3 w-3" />
+              Private
+            </>
+          )}
+        </span>
+        <span className="flex items-center gap-1">
+          {!readOnly && saveState === "saving" ? (
+            <>
+              <LoaderIcon className="h-3 w-3 animate-spin" />
+              Saving…
+            </>
+          ) : !readOnly && saveState === "error" ? (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-white" />
+              Save failed — ⌘S to retry
+            </>
+          ) : !readOnly && saveState === "dirty" ? (
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-[#06202a]/70" />
+              {projectId ? "Unsaved changes" : "Draft — ⌘S to save"}
+            </>
+          ) : (
+            <>
+              <CheckIcon className="h-3 w-3" />
+              {lastSavedAt
+                ? `Saved ${lastSavedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                : "D-Code"}
+            </>
+          )}
+        </span>
+        <span className="hidden sm:inline">
+          {files.length} {files.length === 1 ? "file" : "files"}
+        </span>
+        <span className="ml-auto flex items-center gap-4">
+          {activeFile && <span className="font-mono">{activeFile.language}</span>}
+          <span className="hidden sm:inline">UTF-8</span>
+          {!readOnly && <span className="hidden md:inline">Ctrl+` Terminal</span>}
+          <span className="font-semibold">D-Code</span>
+        </span>
+      </footer>
 
       {/* GitHub connect / import modal */}
       {githubModalOpen && (
@@ -1926,6 +2138,22 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             </div>
           </div>
         </>
+      )}
+
+      {/* Share Hub — owner-only (never mounted in readOnly mode). */}
+      {shareHubOpen && !readOnly && (
+        <ShareHubModal
+          title={title}
+          description={project?.description ?? null}
+          isPublic={isPublic}
+          shareSlug={shareSlug}
+          shareUrl={shareUrl}
+          busy={hubBusy === "opening" ? null : hubBusy}
+          onTogglePublic={(next) => void handleHubTogglePublic(next)}
+          onRegenerate={() => void handleHubRegenerate()}
+          onRevoke={() => void handleHubRevoke()}
+          onClose={() => setShareHubOpen(false)}
+        />
       )}
     </div>
   );
