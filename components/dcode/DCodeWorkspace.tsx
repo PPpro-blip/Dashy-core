@@ -53,6 +53,7 @@ import {
   readBlobAsDataUrl,
   readBlobAsText,
 } from "@/lib/dcode-binary";
+import { copyText } from "@/lib/clipboard";
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import {
   MonacoEditor,
@@ -1379,17 +1380,24 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           window.location.origin,
           updated.shareSlug
         );
-        await navigator.clipboard.writeText(url);
+        // copyText() has a textarea fallback — a clipboard permission denial
+        // must never fail a share that ALREADY SUCCEEDED in the database.
+        const copied = await copyText(url);
         toast.show({
           type: "success",
-          title: "Link copied to clipboard!",
-          message: "Anyone with the link can view this project.",
+          title: copied ? "Link copied to clipboard!" : "Project is public 🎉",
+          message: copied
+            ? "Anyone with the link can view this project."
+            : "Couldn't auto-copy — the Share Hub has the link (tap Share again to open it).",
         });
       } else if (shareSlug) {
-        await navigator.clipboard.writeText(
+        const copied = await copyText(
           buildShortShareUrl(window.location.origin, shareSlug)
         );
-        toast.show({ type: "success", title: "Link copied to clipboard!" });
+        toast.show({
+          type: "success",
+          title: copied ? "Link copied to clipboard!" : "Share link ready",
+        });
       }
     } catch (error) {
       toast.show({

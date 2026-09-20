@@ -29,7 +29,7 @@ export async function GET(request: NextRequest): Promise<Response> {
 
   try {
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(35000),
+      signal: AbortSignal.timeout(30_000),
       redirect: "follow",
       headers: {
         Accept: "image/jpeg, image/png, image/webp, image/*, */*",
@@ -49,8 +49,11 @@ export async function GET(request: NextRequest): Promise<Response> {
     const contentType = response.headers.get("content-type") || "image/jpeg";
 
     const headers: Record<string, string> = {
+      // Image bytes for a deterministic (seeded) generation URL are
+      // immutable — cache for a year at the edge AND in the browser so
+      // Media Library tiles never re-hit the provider.
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=86400",
+      "Cache-Control": "public, max-age=31536000, immutable",
     };
     const contentLength = response.headers.get("content-length");
     if (contentLength) {

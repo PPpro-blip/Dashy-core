@@ -105,6 +105,16 @@ function alternateSeed(): string {
   return `${Date.now() % 1_000_000_000}${Math.floor(Math.random() * 1_000_000)}`;
 }
 
+/**
+ * The "Buster" fallback URL for a failed DIRECT image load: the same-origin
+ * proxy (server-side fetch — no CORS, no hotlink blocks, no provider edge
+ * quirks). Single source of truth shared by the Studio tiles, the chat
+ * <IMG> bubble and generateImage()'s fallback loop.
+ */
+export function proxyUrlFor(directUrl: string): string {
+  return `/api/img-proxy?url=${encodeURIComponent(directUrl)}`;
+}
+
 function resolveSeed(seed?: string | number): string {
   return seed === undefined || seed === "" ? freshSeed() : String(seed);
 }
@@ -382,7 +392,7 @@ export async function generateImage(
     for (let i = 0; i < attempts.length; i++) {
       if (signal.aborted) throw abortError("Generation was aborted.");
       const attempt = attempts[i];
-      const proxyUrl = `/api/img-proxy?url=${encodeURIComponent(attempt.url)}`;
+      const proxyUrl = proxyUrlFor(attempt.url);
       attempted.push(proxyUrl);
       if (process.env.NODE_ENV !== "production") {
         console.info(`[img-engine] proxy attempt ${i + 1}/${attempts.length}: ${proxyUrl}`);

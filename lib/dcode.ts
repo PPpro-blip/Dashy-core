@@ -493,12 +493,22 @@ export async function getProjectByShareSlug(
  * `22P02 invalid input syntax for type uuid`, which used to throw here and
  * mask the whole slug fallback. Non-uuid keys therefore skip the id query
  * entirely and resolve via share_slug.
+ *
+ * RECOVERY LANE: when the browser/RLS read returns nothing — most commonly
+ * because the live database is missing the anonymous
+ * `dcode_projects_select_public` policy — the resolver retries through the
+ * server-side /api/share/[key] route (anon first, then a service-role read
+ * hard-filtered to is_public = true). A published link therefore opens for
+ * visitors regardless of the database's policy state, while private rows
+ * stay unreachable for everyone but their owner.
  */
 export async function getPublicProject(
   ref: string
 ): Promise<DCodeProject | null> {
   const key = ref.trim();
   if (!key) return null;
+
+  let firstError: Error | null = null;
   if (isUuid(key)) {
     const supabase = createClient();
     const { data, error } = await supabase
@@ -506,10 +516,35 @@ export async function getPublicProject(
       .select("*")
       .eq("id", key)
       .maybeSingle();
-    if (error) throw classError(error);
     if (data) return rowToProject(data as DCodeProjectRow);
+    if (error) firstError = classError(error);
   }
-  return getProjectByShareSlug(key);
+
+  try {
+    const bySlug = await getProjectByShareSlug(key);
+    if (bySlug) return bySlug;
+  } catch (error) {
+    firstError = error instanceof Error ? error : firstError;
+  }
+
+  // Server-side recovery lane (see /api/share/[key]/route.ts).
+  try {
+    const response = await fetch(
+      `/api/share/${encodeURIComponent(key)}`,
+      { cache: "no-store" }
+    );
+    if (response.ok) {
+      const row = (await response.json()) as DCodeProjectRow;
+      if (row && row.id) return rowToProject(row);
+    }
+    // A definitive 404 (private/deleted) — keep the truthful empty state.
+    if (response.status === 404 && !firstError) return null;
+  } catch {
+    // Network hiccup — fall through to the original error/empty behavior.
+  }
+
+  if (firstError) throw firstError;
+  return null;
 }
 
 /** Creates a project for the signed-in user and returns the stored row. */

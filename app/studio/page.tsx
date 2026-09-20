@@ -24,6 +24,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { proxyUrlFor } from "@/lib/img-engine";
+import { copyText } from "@/lib/clipboard";
 import {
   SparklesIcon,
   RefreshIcon,
@@ -49,8 +51,9 @@ export interface Tile {
   viaProxy?: boolean;
 }
 
-/** Hard 15-second ceiling per Turbo generation. */
-const STUDIO_TIMEOUT_MS = 15_000;
+/** Hard 30-second ceiling per Turbo generation (matches the proxy's
+ * 30s upstream timeout — Pollinations cold starts often exceed 15s). */
+const STUDIO_TIMEOUT_MS = 30_000;
 
 /** localStorage-backed Media Library (survives reloads). */
 const LIBRARY_KEY = "dashy.media.library";
@@ -86,11 +89,6 @@ function buildDirectUrl(
   return `https://image.pollinations.ai/prompt/${encodeURIComponent(
     prompt
   )}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=turbo`;
-}
-
-/** Same-origin fast proxy fallback for a direct URL that errored. */
-function buildProxyUrl(directUrl: string): string {
-  return `/api/img-proxy?url=${encodeURIComponent(directUrl)}`;
 }
 
 /**
@@ -235,7 +233,7 @@ export default function StudioPage() {
       const id = crypto.randomUUID();
       const seed = Date.now();
       const directUrl = buildDirectUrl(text, seed, width, height);
-      const proxyUrl = buildProxyUrl(directUrl);
+      const proxyUrl = proxyUrlFor(directUrl);
 
       const newTile: Tile = {
         id,
@@ -368,9 +366,13 @@ export default function StudioPage() {
   };
 
   const copyPrompt = (id: string, text: string) => {
-    void navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+    // copyText() has a textarea fallback — a denied clipboard permission can
+    // never throw an unhandled rejection here.
+    void copyText(text).then((ok) => {
+      if (!ok) return;
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
   };
 
   const downloadImage = (url: string, promptText: string) => {
@@ -415,7 +417,7 @@ export default function StudioPage() {
             </span>
             <div className="flex flex-col">
               <span className="text-xs font-bold text-cyan-100">Turbo Engine</span>
-              <span className="text-[11px] text-cyan-300/70">Pollinations Turbo · 15s</span>
+              <span className="text-[11px] text-cyan-300/70">Pollinations Turbo · 30s</span>
             </div>
           </div>
         </header>
@@ -617,7 +619,7 @@ export default function StudioPage() {
                 </div>
                 <h3 className="text-lg font-semibold text-zinc-300">No images generated yet</h3>
                 <p className="mt-1.5 max-w-md text-xs leading-relaxed text-zinc-500">
-                  Type a prompt above and press Generate. Turbo images load natively in your browser with a 15-second safety window, and every finished asset is saved to your media library.
+                  Type a prompt above and press Generate. Turbo images load natively in your browser with a 30-second safety window, and every finished asset is saved to your media library.
                 </p>
               </div>
             ) : (
@@ -688,7 +690,7 @@ export default function StudioPage() {
                               Creating your image…
                             </p>
                             <p className="text-[11px] text-zinc-500">
-                              Turbo load · proxy fallback · up to 15s
+                              Turbo load · proxy fallback · up to 30s
                             </p>
                           </div>
                         </div>

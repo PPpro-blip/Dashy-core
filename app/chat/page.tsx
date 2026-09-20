@@ -42,6 +42,7 @@ import {
 } from "@/lib/conversations";
 import { getModelById } from "@/lib/models";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
+import { proxyUrlFor } from "@/lib/img-engine";
 import { AttachmentButton } from "@/components/AttachmentButton";
 import ImgStudio from "@/components/img-engine/ImgStudio";
 import { useToast } from "@/components/Toast";
@@ -94,6 +95,8 @@ const ACTIVE_CONVERSATION_KEY = "dashycore:active-conversation";
 
 /** HARD lifecycle rule: an <IMG> generation may never spin forever. */
 const IMG_LOAD_TIMEOUT_MS = 60_000;
+/** Proxy-lane window — the route itself enforces a 30s upstream timeout. */
+const PROXY_LANE_TIMEOUT_MS = 35_000;
 
 /**
  * Zero-cost <IMG> engine URL (pollinations.ai). The seed is regenerated on
@@ -111,9 +114,10 @@ function uniqueImageSeed(): string {
 }
 
 function buildImageUrl(prompt: string): string {
+  // Mission-canonical Turbo URL: raw image bytes, no logo, fresh seed.
   return `${POLLINATIONS_URL_BASE}${encodeURIComponent(
     prompt
-  )}?width=1024&height=1024&nologo=true&seed=${uniqueImageSeed()}`;
+  )}?width=1024&height=1024&nologo=true&model=turbo&seed=${uniqueImageSeed()}`;
 }
 
 /**
@@ -1117,10 +1121,13 @@ function MessageRow({
 
 /**
  * Renders ONE Pollinations generation with real load/error states and a hard
- * 60s lifecycle:
+ * lifecycle:
  *  - while the URL loads → spinner overlay ("Rendering image…")
  *  - on load            → loading state is released, spinner hidden
- *  - on error / timeout → "Image failed, tap retry" + Retry (parent rebuilds
+ *  - on error           → THE BUSTER: src is rewritten to the same-origin
+ *                         /api/img-proxy lane (server-side fetch — no CORS,
+ *                         no hotlink blocks) and the load is retried there
+ *  - on second failure  → "Image failed, tap retry" + Retry (parent rebuilds
  *                         the URL with a FRESH seed — a brand-new generation)
  *
  * There is NO global image lock. Each bubble owns its own timer, so one stuck
@@ -1131,6 +1138,11 @@ function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void })
   const statusRef = useRef<"loading" | "loaded" | "error">("loading");
   const imgRef = useRef<HTMLImageElement | null>(null);
   const timerRef = useRef<number | null>(null);
+  // The "Buster": once the DIRECT provider URL errors, flip to the
+  // same-origin proxy lane before ever showing a failure.
+  const [busted, setBusted] = useState(false);
+  const bustedRef = useRef(false);
+  const lastUrlRef = useRef(url);
 
   const clearTimer = () => {
     if (timerRef.current !== null) {
@@ -1149,7 +1161,16 @@ function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void })
 
   // A retry swaps the URL prop — reset to loading for the new seed, arm a 60s
   // timeout, and release it as soon as the element loads/errors/unmounts.
+  // A buster flip (direct → proxy) re-runs this effect for the new src with a
+  // shorter 35s window (the proxy route itself enforces a 30s server timeout).
   useEffect(() => {
+    // A FRESH seed from the parent means a brand-new generation: clear any
+    // bust from the previous attempt so the new URL starts direct again.
+    if (lastUrlRef.current !== url) {
+      lastUrlRef.current = url;
+      bustedRef.current = false;
+      if (busted) setBusted(false);
+    }
     applyStatus("loading");
     const img = imgRef.current;
     if (img && img.complete) {
@@ -1162,16 +1183,28 @@ function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void })
       if (statusRef.current === "loading") {
         applyStatus("error");
       }
-    }, IMG_LOAD_TIMEOUT_MS);
+    }, busted ? PROXY_LANE_TIMEOUT_MS : IMG_LOAD_TIMEOUT_MS);
     timerRef.current = timer;
     return () => {
       clearTimer();
     };
-    // IMG_LOAD_TIMEOUT_MS is a module constant; url is the lifecycle key.
-  }, [url]);
+    // IMG_LOAD_TIMEOUT_MS is a module constant; url + busted are the lifecycle keys.
+  }, [url, busted]);
 
   const handleLoad = () => applyStatus("loaded");
-  const handleError = () => applyStatus("error");
+  const handleError = () => {
+    if (!bustedRef.current) {
+      // First failure: silently rewrite src to the proxy lane and keep the
+      // spinner — the visitor only ever sees a failure if BOTH lanes fail.
+      bustedRef.current = true;
+      setBusted(true);
+      return;
+    }
+    applyStatus("error");
+  };
+
+  // The final <img src>: direct Pollinations URL first, proxy lane on error.
+  const imgSrc = busted ? proxyUrlFor(url) : url;
 
   return (
     <div className="relative overflow-hidden rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] p-1.5">
@@ -1199,7 +1232,7 @@ function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void })
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             ref={imgRef}
-            src={url}
+            src={imgSrc}
             alt={promptFromImageUrl(url) || "<IMG> generated"}
             onLoad={handleLoad}
             onError={handleError}
@@ -1212,8 +1245,9 @@ function ImgEngineBubble({ url, onRetry }: { url: string; onRetry: () => void })
                 Rendering image with the &lt;IMG&gt; engine…
               </p>
               <p className="text-[10px] text-zinc-600">
-                The free engine can take up to a minute — the image appears
-                here when it&apos;s ready.
+                {busted
+                  ? "Direct lane busy — finishing through the Dashy proxy…"
+                  : "The free engine can take up to a minute — the image appears here when it's ready."}
               </p>
             </div>
           )}

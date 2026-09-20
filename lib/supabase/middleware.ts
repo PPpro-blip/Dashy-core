@@ -18,6 +18,7 @@ const PROTECTED_ROUTES = [
   "/chat",
   "/settings",
   "/projects",
+  "/studio",
   "/d-code",
   "/knowledge",
   "/agents",
