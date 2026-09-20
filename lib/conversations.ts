@@ -29,6 +29,15 @@ export interface HistoryMessage {
    * so the bubble can show an engine badge and render cleanly.
    */
   engine?: "img";
+  /** Structured image content marker (used by the <IMG> engine). */
+  contentType?: "image";
+  /** Original prompt for the <IMG> engine. */
+  prompt?: string;
+  /** Pollinations image URL (kept separately for structured persistence). */
+  imageUrl?: string;
+  /** Render lifecycle state for <IMG> bubbles. */
+  imageStatus?: "loading" | "ready" | "error";
+  imageError?: string;
 }
 
 export interface Conversation {
@@ -111,6 +120,30 @@ export function newConversationId(): string {
   return random;
 }
 
+/**
+ * Matches the persisted Pollinations markdown line used by the <IMG> engine.
+ * Shared by the chat UI and the cloud reload path so the badge + rich image
+ * bubble survive a reload even though `messages` has no engine/image column.
+ */
+const POLLINATIONS_IMAGE_CONTENT_RE =
+  /^!\[[^\]]*\]\((https:\/\/image\.pollinations\.ai\/prompt\/[^\s)]+)\)$/;
+
+/** Returns the Pollinations URL when assistant content is ONE IMG markdown line. */
+export function imgMessageUrlFromContent(content: string): string | null {
+  const match = POLLINATIONS_IMAGE_CONTENT_RE.exec(content.trim());
+  return match ? match[1] : null;
+}
+
+/** Recovers the prompt from a Pollinations URL (for retry with a fresh seed). */
+export function promptFromImageUrl(url: string): string {
+  const after = url.split("/prompt/")[1] ?? "";
+  try {
+    return decodeURIComponent(after.split("?")[0] ?? "");
+  } catch {
+    return "";
+  }
+}
+
 /* ========================================================================== */
 /* Supabase backend (cloud chats)                                              */
 /* ========================================================================== */
@@ -163,12 +196,25 @@ function rowToConversation(row: ConversationRow, messages: HistoryMessage[] = []
 }
 
 function rowToMessage(row: MessageRow): HistoryMessage {
+  const isImage = row.role === "assistant";
+  const imageUrl = isImage ? imgMessageUrlFromContent(row.content) : null;
   return {
     id: row.id,
     role: row.role === "assistant" ? "assistant" : "user",
     content: row.content,
     timestamp: row.created_at ? Date.parse(row.created_at) : 0,
     model: row.model ?? undefined,
+    ...(imageUrl
+      ? {
+          engine: "img" as const,
+          contentType: "image" as const,
+          prompt: promptFromImageUrl(imageUrl),
+          imageUrl,
+          // Persisted content already carries the URL; mark it ready so a
+          // reload renders the image immediately instead of an empty loader.
+          imageStatus: "ready" as const,
+        }
+      : {}),
   };
 }
 

@@ -18,15 +18,15 @@ const PROTECTED_ROUTES = [
   "/chat",
   "/settings",
   "/projects",
+  "/studio",
   "/d-code",
   "/knowledge",
   "/agents",
   "/voice",
-  "/studio",
 ];
 
 /** Prefixes served without a session (exempt from the redirect above). */
-const PUBLIC_PREFIXES = ["/d-code/share/"];
+const PUBLIC_PREFIXES = ["/d-code/share/", "/s/"];
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });

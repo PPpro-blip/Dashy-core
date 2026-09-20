@@ -1,115 +1,81 @@
 import type { Metadata } from "next";
-import { createClient } from "@supabase/supabase-js";
-import { ShareViewer } from "./ShareViewer";
+import { headers } from "next/headers";
+import { SharePageView } from "@/components/share/SharePageView";
 
 /**
- * DashyCore — /d-code/share/[share_slug] (server wrapper).
+ * DashyCore v7 — /d-code/share/[share_slug] (public read-only viewer).
  *
- * Renders per-slug Open Graph / Twitter Card tags so links shared from the
- * Share Hub unfurl with the real project title + description on X,
- * WhatsApp, and LinkedIn. Crawlers never run JS, so these tags MUST come
- * from the server — the interactive viewer below stays client-side.
+ * Server entry that:
+ *   1. Renders <SharePageView> (client) which fetches the project by slug.
+ *   2. Exports generateMetadata so Open Graph tags drive link previews
+ *      (especially Facebook, whose sharer only reads a URL).
  *
- * The metadata fetch uses the anon key: RLS only reveals the row when
- * is_public = true, so private/revoked slugs safely fall back to the
- * generic "private link" tags. Always dynamic — share state can flip at
- * any moment via the Share Hub.
+ * The owner's composer builds a public share URL carrying the draft as query
+ * params (`title`, `desc`, `img`, `v`) — see lib/share-intents#buildOgShareUrl.
+ * When a crawler (or anyone) visits that URL, this metadata injects those
+ * values into the OG tags. The `img` param points at a project image served
+ * by the /og-image route; it falls back to the DashyCore logo.
  */
 
-export const dynamic = "force-dynamic";
-
-interface SharedMeta {
-  title: string;
-  description: string | null;
+interface SharePageProps {
+  params: Promise<{ share_slug: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
-async function fetchSharedMeta(slug: string): Promise<SharedMeta | null> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey || !slug) return null;
-  try {
-    const supabase = createClient(url, anonKey);
-    const { data, error } = await supabase
-      .from("dcode_projects")
-      .select("title, description")
-      .eq("share_slug", slug)
-      .eq("is_public", true)
-      .maybeSingle();
-    if (error || !data) return null;
-    return {
-      title: (data.title as string) || "Untitled project",
-      description: (data.description as string | null) ?? null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function appOrigin(): string | undefined {
-  const raw = process.env.NEXT_PUBLIC_APP_URL;
-  if (!raw) return undefined;
-  return raw.replace(/\/$/, "");
+function first(params: Record<string, string | string[] | undefined>, key: string): string {
+  const value = params[key];
+  if (Array.isArray(value)) return value[0] ?? "";
+  return value ?? "";
 }
 
 export async function generateMetadata({
   params,
-}: {
-  params: Promise<{ share_slug: string }>;
-}): Promise<Metadata> {
+  searchParams,
+}: SharePageProps): Promise<Metadata> {
   const { share_slug } = await params;
-  const meta = await fetchSharedMeta(share_slug);
-  const origin = appOrigin();
-  const canonical = origin ? `${origin}/d-code/share/${share_slug}` : undefined;
+  const sp = await searchParams;
 
-  if (!meta) {
-    // Private / revoked / unknown slug: still return unfurl tags so the
-    // link preview degrades gracefully instead of rendering blank.
-    const fallback = "This link is private or no longer exists.";
-    return {
-      title: "Shared D-Code project",
-      description: fallback,
-      openGraph: {
-        title: "Shared D-Code project",
-        description: fallback,
-        type: "article",
-        siteName: "DashyCore",
-      },
-      twitter: {
-        card: "summary",
-        title: "Shared D-Code project",
-        description: fallback,
-      },
-      robots: { index: false, follow: false },
-    };
-  }
+  const title = first(sp, "title");
+  const desc = first(sp, "desc");
+  const img = first(sp, "img");
 
-  const description =
-    meta.description?.trim() ||
-    "A D-Code project shared from DashyCore — open the link to browse the code.";
+  const ogTitle = title.trim() || "A shared D-Code project";
+  const ogDesc =
+    desc.trim() || "Built with DashyCore D-Code ⚡ — view, copy and remix it.";
+
+  // Build an absolute origin at request time (dev = localhost, prod = real).
+  const h = await headers();
+  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+  const proto = h.get("x-forwarded-proto") ?? "https";
+  const origin = `${proto}://${host}`;
+  const pageUrl = `${origin}/d-code/share/${share_slug}`;
+
+  const ogImage = img
+    ? `${origin}/d-code/share/${encodeURIComponent(
+        share_slug
+      )}/og-image?file=${encodeURIComponent(img)}`
+    : `${origin}/icon-512.png`;
+
   return {
-    title: `${meta.title} · D-Code shared project`,
-    description,
+    title: ogTitle,
+    description: ogDesc,
     openGraph: {
-      title: meta.title,
-      description,
-      type: "article",
+      title: ogTitle,
+      description: ogDesc,
+      url: pageUrl,
+      type: "website",
       siteName: "DashyCore",
-      ...(canonical ? { url: canonical } : {}),
+      images: [{ url: ogImage, width: 512, height: 512, alt: ogTitle }],
     },
     twitter: {
-      card: "summary",
-      title: meta.title,
-      description,
+      card: "summary_large_image",
+      title: ogTitle,
+      description: ogDesc,
+      images: [ogImage],
     },
-    ...(canonical ? { alternates: { canonical } } : {}),
   };
 }
 
-export default async function DCodeSharePage({
-  params,
-}: {
-  params: Promise<{ share_slug: string }>;
-}) {
-  const { share_slug } = await params;
-  return <ShareViewer slug={share_slug} />;
+export default function DCodeSharePage() {
+  return <SharePageView />;
 }

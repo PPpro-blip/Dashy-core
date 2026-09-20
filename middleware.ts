@@ -9,13 +9,14 @@ export const config = {
   matcher: [
     /*
      * Match all request paths except:
-     * - api/* (route handlers like /api/img-proxy must never queue behind
-     *   a Supabase session refresh — the image proxy streams bytes, not auth)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico / icons (static assets)
+     * - api/img-proxy (the <IMG> engine's fallback lane — pure byte
+     *   streaming, cookieless, so it never pays a Supabase session
+     *   roundtrip and can never be disturbed by an auth hiccup)
      * - public files with extensions (images, svg, png, jpg, etc.)
      */
-    "/((?!api|_next/static|_next/image|favicon.ico|icon-512.png|dcode-icon-512.png|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|icon-512.png|dcode-icon-512.png|api/img-proxy|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };
