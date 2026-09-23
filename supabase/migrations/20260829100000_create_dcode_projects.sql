@@ -5,10 +5,10 @@
 -- project loads in a single round-trip:
 --   [{ id, name, language, content }, ...]
 --
--- Sharing: `share_slug` is assigned when the owner opens Share Hub
--- (unique, 12-char url-safe token), even while the project is private.
--- RLS allows owner reads always and anonymous reads only when is_public
--- = true. New links use /s/<share_slug>; older /d-code/share links redirect.
+-- Sharing: `share_slug` is written when the owner makes a project
+-- public (unique, 12-char url-safe token). Public read access is
+-- granted by RLS only when is_public = true, so anonymous visitors
+-- can open /d-code/share/<share_slug> but see nothing else.
 -- =====================================================================
 
 create table if not exists public.dcode_projects (

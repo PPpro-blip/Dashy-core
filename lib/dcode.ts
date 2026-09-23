@@ -78,6 +78,13 @@ export interface DCodeProject {
   createdAt: string;
   updatedAt: string;
   /**
+   * Source Control repo binding (see migration 20260901000000). All three
+   * are null until the user binds this project to a GitHub repository.
+   */
+  githubRepoFullName: string | null;
+  githubDefaultBranch: string | null;
+  githubLastSyncedSha: string | null;
+  /**
    * Names of stored files that were dropped on read because they are
    * archives/executables/lockfiles or raw (non-encoded) binaries. Populated
    * so the UI can tell the user why a file they imported earlier is no
@@ -93,6 +100,13 @@ export interface DCodeProjectDraft {
   files: DCodeFile[];
 }
 
+/** GitHub repo binding written to the project row (nullable columns). */
+export interface DCodeGithubBind {
+  fullName?: string | null;
+  defaultBranch?: string | null;
+  lastSyncedSha?: string | null;
+}
+
 /** Patch accepted by updateProject — only provided fields change. */
 export interface DCodeProjectPatch {
   title?: string;
@@ -100,9 +114,11 @@ export interface DCodeProjectPatch {
   language?: string;
   files?: DCodeFile[];
   isPublic?: boolean;
+  /** Source Control binding — only provided sub-fields change. */
+  github?: DCodeGithubBind;
 }
 
-export interface DCodeProjectRow {
+interface DCodeProjectRow {
   id: string;
   user_id: string;
   title: string | null;
@@ -111,6 +127,9 @@ export interface DCodeProjectRow {
   files: unknown;
   is_public: boolean;
   share_slug: string | null;
+  github_repo_full_name: string | null;
+  github_default_branch: string | null;
+  github_last_synced_sha: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -357,7 +376,7 @@ function coerceFiles(raw: unknown): { files: DCodeFile[]; skipped: string[] } {
   return { files, skipped };
 }
 
-export function rowToProject(row: DCodeProjectRow): DCodeProject {
+function rowToProject(row: DCodeProjectRow): DCodeProject {
   const { files, skipped } = coerceFiles(row.files);
   return {
     id: row.id,
@@ -368,6 +387,9 @@ export function rowToProject(row: DCodeProjectRow): DCodeProject {
     files,
     isPublic: row.is_public,
     shareSlug: row.share_slug ?? null,
+    githubRepoFullName: row.github_repo_full_name ?? null,
+    githubDefaultBranch: row.github_default_branch ?? null,
+    githubLastSyncedSha: row.github_last_synced_sha ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(skipped.length > 0 ? { skippedFiles: skipped } : {}),
@@ -411,10 +433,10 @@ function safeText(value: string | null | undefined, max = 200): string | null {
 /** Lists only the signed-in user's projects, most recently touched first. */
 export async function listProjects(): Promise<DCodeProject[]> {
   const supabase = createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return [];
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError || !user) throw classError(userError ?? { message: "Sign in to list projects." });
+  // RLS also permits SELECT on *other users' public projects*. Filter by
+  // owner explicitly so public shares never appear in the editor's list.
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
@@ -425,13 +447,11 @@ export async function listProjects(): Promise<DCodeProject[]> {
   return (data as DCodeProjectRow[]).map(rowToProject);
 }
 
-/** Only owners can open the editable route, even if someone else published it. */
+/** Fetches one owned project (use the share viewer for public projects). */
 export async function getProject(id: string): Promise<DCodeProject | null> {
   const supabase = createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError || !user) throw classError(userError ?? { message: "Sign in to open a project." });
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
@@ -442,7 +462,23 @@ export async function getProject(id: string): Promise<DCodeProject | null> {
   return data ? rowToProject(data as DCodeProjectRow) : null;
 }
 
-/** Fetches a public project by its share slug (works for anonymous visitors). */
+/** True for canonical uuid text (8-4-4-4-12 hex). */
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
+
+/**
+ * Fetches a project by its share slug.
+ *
+ * No explicit `is_public` filter: visibility is delegated to RLS. The
+ * `dcode_projects_select_public` policy admits anonymous visitors only for
+ * rows with is_public = true, while the owner policy (auth.uid() = user_id)
+ * admits the owner unconditionally. That is what lets the Share Hub render
+ * for the OWNER of a private project (to manage/copy/preview the link)
+ * while visitors keep seeing nothing.
+ */
 export async function getProjectByShareSlug(
   shareSlug: string
 ): Promise<DCodeProject | null> {
@@ -450,11 +486,73 @@ export async function getProjectByShareSlug(
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
-    .eq("share_slug", shareSlug)
-    .eq("is_public", true)
+    .eq("share_slug", shareSlug.trim().toLowerCase())
     .maybeSingle();
   if (error) throw classError(error);
   return data ? rowToProject(data as DCodeProjectRow) : null;
+}
+
+/**
+ * Resolves the Share Hub reference: EITHER the project's primary uuid id OR
+ * its share slug (the stable /d-code/share/<key> permalink).
+ *
+ * IMPORTANT (bug history): the slug is a 12-char token like `x7pseyikpg8t`
+ * — querying `.eq("id", slug)` makes Postgres fail with
+ * `22P02 invalid input syntax for type uuid`, which used to throw here and
+ * mask the whole slug fallback. Non-uuid keys therefore skip the id query
+ * entirely and resolve via share_slug.
+ *
+ * RECOVERY LANE: when the browser/RLS read returns nothing — most commonly
+ * because the live database is missing the anonymous
+ * `dcode_projects_select_public` policy — the resolver retries through the
+ * server-side /api/share/[key] route (anon first, then a service-role read
+ * hard-filtered to is_public = true). A published link therefore opens for
+ * visitors regardless of the database's policy state, while private rows
+ * stay unreachable for everyone but their owner.
+ */
+export async function getPublicProject(
+  ref: string
+): Promise<DCodeProject | null> {
+  const key = ref.trim();
+  if (!key) return null;
+
+  let firstError: Error | null = null;
+  if (isUuid(key)) {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("dcode_projects")
+      .select("*")
+      .eq("id", key)
+      .maybeSingle();
+    if (data) return rowToProject(data as DCodeProjectRow);
+    if (error) firstError = classError(error);
+  }
+
+  try {
+    const bySlug = await getProjectByShareSlug(key);
+    if (bySlug) return bySlug;
+  } catch (error) {
+    firstError = error instanceof Error ? error : firstError;
+  }
+
+  // Server-side recovery lane (see /api/share/[key]/route.ts).
+  try {
+    const response = await fetch(
+      `/api/share/${encodeURIComponent(key)}`,
+      { cache: "no-store" }
+    );
+    if (response.ok) {
+      const row = (await response.json()) as DCodeProjectRow;
+      if (row && row.id) return rowToProject(row);
+    }
+    // A definitive 404 (private/deleted) — keep the truthful empty state.
+    if (response.status === 404 && !firstError) return null;
+  } catch {
+    // Network hiccup — fall through to the original error/empty behavior.
+  }
+
+  if (firstError) throw firstError;
+  return null;
 }
 
 /** Creates a project for the signed-in user and returns the stored row. */
@@ -515,6 +613,16 @@ export async function updateProject(
   if (patch.language !== undefined) payload.language = patch.language;
   if (patch.files !== undefined) payload.files = safeFilesPayload(patch.files);
   if (patch.isPublic !== undefined) payload.is_public = patch.isPublic;
+  // Source Control binding — nullable columns, only sub-fields provided
+  // are written (a null value is a real "unbind").
+  if (patch.github !== undefined) {
+    if (patch.github.fullName !== undefined)
+      payload.github_repo_full_name = patch.github.fullName;
+    if (patch.github.defaultBranch !== undefined)
+      payload.github_default_branch = patch.github.defaultBranch;
+    if (patch.github.lastSyncedSha !== undefined)
+      payload.github_last_synced_sha = patch.github.lastSyncedSha;
+  }
 
   const { data, error } = await supabase
     .from("dcode_projects")
@@ -527,64 +635,116 @@ export async function updateProject(
 }
 
 /**
- * Gives an owned project a stable link without publishing it. A private link
- * remains owner-only; the same slug starts working for everyone when the
- * owner switches Public Access on. The conditional update prevents two open
- * Share Hubs from replacing each other's link.
+ * Toggles a project between private and public. Going public assigns a
+ * share_slug once (unique; retried on the rare collision) and returns the
+ * updated project — use shareSlug for the /d-code/share/<slug> link.
+ *
+ * The permalink is STABLE across private → public cycles: an existing
+ * share_slug is reused so links the owner already copied keep working after
+ * re-publishing (previously every make-public minted a fresh slug and
+ * silently killed the old URL).
  */
-export async function ensureProjectShareSlug(id: string): Promise<string> {
-  const supabase = createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) throw new Error("Sign in to share this project.");
-
-  const readSlug = async () => {
-    const { data, error } = await supabase
-      .from("dcode_projects")
-      .select("user_id, share_slug")
-      .eq("id", id)
-      .maybeSingle();
-    if (error) throw classError(error);
-    if (!data || data.user_id !== user.id) {
-      throw new Error("Only the owner can share this project.");
-    }
-    return data.share_slug as string | null;
-  };
-
-  const existing = await readSlug();
-  if (existing) return existing;
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const slug = newShareSlug();
-    const { data, error } = await supabase
-      .from("dcode_projects")
-      .update({ share_slug: slug, updated_at: new Date().toISOString() })
-      .eq("id", id)
-      .is("share_slug", null)
-      .select("share_slug")
-      .maybeSingle();
-    if (data?.share_slug) return data.share_slug as string;
-    if (error && !/duplicate key|unique constraint/i.test(error.message)) {
-      throw classError(error);
-    }
-    // A collision needs another random slug; an empty result means another
-    // tab assigned one first, so reuse it instead of invalidating its URL.
-    if (!error) {
-      const assigned = await readSlug();
-      if (assigned) return assigned;
-    }
-  }
-  throw new Error("Could not create a share link — try again.");
-}
-
-/** Public Access controls RLS read permissions, not the link's identity. */
 export async function toggleProjectPublic(
   id: string,
   isPublic: boolean
 ): Promise<DCodeProject> {
-  if (isPublic) await ensureProjectShareSlug(id);
-  return updateProject(id, { isPublic });
+  const supabase = createClient();
+
+  if (!isPublic) {
+    // Going private keeps the slug assigned (just flips the flag) so the
+    // owner's Hub URL and a future re-publish both survive.
+    return updateProject(id, { isPublic: false });
+  }
+
+  // Going public: reuse the row's existing slug when it has ever been
+  // public; mint one only for a first-time public project.
+  const current = await getProject(id);
+  if (!current) {
+    throw new DCodeError(
+      "Project not found — sign in as its owner to change sharing."
+    );
+  }
+  if (current.shareSlug) {
+    // Already public with a live permalink → truthful no-op (avoids an
+    // updated_at write on every Share click).
+    if (current.isPublic) return current;
+    return updateProject(id, { isPublic: true });
+  }
+
+  // First time public: assign a slug. A unique violation on share_slug is
+  // retried with a fresh token.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const slug = newShareSlug();
+    const { data, error } = await supabase
+      .from("dcode_projects")
+      .update({
+        is_public: true,
+        share_slug: slug,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (!error) return rowToProject(data as DCodeProjectRow);
+    const message = error.message ?? "";
+    if (!/duplicate key|unique constraint/i.test(message)) {
+      throw classError(error);
+    }
+    // Slug collision — loop and try a new one.
+  }
+  throw new Error("Could not allocate a share slug — try again.");
+}
+
+/**
+ * Mints a fresh share slug for a project that is ALREADY public. The old
+ * link stops working immediately; the project stays public under the new
+ * slug. Slug collisions are retried (same loop as toggleProjectPublic).
+ */
+export async function regenerateShareSlug(
+  id: string
+): Promise<DCodeProject> {
+  const supabase = createClient();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const slug = newShareSlug();
+    const { data, error } = await supabase
+      .from("dcode_projects")
+      .update({
+        is_public: true,
+        share_slug: slug,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (!error) return rowToProject(data as DCodeProjectRow);
+    const message = error.message ?? "";
+    if (!/duplicate key|unique constraint/i.test(message)) {
+      throw classError(error);
+    }
+    // Slug collision — loop and try a new one.
+  }
+  throw new Error("Could not allocate a share slug — try again.");
+}
+
+/**
+ * Fully revokes a share link: the project goes private AND its slug is
+ * cleared, so the old URL can never work again — even if the project is
+ * re-shared later (which mints a brand-new slug).
+ */
+export async function revokeShareLink(id: string): Promise<DCodeProject> {
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("dcode_projects")
+    .update({
+      is_public: false,
+      share_slug: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+    .select("*")
+    .single();
+  if (error) throw classError(error);
+  return rowToProject(data as DCodeProjectRow);
 }
 
 /** Deletes a project (files live inline, so this is one call). */

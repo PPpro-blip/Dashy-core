@@ -5,15 +5,19 @@
  *
  * - @monaco-editor/react is loaded with ssr:false (Monaco touches `window`
  *   and the loader fetches it from CDN at runtime — never on the server).
- * - Defines the custom "dcode-obsidian" theme: vs-dark base tuned to the
- *   DashyCore obsidian/navy background with cyan accents.
+ * - Defines every Dashy Theme Pack theme (lib/dcode/extensions/themes)
+ *   on mount and applies the persisted selection, defaulting to the
+ *   original "dcode-obsidian" cyan theme.
  * - Keeps the public surface tiny: value / language / onChange / readOnly
- *   plus passthrough options, so the workspace stays declarative.
+ *   plus optional theme + onEditorReady, so the workspace stays
+ *   declarative and extensions can reach the editor instance.
  */
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useRef } from "react";
-import type { Monaco, OnMount, OnValidate } from "@monaco-editor/react";
+import { useCallback } from "react";
+import type { Monaco, OnMount } from "@monaco-editor/react";
+import { defineDashyThemes } from "@/lib/dcode/extensions/themes";
+import { getStoredTheme } from "@/lib/dcode/extensions/storage";
 import { LoaderIcon } from "@/components/icons";
 
 const MonacoReact = dynamic(() => import("@monaco-editor/react"), {
@@ -26,98 +30,78 @@ const MonacoReact = dynamic(() => import("@monaco-editor/react"), {
   ),
 });
 
-/** Obsidian + cyan theme — matches the DashyCore workspace. */
-const DCODE_THEME = "dcode-obsidian";
-
-function defineDcodeTheme(monaco: Monaco): void {
-  monaco.editor.defineTheme(DCODE_THEME, {
-    base: "vs-dark",
-    inherit: true,
-    rules: [
-      { token: "comment", foreground: "5b6478", fontStyle: "italic" },
-      { token: "keyword", foreground: "22d3ee" },
-      { token: "string", foreground: "7dd3a8" },
-      { token: "number", foreground: "c4b5fd" },
-      { token: "type", foreground: "67e8f9" },
-      { token: "typeIdentifier", foreground: "67e8f9" },
-      { token: "function", foreground: "93c5fd" },
-      { token: "variable", foreground: "e2e8f0" },
-      { token: "delimiter", foreground: "77839c" },
-    ],
-    colors: {
-      "editor.background": "#0a0e1a",
-      "editor.foreground": "#e2e8f0",
-      "editorCursor.foreground": "#22d3ee",
-      "editor.lineHighlightBackground": "#111726",
-      "editorLineNumber.foreground": "#3d4657",
-      "editorLineNumber.activeForeground": "#22d3ee",
-      "editor.selectionBackground": "#164e63aa",
-      "editor.inactiveSelectionBackground": "#164e6355",
-      "editorIndentGuide.background1": "#1c2436",
-      "editorIndentGuide.activeBackground1": "#2c304a",
-      "editorWidget.background": "#0d1220",
-      "editorWidget.border": "#1c2436",
-      "editorSuggestWidget.background": "#0d1220",
-      "editorSuggestWidget.selectedBackground": "#164e63",
-      "scrollbarSlider.background": "#22d3ee22",
-      "scrollbarSlider.hoverBackground": "#22d3ee33",
-      "scrollbarSlider.activeBackground": "#22d3ee44",
-      "editorGutter.background": "#0a0e1a",
-      "editorBracketMatch.border": "#22d3ee88",
-      "editorBracketMatch.background": "#22d3ee1a",
-    },
-  });
-}
+export type DCodeMonacoEditor = Parameters<OnMount>[0];
 
 export interface MonacoEditorProps {
   value: string;
   language: string;
   onChange?: (value: string | undefined) => void;
-  /** Monaco's real diagnostics for the active model. */
-  onValidate?: OnValidate;
-  onCursorChange?: (line: number, column: number) => void;
   readOnly?: boolean;
+  /** Monaco theme id (must be a defined Dashy theme). */
+  theme?: string;
+  /** Called once with the live Monaco editor instance + namespace (extensions). */
+  onEditorReady?: (editor: DCodeMonacoEditor, monaco: Monaco) => void;
+  /** Fired whenever the editor's selection changes (selection text). */
+  onSelectionChange?: (selectedText: string) => void;
   /** Extra editor options (merged over the D-Code defaults). */
   options?: Record<string, unknown>;
   className?: string;
+  /** Reports cursor moves (powers the VS Code-style status bar). */
+  onCursorPosition?: (line: number, column: number) => void;
 }
 
 export function MonacoEditor({
   value,
   language,
   onChange,
-  onValidate,
-  onCursorChange,
   readOnly = false,
+  theme,
+  onEditorReady,
+  onSelectionChange,
   options,
   className,
+  onCursorPosition,
 }: MonacoEditorProps) {
-  const cursorListenerRef = useRef<{ dispose: () => void } | null>(null);
-  useEffect(() => () => cursorListenerRef.current?.dispose(), []);
+  const themeId = theme ?? getStoredTheme();
 
   const handleMount = useCallback<OnMount>(
     (editor, monaco) => {
-      defineDcodeTheme(monaco);
-      monaco.editor.setTheme(DCODE_THEME);
-      const position = editor.getPosition();
-      onCursorChange?.(position?.lineNumber ?? 1, position?.column ?? 1);
-      cursorListenerRef.current?.dispose();
-      cursorListenerRef.current = editor.onDidChangeCursorPosition((event) => {
-        onCursorChange?.(event.position.lineNumber, event.position.column);
-      });
+      defineDashyThemes(monaco);
+      monaco.editor.setTheme(themeId);
+      if (onSelectionChange) {
+        editor.onDidChangeCursorSelection(() => {
+          const model = editor.getModel();
+          const selection = editor.getSelection();
+          onSelectionChange(
+            model && selection ? model.getValueInRange(selection) : ""
+          );
+        });
+      }
+      if (onCursorPosition) {
+        const report = () => {
+          const position = editor.getPosition();
+          if (position) {
+            onCursorPosition(position.lineNumber, position.column);
+          }
+        };
+        report();
+        editor.onDidChangeCursorPosition((event) => {
+          onCursorPosition(event.position.lineNumber, event.position.column);
+        });
+      }
+      onEditorReady?.(editor, monaco);
     },
-    [onCursorChange],
+    [onCursorPosition, onEditorReady, onSelectionChange, themeId]
   );
 
   return (
     <div className={`h-full w-full ${className ?? ""}`}>
       <MonacoReact
         height="100%"
-        theme={DCODE_THEME}
+        theme={themeId}
         language={language}
         value={value}
         onChange={onChange}
-        onValidate={onValidate}
         onMount={handleMount}
         options={{
           fontFamily:

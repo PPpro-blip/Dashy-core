@@ -1,7 +1,7 @@
 /*
  * Local integration smoke test for share access, without production secrets.
- * Starts an ephemeral PostgREST/Auth stub and a Next dev process, then checks
- * anonymous, owner, other-user and legacy-link responses over HTTP.
+ * Starts a PostgREST/Auth stub and a Next dev process, then checks public,
+ * private, owner, short-link and public-policy-recovery responses over HTTP.
  * Run with: node scripts/verify-share-access.mjs
  */
 import assert from "node:assert/strict";
@@ -11,13 +11,20 @@ import { once } from "node:events";
 
 const OWNER = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
+const PUBLIC_ID = "33333333-3333-4333-8333-333333333333";
+const PRIVATE_ID = "44444444-4444-4444-8444-444444444444";
 const PUBLIC_SLUG = "abcdefgh2345";
 const PRIVATE_SLUG = "pqrstuvw2345";
+const SERVICE_KEY = "test-service-key";
 const created = "2026-09-23T00:00:00.000Z";
 const projects = new Map([
-  [PUBLIC_SLUG, { title: "Public Example", is_public: true }],
-  [PRIVATE_SLUG, { title: "Owner Only Example", is_public: false }],
+  [PUBLIC_SLUG, { id: PUBLIC_ID, title: "Public Example", is_public: true }],
+  [PRIVATE_SLUG, { id: PRIVATE_ID, title: "Owner Only Example", is_public: false }],
 ]);
+let publicSelectPolicyInstalled = true;
+let serviceReads = 0;
+let unsafeServiceReads = 0;
+
 const user = (id) => ({
   id,
   aud: "authenticated",
@@ -29,28 +36,44 @@ const user = (id) => ({
 });
 
 const backend = createServer((request, response) => {
-  const pathname = new URL(request.url, "http://mock.invalid");
+  const url = new URL(request.url, "http://mock.invalid");
   const token = request.headers.authorization?.replace(/^Bearer /i, "");
   const identity =
     token === "owner-token" ? OWNER : token === "other-token" ? OTHER : null;
+  const isService = token === SERVICE_KEY;
   response.setHeader("Content-Type", "application/json");
 
-  if (pathname.pathname === "/auth/v1/user") {
+  if (url.pathname === "/auth/v1/user") {
     response.statusCode = identity ? 200 : 401;
     response.end(
-      JSON.stringify(
-        identity ? user(identity) : { message: "not authenticated" },
-      ),
+      JSON.stringify(identity ? user(identity) : { message: "not authenticated" }),
     );
     return;
   }
-  if (pathname.pathname === "/rest/v1/dcode_projects") {
-    const slug = pathname.searchParams.get("share_slug")?.replace(/^eq\./, "");
-    const entry = projects.get(slug);
-    const visible = entry && (entry.is_public || identity === OWNER);
+  if (url.pathname === "/rest/v1/dcode_projects") {
+    if (isService) {
+      serviceReads++;
+      // The test stub refuses unfiltered service-role reads. A regression in
+      // either the middleware or the API recovery lane must fail the test.
+      if (url.searchParams.get("is_public") !== "eq.true") {
+        unsafeServiceReads++;
+        response.statusCode = 403;
+        response.end(JSON.stringify({ message: "Unfiltered service read" }));
+        return;
+      }
+    }
+    const slug = url.searchParams.get("share_slug")?.replace(/^eq\./, "");
+    const id = url.searchParams.get("id")?.replace(/^eq\./, "");
+    const entry = slug
+      ? projects.get(slug)
+      : [...projects.values()].find((project) => project.id === id);
+    const visible =
+      entry &&
+      (identity === OWNER ||
+        (entry.is_public && (publicSelectPolicyInstalled || isService)));
     const row = visible
       ? {
-          id: "33333333-3333-4333-8333-333333333333",
+          id: entry.id,
           user_id: OWNER,
           title: entry.title,
           description: "A project worth sharing.",
@@ -64,7 +87,7 @@ const backend = createServer((request, response) => {
             },
           ],
           is_public: entry.is_public,
-          share_slug: slug,
+          share_slug: [...projects.entries()].find(([, project]) => project === entry)[0],
           created_at: created,
           updated_at: created,
         }
@@ -131,6 +154,7 @@ async function main() {
         ...process.env,
         NEXT_PUBLIC_SUPABASE_URL: `http://127.0.0.1:${backendPort}`,
         NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key",
+        SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
         NEXT_TELEMETRY_DISABLED: "1",
       },
       detached: true,
@@ -158,7 +182,7 @@ async function main() {
 
     async function check(
       path,
-      { cookie, status, contains, location, absent } = {},
+      { cookie, status, contains, location, search, absent } = {},
     ) {
       const response = await fetch(base + path, {
         redirect: "manual",
@@ -178,11 +202,11 @@ async function main() {
         );
       if (absent)
         assert.ok(!body.includes(absent), `${path}: leaked ${absent}`);
-      if (location)
-        assert.equal(
-          new URL(response.headers.get("location"), base).pathname,
-          location,
-        );
+      if (location) {
+        const redirected = new URL(response.headers.get("location"), base);
+        assert.equal(redirected.pathname, location);
+        if (search !== undefined) assert.equal(redirected.search, search);
+      }
       console.log(
         `✓ ${response.status} ${path}${cookie ? " (authenticated)" : " (anonymous)"}`,
       );
@@ -191,53 +215,94 @@ async function main() {
 
     await check("/login", {
       status: 200,
-      contains: "Continue with email",
+      contains: "Send Code",
       absent: "Sign Up",
     });
     await check("/d-code", { status: 307, location: "/login" });
-    const publicBody = await check(`/s/${PUBLIC_SLUG}`, {
+
+    // Public short links are never sent to /login. Query params used for OG
+    // previews survive the redirect to the canonical viewer.
+    await check(`/s/${PUBLIC_SLUG}?title=Public+Example`, {
+      status: 307,
+      location: `/d-code/share/${PUBLIC_SLUG}`,
+      search: "?title=Public+Example",
+    });
+    const publicBody = await check(`/d-code/share/${PUBLIC_SLUG}`, {
+      status: 200,
+      contains: "share-card.png",
+    });
+    assert.match(publicBody, /property="og:image"/);
+    await check(`/api/share/${PUBLIC_SLUG}`, {
       status: 200,
       contains: "Public Example",
     });
-    assert.match(publicBody, /property="og:image"/);
-    await check(`/d-code/share/${PUBLIC_SLUG}`, {
+    await check(`/s/${PUBLIC_ID}`, {
       status: 307,
-      location: `/s/${PUBLIC_SLUG}`,
+      location: `/d-code/share/${PUBLIC_ID}`,
     });
-    await check(`/s/${PRIVATE_SLUG}`, {
-      status: 403,
-      contains: "This link is private",
-      absent: "Owner Only Example",
-    });
+
+    for (const path of [`/s/${PRIVATE_SLUG}`, `/d-code/share/${PRIVATE_SLUG}`, `/s/${PRIVATE_ID}`]) {
+      await check(path, {
+        status: 403,
+        contains: "This link is private or no longer exists",
+        absent: "Owner Only Example",
+      });
+    }
     await check(`/s/${PRIVATE_SLUG}`, {
       cookie: sessionCookie("other-token"),
       status: 403,
       absent: "Owner Only Example",
     });
-    await check(`/d-code/share/${PRIVATE_SLUG}`, { status: 403 });
+    await check(`/api/share/${PRIVATE_SLUG}`, {
+      status: 404,
+      absent: "Owner Only Example",
+    });
     await check(`/s/${PRIVATE_SLUG}`, {
       cookie: sessionCookie("owner-token"),
-      status: 200,
-      contains: "Owner Only Example",
+      status: 307,
+      location: `/d-code/share/${PRIVATE_SLUG}`,
     });
     await check(`/d-code/share/${PRIVATE_SLUG}`, {
       cookie: sessionCookie("owner-token"),
-      status: 307,
-      location: `/s/${PRIVATE_SLUG}`,
+      status: 200,
     });
-    // Simulate switching Public Access on/off: the same link responds to the
-    // row's current visibility immediately, not to a stale cached preview.
-    projects.get(PRIVATE_SLUG).is_public = true;
-    await check(`/s/${PRIVATE_SLUG}`, {
+    await check(`/api/share/${PRIVATE_SLUG}`, {
+      cookie: sessionCookie("owner-token"),
       status: 200,
       contains: "Owner Only Example",
     });
-    projects.get(PRIVATE_SLUG).is_public = false;
+
+    // Simulate toggling Public Access. The same link should reflect the
+    // current DB value, not a stale cached preview or login redirect.
+    projects.get(PRIVATE_SLUG).is_public = true;
     await check(`/s/${PRIVATE_SLUG}`, {
-      status: 403,
+      status: 307,
+      location: `/d-code/share/${PRIVATE_SLUG}`,
+    });
+    projects.get(PRIVATE_SLUG).is_public = false;
+    await check(`/s/${PRIVATE_SLUG}`, { status: 403 });
+
+    // If the public SELECT policy is missing, middleware and the API route
+    // must both recover ONLY published rows via a filtered service-role read.
+    publicSelectPolicyInstalled = false;
+    const readsBefore = serviceReads;
+    await check(`/s/${PUBLIC_SLUG}`, {
+      status: 307,
+      location: `/d-code/share/${PUBLIC_SLUG}`,
+    });
+    await check(`/d-code/share/${PUBLIC_SLUG}`, { status: 200 });
+    await check(`/api/share/${PUBLIC_SLUG}`, {
+      status: 200,
+      contains: "Public Example",
+    });
+    await check(`/s/${PRIVATE_SLUG}`, { status: 403, absent: "Owner Only Example" });
+    await check(`/api/share/${PRIVATE_SLUG}`, {
+      status: 404,
       absent: "Owner Only Example",
     });
-    console.log("Share access checks passed.");
+    assert.ok(serviceReads > readsBefore, "No filtered public recovery reads occurred");
+    assert.equal(unsafeServiceReads, 0, "A service-role read lacked is_public=true");
+    console.log("Share access checks passed, including public-policy recovery.");
   } catch (error) {
     console.error("Server log tail:\n", logs.slice(-4000));
     throw error;

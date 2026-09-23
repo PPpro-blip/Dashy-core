@@ -1,46 +1,96 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { createServiceClient } from "@/lib/supabase/server";
 
 /**
  * Session refresh middleware (per @supabase/ssr docs).
  *
  * Refreshes the Supabase auth session on every matched request and
- * forwards the updated cookies to both the incoming response and the
- * request that continues downstream.
- *
- * Routing rules:
- *  - Unauthenticated users are redirected from protected routes to /login.
- *  - /s/<slug> and legacy /d-code/share/<slug> never redirect to login.
- *    Public rows are readable anonymously; private rows are owner-only.
- *  - Authenticated users hitting /login are sent to /chat.
+ * forwards updated cookies to the response and downstream request.
+ * Share pages stay accessible without a session, but a private/missing
+ * project returns HTTP 403 before the page (including its OG tags) renders.
  */
 const PROTECTED_ROUTES = [
   "/chat",
   "/settings",
   "/projects",
+  "/studio",
   "/d-code",
   "/knowledge",
   "/agents",
   "/voice",
 ];
 
-/** Prefixes served without a session (exempt from the redirect above). */
-const PUBLIC_PREFIXES = ["/s/", "/d-code/share/"];
+const SHARE_PAGE_PREFIXES = ["/d-code/share/", "/s/"];
 
-const FORBIDDEN_SHARE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Access denied · DashyCore</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#090d1a;color:#f4f4f5;font:16px system-ui,sans-serif"><main style="max-width:420px;padding:40px;text-align:center"><div style="color:#22d3ee;font-size:13px;letter-spacing:.18em;font-weight:700">DASHYCORE / 403</div><h1 style="font-size:28px;margin:20px 0 12px">This link is private</h1><p style="color:#a1a1aa;line-height:1.6">Only the owner can view this project. Ask them to turn on Public Access if you'd like to see it.</p><a href="/" style="display:inline-block;margin-top:22px;padding:12px 20px;border-radius:10px;background:#22d3ee;color:#061b24;font-size:14px;font-weight:700;text-decoration:none">Go to DashyCore</a></main></body></html>`;
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
 
-function shareErrorResponse(status: 403 | 503) {
-  return new NextResponse(
-    status === 403 ? FORBIDDEN_SHARE_HTML : "Shared projects are temporarily unavailable.",
+/**
+ * Check the exact share-page path, not nested routes such as /og-image.
+ * The session read permits the owner to preview a private project; the
+ * service-role fallback is HARD-FILTERED to public rows, so a published link
+ * still works even when the live DB is missing its anonymous SELECT policy.
+ * This mirrors the recovery lane in /api/share/[key] without exposing a
+ * service-role client or private data to the browser.
+ */
+async function canOpenShare(
+  supabase: ReturnType<typeof createServerClient>,
+  key: string,
+  userId: string | undefined
+): Promise<boolean> {
+  const byId = isUuid(key);
+  try {
+    let query = supabase.from("dcode_projects").select("user_id, is_public");
+    query = byId ? query.eq("id", key) : query.eq("share_slug", key.toLowerCase());
+    const { data, error } = await query.maybeSingle();
+    if (!error && data && (data.is_public || (userId && data.user_id === userId))) {
+      return true;
+    }
+  } catch {
+    // A broken session/RLS policy should not block a public link when the
+    // server has a service key for the public-only recovery path below.
+  }
+
+  const service = createServiceClient();
+  if (service) {
+    try {
+      let query = service
+        .from("dcode_projects")
+        .select("id")
+        .eq("is_public", true);
+      query = byId ? query.eq("id", key) : query.eq("share_slug", key.toLowerCase());
+      const { data, error } = await query.maybeSingle();
+      if (!error && data) return true;
+    } catch {
+      // Treat lookup errors as unavailable; never allow private rows through.
+    }
+  }
+  return false;
+}
+
+/** A static response: never reveal whether a private project exists. */
+function privateShareResponse(refreshed: NextResponse): NextResponse {
+  const response = new NextResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Shared link unavailable — DashyCore</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1020;color:#f3f4f6;font:16px system-ui,sans-serif}main{max-width:28rem;margin:1.5rem;padding:2rem;border:1px solid #26354a;border-radius:1rem;background:#111a2c}h1{font-size:1.4rem}p{color:#a8b4c7;line-height:1.5}a{color:#67e8f9}</style></head><body><main><h1>This link is private or no longer exists</h1><p>If it belongs to you, sign in and open the link again. Otherwise, ask the owner to make it public.</p><a href="/login">Sign in</a></main></body></html>`,
     {
-      status,
+      status: 403,
       headers: {
-        "Content-Type": status === 403 ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+        "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "private, no-store",
         "X-Robots-Tag": "noindex",
       },
     }
   );
+  // Preserve auth refresh cookies even when the share access check denies a
+  // request; otherwise the owner's next request could lose its session.
+  refreshed.cookies.getAll().forEach(({ name, value, ...options }) => {
+    response.cookies.set(name, value, options);
+  });
+  return response;
 }
 
 export async function updateSession(request: NextRequest) {
@@ -67,51 +117,32 @@ export async function updateSession(request: NextRequest) {
     }
   );
 
-  // IMPORTANT: do not run code between createServerClient and getSession —
+  // IMPORTANT: do not run code between createServerClient and getUser —
   // otherwise the session may not be refreshed in time.
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   const pathname = request.nextUrl.pathname;
-  const isPublicRoute = PUBLIC_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(prefix)
-  );
-
-  // Check share permissions before rendering any HTML/RSC/metadata. RLS
-  // exposes public projects to everyone and private ones only to their owner;
-  // a missing row (including an RLS-hidden private row) is a real HTTP 403,
-  // not a client-side "private" message in a 200 response. Legacy links use
-  // the same check before their redirect to the canonical /s/<slug> URL.
-  const shareMatch = /^\/(?:s|d-code\/share)\/([a-z0-9]{12})\/?$/.exec(pathname);
-  const denyShare = (status: 403 | 503) => {
-    const response = shareErrorResponse(status);
-    // A token refreshed by getUser should still reach the browser, even if
-    // this particular link is forbidden to the account using it.
-    supabaseResponse.cookies.getAll().forEach((cookie) => response.cookies.set(cookie));
-    return response;
-  };
-  if (shareMatch) {
-    const { data, error } = await supabase
-      .from("dcode_projects")
-      .select("user_id, is_public")
-      .eq("share_slug", shareMatch[1])
-      .maybeSingle();
-    if (error) return denyShare(503);
-    if (!data || (!data.is_public && data.user_id !== user?.id)) {
-      return denyShare(403);
+  const sharePrefix = SHARE_PAGE_PREFIXES.find((prefix) => pathname.startsWith(prefix));
+  if (sharePrefix) {
+    const key = pathname.slice(sharePrefix.length);
+    // Only guard actual share pages, not /og-image or an unrelated 404.
+    if (key && !key.includes("/")) {
+      if (key.length <= 64 && (await canOpenShare(supabase, key, user?.id))) {
+        return supabaseResponse;
+      }
+      return privateShareResponse(supabaseResponse);
     }
-    supabaseResponse.headers.set("Cache-Control", "private, no-store");
   }
 
   const isProtected =
-    !isPublicRoute &&
+    !SHARE_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix)) &&
     PROTECTED_ROUTES.some(
       (route) => pathname === route || pathname.startsWith(`${route}/`)
     );
 
   if (!user && isProtected) {
-    // Rewrite to /login while preserving the URL in the browser.
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);

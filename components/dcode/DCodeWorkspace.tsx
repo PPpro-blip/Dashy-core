@@ -24,9 +24,10 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   createProject,
-  ensureProjectShareSlug,
   languageFromFilename,
   newId,
+  regenerateShareSlug,
+  revokeShareLink,
   toggleProjectPublic,
   updateProject,
   type DCodeFile,
@@ -54,19 +55,46 @@ import {
   readBlobAsDataUrl,
   readBlobAsText,
 } from "@/lib/dcode-binary";
+import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import {
-  DCodeTerminal,
-  type DCodeProblem,
-  type TerminalPanelTab,
-} from "@/components/dcode/DCodeTerminal";
-import { MonacoEditor } from "@/components/dcode/MonacoEditor";
-import { ShareHub } from "@/components/ShareHub";
+  MonacoEditor,
+  type DCodeMonacoEditor,
+} from "@/components/dcode/MonacoEditor";
+import { ExtensionsPanel } from "@/components/dcode/ExtensionsPanel";
+import { ShareHub } from "@/components/share/ShareHub";
+import {
+  BUILTIN_EXTENSIONS,
+  DEFAULT_DISABLED_IDS,
+} from "@/lib/dcode/extensions/registry";
+import {
+  activateEnabledExtensions,
+  deactivateAllExtensions,
+  onMonacoEditorReady,
+  setExtensionEnabled,
+  type DCodeExtensionUiApi,
+} from "@/lib/dcode/extensions/runtime";
+import {
+  getEnabledExtensionIds,
+  getFormatOnSave,
+  getStoredTheme,
+  setExtensionEnabledState,
+  setStoredTheme,
+} from "@/lib/dcode/extensions/storage";
+import { DEFAULT_DCODE_THEME_ID } from "@/lib/dcode/extensions/themes";
+import { formatText } from "@/lib/dcode/extensions/format";
+import type {
+  DCodeMonacoNamespace,
+  DCodeWorkspaceApi,
+} from "@/lib/dcode/extensions/types";
+import { buildShortShareUrl } from "@/lib/share-intents";
 import { useToast } from "@/components/Toast";
-import { DEFAULT_MODEL_ID, getModelById } from "@/lib/models";
-import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import {
+  AlertIcon,
+  BellIcon,
   BracesIcon,
+  BranchIcon,
   CheckIcon,
+  ChevronRightIcon,
   CodeIcon,
   ExtensionsIcon,
   FileTextIcon,
@@ -88,13 +116,6 @@ import {
 } from "@/components/icons";
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
-type SidePanel = "explorer" | "search" | "extensions" | "settings";
-
-interface FileSearchResult {
-  file: DCodeFile;
-  line: number | null;
-  excerpt: string;
-}
 
 export interface DCodeWorkspaceDraft {
   title: string;
@@ -116,6 +137,41 @@ const AUTOSAVE_DEBOUNCE_MS = 1200;
 /** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
 const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
 
+/** All known built-in extension ids (toggle seeding + storage reads). */
+const BUILTIN_EXTENSION_IDS = BUILTIN_EXTENSIONS.map((m) => m.manifest.id);
+
+/** First-run enabled set (everything except the default-disabled ids). */
+function defaultEnabledExtensionIds(): string[] {
+  return BUILTIN_EXTENSION_IDS.filter(
+    (id) => !DEFAULT_DISABLED_IDS.includes(id)
+  );
+}
+
+/** Compact status-bar labels for enabled extensions. */
+const EXTENSION_SHORT_LABELS: Record<string, string> = {
+  "dashy.cline": "Cline",
+  "dashy.roo": "Roo",
+  "dashy.tailwind": "Tailwind",
+  "dashy.prettier": "Prettier",
+  "dashy.gitlens": "GitLens",
+  "dashy.ai": "AI",
+  "dashy.themes": "Themes",
+  "dashy.autocomplete": "Ghost",
+  "dashy.snippets": "Snippets",
+  "dashy.markdown-preview": "MD",
+};
+
+function extensionShortLabel(id: string): string {
+  if (EXTENSION_SHORT_LABELS[id]) return EXTENSION_SHORT_LABELS[id];
+  const found = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+  return found?.manifest.name ?? id;
+}
+
+function extensionFullName(id: string): string {
+  const found = BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id);
+  return found?.manifest.name ?? id;
+}
+
 interface GithubRepo {
   full_name: string;
   clone_url: string;
@@ -124,14 +180,11 @@ interface GithubRepo {
 }
 
 /** File-tree icon + accent based on the file type. */
-function fileIconFor(name: string): {
-  Icon: ComponentType<{ className?: string }>;
-  color: string;
-} {
+function fileIconFor(
+  name: string
+): { Icon: ComponentType<{ className?: string }>; color: string } {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (
-    ["png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "svg"].includes(ext)
-  ) {
+  if (["png", "jpg", "jpeg", "gif", "ico", "webp", "bmp", "svg"].includes(ext)) {
     return { Icon: ImageIcon, color: "text-fuchsia-300" };
   }
   if (["woff", "woff2", "ttf", "otf", "eot", "pdf"].includes(ext)) {
@@ -149,35 +202,6 @@ function fileIconFor(name: string): {
   return { Icon: FileTextIcon, color: "text-zinc-400" };
 }
 
-/** VS Code-like, distinct file-type glyphs in the tree, tabs and breadcrumbs. */
-function FileKindIcon({ name }: { name: string }) {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  const kind = ["ts", "tsx", "mts", "cts"].includes(ext)
-    ? "TS"
-    : ["js", "jsx", "mjs", "cjs"].includes(ext)
-      ? "JS"
-      : ["css", "scss", "less"].includes(ext)
-        ? "CSS"
-        : null;
-  if (kind) {
-    const color = {
-      TS: "border-blue-400/35 bg-blue-400/15 text-blue-300",
-      JS: "border-amber-300/35 bg-amber-300/15 text-amber-200",
-      CSS: "border-violet-400/35 bg-violet-400/15 text-violet-300",
-    }[kind];
-    return (
-      <span
-        aria-hidden="true"
-        className={`inline-flex h-[18px] w-[23px] flex-shrink-0 items-center justify-center rounded-[3px] border font-mono text-[8px] font-extrabold tracking-tight ${color}`}
-      >
-        {kind}
-      </span>
-    );
-  }
-  const { Icon, color } = fileIconFor(name);
-  return <Icon className={`h-3.5 w-3.5 flex-shrink-0 ${color}`} />;
-}
-
 /**
  * Import caps. Files live inline in one jsonb row, so a repo import stays
  * within a safe envelope: a file cap, a per-text-file cap (sanitizer), and
@@ -186,13 +210,8 @@ function FileKindIcon({ name }: { name: string }) {
 const MAX_IMPORT_FILES = 120;
 const MAX_BINARY_BYTES = 350 * 1024; // ~350 KB raw → ~467 KB data URL
 
-function parseGithubRepo(
-  input: string,
-): { owner: string; repo: string } | null {
-  const value = input
-    .trim()
-    .replace(/\/$/, "")
-    .replace(/\.git$/, "");
+function parseGithubRepo(input: string): { owner: string; repo: string } | null {
+  const value = input.trim().replace(/\/$/, "").replace(/\.git$/, "");
   const urlMatch = value.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/);
   if (urlMatch) return { owner: urlMatch[1], repo: urlMatch[2] };
   const shortMatch = value.match(/^([^/]+)\/([^/]+)$/);
@@ -233,18 +252,18 @@ async function listGitHubRepos(): Promise<GithubRepo[]> {
   const providerToken = await githubProviderToken();
   const res = await fetch(
     "https://api.github.com/user/repos?sort=updated&per_page=30&affiliation=owner,collaborator",
-    { headers: githubHeaders(providerToken), cache: "no-store" },
+    { headers: githubHeaders(providerToken), cache: "no-store" }
   );
   if (res.status === 401 || res.status === 403) {
     throw new Error(
       providerToken
         ? "GitHub token was rejected — re-connect GitHub or paste a repo URL to import."
-        : "GitHub repo listing needs a GitHub sign-in — paste any public repo URL to import instead.",
+        : "GitHub repo listing needs a GitHub sign-in — paste any public repo URL to import instead."
     );
   }
   if (res.status === 429) {
     throw new Error(
-      "GitHub rate limit reached. Wait a moment or paste a repo URL to import.",
+      "GitHub rate limit reached. Wait a moment or paste a repo URL to import."
     );
   }
   if (!res.ok) {
@@ -276,12 +295,12 @@ interface GithubImportResult {
  * output are skipped (`isBlockedPath`).
  */
 async function importGitHubRepository(
-  url: string,
+  url: string
 ): Promise<GithubImportResult> {
   const parsed = parseGithubRepo(url);
   if (!parsed) {
     throw new Error(
-      "Enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).",
+      "Enter a valid GitHub repo URL (e.g. https://github.com/owner/repo)."
     );
   }
   const { owner, repo } = parsed;
@@ -294,7 +313,7 @@ async function importGitHubRepository(
     throw new Error(
       repoRes.status === 404
         ? `GitHub repo "${owner}/${repo}" not found. Check the URL.`
-        : `GitHub repo not accessible (HTTP ${repoRes.status}).`,
+        : `GitHub repo not accessible (HTTP ${repoRes.status}).`
     );
   }
   const repoInfo = (await repoRes.json()) as { default_branch?: string };
@@ -302,11 +321,11 @@ async function importGitHubRepository(
 
   const treeRes = await fetch(
     `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
-    { headers: githubHeaders(providerToken) },
+    { headers: githubHeaders(providerToken) }
   );
   if (!treeRes.ok) {
     throw new Error(
-      `Could not list GitHub repository contents (HTTP ${treeRes.status}).`,
+      `Could not list GitHub repository contents (HTTP ${treeRes.status}).`
     );
   }
   const tree = (await treeRes.json()) as {
@@ -366,7 +385,7 @@ async function importGitHubRepository(
         language: languageFromFilename(name),
         content: bytesToDataUrl(
           bytes,
-          mimeForBinaryExt(extensionWithDot(name)),
+          mimeForBinaryExt(extensionWithDot(name))
         ),
       });
       continue;
@@ -397,7 +416,7 @@ async function importGitHubRepository(
     throw new Error(
       skipped > 0
         ? "No importable files found — this repository only contains archives, generated output or oversized media."
-        : "No importable source files found in this repository.",
+        : "No importable source files found in this repository."
     );
   }
   return { files, skipped, binaries, repoName: repo };
@@ -414,18 +433,14 @@ function BinaryAssetPreview({ file }: { file: DCodeFile }) {
   const size = file.content.startsWith("data:")
     ? dataUrlByteSize(file.content)
     : file.content.length;
-  const isImage =
-    isImagePath(file.name) || file.content.startsWith("data:image/");
+  const isImage = isImagePath(file.name) || file.content.startsWith("data:image/");
   const svgBlobSrc = useMemo(() => {
-    if (
-      !file.name.toLowerCase().endsWith(".svg") ||
-      file.content.startsWith("data:")
-    ) {
+    if (!file.name.toLowerCase().endsWith(".svg") || file.content.startsWith("data:")) {
       return null;
     }
     try {
       return URL.createObjectURL(
-        new Blob([file.content], { type: "image/svg+xml" }),
+        new Blob([file.content], { type: "image/svg+xml" })
       );
     } catch {
       return null;
@@ -506,52 +521,35 @@ function BinaryAssetPreview({ file }: { file: DCodeFile }) {
   );
 }
 
-export function DCodeWorkspace({
-  project,
-  draft,
-  readOnly = false,
-}: DCodeWorkspaceProps) {
+export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorkspaceProps) {
   const router = useRouter();
   const toast = useToast();
 
   /* ------------------------------ core state ----------------------------- */
 
-  const [projectId, setProjectId] = useState<string | null>(
-    project?.id ?? null,
-  );
+  const [projectId, setProjectId] = useState<string | null>(project?.id ?? null);
   const [title, setTitle] = useState(
-    project?.title ?? draft?.title ?? "Untitled project",
+    project?.title ?? draft?.title ?? "Untitled project"
   );
   const [files, setFiles] = useState<DCodeFile[]>(
-    project?.files ?? draft?.files ?? [],
+    project?.files ?? draft?.files ?? []
   );
-  const [activeFileId, setActiveFileId] = useState<string>(files[0]?.id ?? "");
-  const [openFileIds, setOpenFileIds] = useState<string[]>(
-    files[0] ? [files[0].id] : [],
+  const [activeFileId, setActiveFileId] = useState<string>(
+    files[0]?.id ?? ""
   );
-  const [sidePanel, setSidePanel] = useState<SidePanel | null>("explorer");
-  const [searchQuery, setSearchQuery] = useState("");
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const [minimapEnabled, setMinimapEnabled] = useState(true);
-  const [wordWrapEnabled, setWordWrapEnabled] = useState(false);
-  const [editorFontSize, setEditorFontSize] = useState(13);
-  const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
-  const [diagnostics, setDiagnostics] = useState<
-    Record<string, DCodeProblem[]>
-  >({});
-  const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
   const [isPublic, setIsPublic] = useState(project?.isPublic ?? false);
   const [shareSlug, setShareSlug] = useState<string | null>(
-    project?.shareSlug ?? null,
+    project?.shareSlug ?? null
   );
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(
-    project ? new Date(project.updatedAt) : null,
+    project ? new Date(project.updatedAt) : null
   );
   const [savingShare, setSavingShare] = useState(false);
   const [shareHubOpen, setShareHubOpen] = useState(false);
-  const [shareError, setShareError] = useState<string | null>(null);
-  const shareOperationRef = useRef(false);
+  const [hubBusy, setHubBusy] = useState<
+    "toggle" | "regenerate" | "revoke" | "opening" | null
+  >(null);
   const [newFileName, setNewFileName] = useState("");
   const [addingFile, setAddingFile] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
@@ -566,9 +564,49 @@ export function DCodeWorkspace({
   const [importingRepo, setImportingRepo] = useState(false);
   const [githubError, setGithubError] = useState<string | null>(null);
 
-  const [terminalOpen, setTerminalOpen] = useState(!readOnly);
-  const [terminalTab, setTerminalTab] = useState<TerminalPanelTab>("terminal");
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  /* ------------------------- VS Code chrome state ------------------------ */
+
+  /** Activity bar selection: which side panel is visible. */
+  const [activityView, setActivityView] = useState<
+    "explorer" | "search" | "extensions"
+  >("explorer");
+  /** Search panel query (file names + text contents). */
+  const [searchQuery, setSearchQuery] = useState("");
+  /** Open editor tabs (VS Code: tabs are a subset of explorer files). */
+  const [openFileIds, setOpenFileIds] = useState<string[]>(() =>
+    files[0]?.id ? [files[0].id] : []
+  );
+  /** Bottom panel tab: Terminal / Output / Problems. */
+  const [bottomTab, setBottomTab] = useState<
+    "terminal" | "output" | "problems"
+  >("terminal");
+  /** Live cursor position for the status bar. */
+  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  /**
+   * Enabled Dashy Extension ids. Pure-default first render (hydration-safe),
+   * then the persisted `dashy.dcode.extensions` set after mount.
+   */
+  const [enabledExtensions, setEnabledExtensions] = useState<string[]>(
+    defaultEnabledExtensionIds
+  );
+  /** Active Monaco theme id (persisted by the Theme Pack). */
+  const [themeId, setThemeId] = useState<string>(DEFAULT_DCODE_THEME_ID);
+  /** Output channel lines (saves, imports, failures). */
+  const [outputLines, setOutputLines] = useState<string[]>([
+    "[D-Code] Output channel ready — saves, imports and errors log here.",
+  ]);
+
+  const appendOutput = useCallback((line: string) => {
+    const stamp = new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    setOutputLines((prev) => [...prev.slice(-99), `[${stamp}] ${line}`]);
+  }, []);
 
   /**
    * Latest content seen from the Monaco editor for the ACTIVE file. Monaco
@@ -576,85 +614,86 @@ export function DCodeWorkspace({
    * flush it into `files` state deterministically on tab switch and on save,
    * so an edit is never lost by switching files before a save.
    */
-  const editorBufferRef = useRef<{ fileId: string; content: string } | null>(
-    null,
-  );
+  const editorBufferRef = useRef<{ fileId: string; content: string } | null>(null);
 
-  /** Latest values and edit revision for debounced/keyboard saves. */
-  const latestRef = useRef({ projectId, title, files });
-  const editRevisionRef = useRef(0);
+  /** Live editor handles + selection/cursor mirrors for the extensions host. */
+  const editorRef = useRef<DCodeMonacoEditor | null>(null);
+  const monacoRef = useRef<DCodeMonacoNamespace | null>(null);
+  const selectionRef = useRef<string>("");
+  const cursorRef = useRef<{ line: number; column: number }>({
+    line: 1,
+    column: 1,
+  });
+  /** Buffered DashyAI output chunks (flushed to the Output channel). */
+  const aiOutputRef = useRef<{ title: string; chunks: string[] } | null>(null);
+
+  /* Load persisted extension + theme prefs after mount (client-only). */
   useEffect(() => {
-    latestRef.current = { projectId, title, files };
-  }, [projectId, title, files]);
+    setEnabledExtensions(
+      getEnabledExtensionIds(BUILTIN_EXTENSION_IDS, DEFAULT_DISABLED_IDS)
+    );
+    setThemeId(getStoredTheme());
+  }, []);
+
+  /** Latest values for debounced/keyboard saves + the extensions host. */
+  const latestRef = useRef({ projectId, title, files, activeFileId });
+  useEffect(() => {
+    latestRef.current = { projectId, title, files, activeFileId };
+  }, [projectId, title, files, activeFileId]);
 
   const activeFile = useMemo(
-    () => files.find((f) => f.id === activeFileId) ?? null,
-    [files, activeFileId],
+    () => files.find((f) => f.id === activeFileId) ?? files[0] ?? null,
+    [files, activeFileId]
   );
+
+  /** Tabs rendered in the tab bar (open ids resolved against live files). */
   const openFiles = useMemo(
-    () => openFileIds.flatMap((id) => files.filter((file) => file.id === id)),
-    [files, openFileIds],
+    () =>
+      openFileIds
+        .map((id) => files.find((f) => f.id === id))
+        .filter((f): f is DCodeFile => Boolean(f)),
+    [files, openFileIds]
   );
-  const problems = useMemo(
-    () => files.flatMap((file) => diagnostics[file.id] ?? []),
-    [diagnostics, files],
-  );
+
+  /** Search panel results (names + non-binary contents, capped at 50). */
   const searchResults = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return [];
-    const results: FileSearchResult[] = [];
-    for (const file of files) {
-      const nameMatch = file.name.toLowerCase().includes(query);
-      // Binary data URLs aren't searchable text, and searches are capped so
-      // large imported projects remain responsive on every keystroke.
-      const content = isBinaryPath(file.name)
-        ? ""
-        : file.content.slice(0, 100_000);
-      const offset = content.toLowerCase().indexOf(query);
-      if (!nameMatch && offset === -1) continue;
-      const line =
-        offset === -1 ? null : content.slice(0, offset).split("\n").length;
-      const start = offset === -1 ? 0 : content.lastIndexOf("\n", offset) + 1;
-      const end = offset === -1 ? 0 : content.indexOf("\n", offset);
-      results.push({
-        file,
-        line,
-        excerpt:
-          offset === -1
-            ? ""
-            : content
-                .slice(
-                  start,
-                  end === -1 ? start + 100 : Math.min(end, start + 100),
-                )
-                .trim(),
-      });
-      if (results.length >= 40) break;
-    }
-    return results;
+    return files
+      .filter(
+        (file) =>
+          file.name.toLowerCase().includes(query) ||
+          (!file.content.startsWith("data:") &&
+            file.content.toLowerCase().includes(query))
+      )
+      .slice(0, 50);
   }, [files, searchQuery]);
-  const activeModel = getModelById(modelId);
-  const outputLines = [
-    `Project: ${title || "Untitled project"}`,
-    `Files in workspace: ${files.length}`,
-    `Save status: ${readOnly ? "Read-only" : saveState === "idle" ? "Ready" : saveState}`,
-    `Last saved: ${lastSavedAt ? lastSavedAt.toLocaleString() : "Not saved yet"}`,
-  ];
 
+  /** Problems panel: skipped/unsupported files surface as warnings. */
+  const problems = useMemo(
+    () =>
+      (project?.skippedFiles ?? []).map((name) => ({
+        file: name,
+        message: "Skipped — unsupported or oversize file",
+        severity: "warning" as const,
+      })),
+    // project is a stable seed prop; skippedFiles only change per project.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [project?.skippedFiles]
+  );
+
+  /* The active file always has a tab (imports and deletes repair the list). */
   useEffect(() => {
-    setModelId(getStoredModel());
-    const onModelChanged = (event: Event) => {
-      const next = (event as CustomEvent<{ model?: string }>).detail?.model;
-      if (next) setModelId(next);
-    };
-    window.addEventListener(MODEL_CHANGED_EVENT, onModelChanged);
-    return () =>
-      window.removeEventListener(MODEL_CHANGED_EVENT, onModelChanged);
+    if (!activeFileId) return;
+    setOpenFileIds((prev) =>
+      prev.includes(activeFileId) ? prev : [...prev, activeFileId]
+    );
+  }, [activeFileId]);
+
+  const handleCursorPosition = useCallback((line: number, column: number) => {
+    cursorRef.current = { line, column };
+    setCursor({ line, column });
   }, []);
-
-  useEffect(() => {
-    if (sidePanel === "search") searchInputRef.current?.focus();
-  }, [sidePanel]);
 
   /**
    * Ingest guard for seed state (chat hand-off, an old project row, a draft
@@ -698,9 +737,9 @@ export function DCodeWorkspace({
   /** Timer that un-sticks the header pill after a non-auth save failure. */
   const saveErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Late-bound reference so the retry timer can call the newest `persist`. */
-  const persistRef = useRef<
-    (mode: "autosave" | "manual") => Promise<string | null>
-  >(async () => null);
+  const persistRef = useRef<(mode: "autosave" | "manual") => Promise<void>>(
+    async () => {}
+  );
 
   const clearSaveErrorTimer = useCallback(() => {
     if (saveErrorTimerRef.current) {
@@ -722,6 +761,7 @@ export function DCodeWorkspace({
     (error: unknown, mode: "autosave" | "manual") => {
       const info = describeSaveError(error);
       clearSaveErrorTimer();
+      appendOutput(`Save failed (${mode}): ${info.message}`);
 
       if (info.isAuth) {
         // Auth really is gone — keep the failure visible until re-sign-in.
@@ -751,98 +791,108 @@ export function DCodeWorkspace({
         }, AUTOSAVE_DEBOUNCE_MS);
       }, 6000);
     },
-    [clearSaveErrorTimer, toast],
+    [appendOutput, clearSaveErrorTimer, toast]
   );
 
-  /** Serialize saves so a pending autosave cannot overwrite a fresh share. */
-  const saveInFlightRef = useRef<Promise<string | null> | null>(null);
-
   const persist = useCallback(
-    async (
-      mode: "autosave" | "manual",
-      options?: { forShare?: boolean },
-    ): Promise<string | null> => {
-      while (saveInFlightRef.current) await saveInFlightRef.current;
-      if (readOnly) return null;
+    async (mode: "autosave" | "manual"): Promise<void> => {
+      const { projectId: id, title: t, files: rawFiles } = latestRef.current;
+      if (readOnly) return;
 
-      const task = (async () => {
-        const { projectId: id, title: t, files: rawFiles } = latestRef.current;
-        const savedRevision = editRevisionRef.current;
-        // Flush the newest Monaco buffer before taking the save snapshot.
-        const buffer = editorBufferRef.current;
-        const fs = buffer
-          ? rawFiles.map((f) =>
-              f.id === buffer.fileId ? { ...f, content: buffer.content } : f,
+      // Flush any pending Monaco buffer into the snapshot being persisted so
+      // an edit made in the last few milliseconds is never dropped.
+      const buffer = editorBufferRef.current;
+      const fs = buffer
+        ? rawFiles.map((f) =>
+            f.id === buffer.fileId ? { ...f, content: buffer.content } : f
+          )
+        : rawFiles;
+
+      // Prettier Auto-Formatter: when the extension is enabled and
+      // format-on-save is on, beautify text files before persisting.
+      let toSave = fs;
+      try {
+        const enabledNow = getEnabledExtensionIds(
+          BUILTIN_EXTENSION_IDS,
+          DEFAULT_DISABLED_IDS
+        );
+        if (enabledNow.includes("dashy.prettier") && getFormatOnSave()) {
+          const formatted = await Promise.all(
+            fs.map(async (f) => {
+              if (f.content.startsWith("data:")) return f;
+              const result = await formatText(f.name, f.content);
+              return result.ok && result.text !== undefined
+                ? { ...f, content: result.text }
+                : f;
+            })
+          );
+          // Sync state to what is saved — but never clobber keystrokes typed
+          // while Prettier was running (the live buffer wins in state and
+          // persists on the next save).
+          const liveBuffer = editorBufferRef.current;
+          setFiles(
+            formatted.map((f) =>
+              liveBuffer && f.id === liveBuffer.fileId
+                ? { ...f, content: liveBuffer.content }
+                : f
             )
-          : rawFiles;
-
-        // Draft without a row yet → only an explicit save creates it.
-        if (!id) {
-          if (mode !== "manual") return null;
-          setSaveState("saving");
-          try {
-            const created = await createProject({
-              title: t,
-              language: fs[0]?.language ?? "typescript",
-              files: fs,
-            });
-            setProjectId(created.id);
-            latestRef.current.projectId = created.id;
-            clearSaveErrorTimer();
-            setSaveState(
-              editRevisionRef.current === savedRevision ? "saved" : "dirty",
-            );
-            setLastSavedAt(new Date(created.updatedAt));
-            if (options?.forShare) {
-              // router.replace remounts a scratch project and would close the
-              // Share Hub. Next's native History API keeps the editor mounted
-              // while setting its canonical, reload-safe URL.
-              window.history.replaceState(null, "", `/d-code/${created.id}`);
-            } else {
-              toast.show({
-                type: "success",
-                title: "Project created",
-                message: "Saved to your D-Code workspace.",
-              });
-              router.replace(`/d-code/${created.id}`);
-            }
-            return created.id;
-          } catch (error) {
-            handleSaveFailure(error, "manual");
-            return null;
-          }
+          );
+          toSave = formatted;
         }
+      } catch {
+        // Formatting is best-effort — save the snapshot as-is on failure.
+      }
 
+      // Draft without a row yet → only an explicit save creates it.
+      if (!id) {
+        if (mode !== "manual") return;
         setSaveState("saving");
         try {
-          const updated = await updateProject(id, { title: t, files: fs });
+          const created = await createProject({
+            title: t,
+            language: toSave[0]?.language ?? "typescript",
+            files: toSave,
+          });
+          setProjectId(created.id);
+          latestRef.current.projectId = created.id;
           clearSaveErrorTimer();
-          setSaveState(
-            editRevisionRef.current === savedRevision ? "saved" : "dirty",
-          );
-          setLastSavedAt(new Date(updated.updatedAt));
-          if (mode === "manual" && !options?.forShare) {
-            toast.show({
-              type: "success",
-              title: "Saved ✓",
-              message: "Your changes are saved to D-Code.",
-            });
-          }
-          return updated.id;
+          setSaveState("saved");
+          setLastSavedAt(new Date(created.updatedAt));
+          appendOutput(`Project created — "${t}" (${toSave.length} file${toSave.length === 1 ? "" : "s"}).`);
+          toast.show({
+            type: "success",
+            title: "Project created",
+            message: "Saved to your D-Code workspace.",
+          });
+          // Swap the URL to the canonical editor route (remount is safe —
+          // everything is already persisted).
+          router.replace(`/d-code/${created.id}`);
         } catch (error) {
-          handleSaveFailure(error, mode);
-          return null;
+          handleSaveFailure(error, "manual");
         }
-      })();
+        return;
+      }
 
-      saveInFlightRef.current = task;
+      setSaveState("saving");
       try {
-        return await task;
-      } finally {
-        if (saveInFlightRef.current === task) saveInFlightRef.current = null;
+        const updated = await updateProject(id, { title: t, files: fs });
+        // Success always clears a lingering "Save failed" pill.
+        clearSaveErrorTimer();
+        setSaveState("saved");
+        setLastSavedAt(new Date(updated.updatedAt));
+        appendOutput(`Saved "${t}" — ${fs.length} file${fs.length === 1 ? "" : "s"} (${mode}).`);
+        if (mode === "manual") {
+          toast.show({
+            type: "success",
+            title: "Saved ✓",
+            message: "Your changes are saved to D-Code.",
+          });
+        }
+      } catch (error) {
+        handleSaveFailure(error, mode);
       }
     },
-    [clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast],
+    [appendOutput, clearSaveErrorTimer, handleSaveFailure, readOnly, router, toast]
   );
 
   /* Keep the retry timer pointed at the freshest persist implementation. */
@@ -853,7 +903,6 @@ export function DCodeWorkspace({
   /** Marks state dirty and schedules the debounced autosave. */
   const markDirty = useCallback(() => {
     if (readOnly) return;
-    editRevisionRef.current += 1;
     setSaveState("dirty");
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
@@ -942,8 +991,7 @@ export function DCodeWorkspace({
           data: { user },
         } = await supabase.auth.getUser();
         if (cancelled || !user) return;
-        const provider =
-          (user.app_metadata?.provider as string | undefined) ?? "";
+        const provider = (user.app_metadata?.provider as string | undefined) ?? "";
         const viaIdentity =
           user.identities?.some((identity) => identity.provider === "github") ??
           false;
@@ -967,13 +1015,11 @@ export function DCodeWorkspace({
       // or save can never lose it (Monaco delivers changes asynchronously).
       editorBufferRef.current = { fileId: activeFile?.id ?? "", content: next };
       setFiles((prev) =>
-        prev.map((f) =>
-          f.id === activeFile?.id ? { ...f, content: next } : f,
-        ),
+        prev.map((f) => (f.id === activeFile?.id ? { ...f, content: next } : f))
       );
       markDirty();
     },
-    [activeFile?.id, markDirty],
+    [activeFile?.id, markDirty]
   );
 
   /**
@@ -988,8 +1034,8 @@ export function DCodeWorkspace({
       prev.map((f) =>
         f.id === buffer.fileId && f.content !== buffer.content
           ? { ...f, content: buffer.content }
-          : f,
-      ),
+          : f
+      )
     );
   }, []);
 
@@ -1000,8 +1046,7 @@ export function DCodeWorkspace({
   const handleSelectFile = useCallback(
     (fileId: string) => {
       const target = latestRef.current.files.find((f) => f.id === fileId);
-      if (!target) return;
-      if (isBlockedPath(target.name)) {
+      if (target && isBlockedPath(target.name)) {
         toast.show({
           type: "error",
           title: "Can't open this file",
@@ -1011,27 +1056,31 @@ export function DCodeWorkspace({
       }
       flushActiveBuffer();
       setOpenFileIds((prev) =>
-        prev.includes(fileId) ? prev : [...prev, fileId],
+        prev.includes(fileId) ? prev : [...prev, fileId]
       );
       setActiveFileId(fileId);
-      setCursorPosition({ line: 1, column: 1 });
     },
-    [flushActiveBuffer, toast],
+    [flushActiveBuffer, toast]
   );
 
-  /** Closing a tab never deletes the underlying project file. */
+  /**
+   * Closes an editor tab (VS Code: the file stays in the explorer).
+   * The last tab stays pinned — a workspace always shows one file.
+   */
   const handleCloseTab = useCallback(
     (fileId: string) => {
       flushActiveBuffer();
+      if (openFileIds.length <= 1) return;
       const index = openFileIds.indexOf(fileId);
       const remaining = openFileIds.filter((id) => id !== fileId);
       setOpenFileIds(remaining);
-      if (activeFileId === fileId) {
-        setActiveFileId(remaining[Math.min(index, remaining.length - 1)] ?? "");
-        setCursorPosition({ line: 1, column: 1 });
+      if (fileId === activeFileId) {
+        const next =
+          remaining[Math.min(Math.max(index - 1, 0), remaining.length - 1)];
+        if (next) setActiveFileId(next);
       }
     },
-    [activeFileId, flushActiveBuffer, openFileIds],
+    [activeFileId, flushActiveBuffer, openFileIds]
   );
 
   const handleTitleChange = useCallback(
@@ -1039,15 +1088,13 @@ export function DCodeWorkspace({
       setTitle(value);
       markDirty();
     },
-    [markDirty],
+    [markDirty]
   );
 
   const validateFileName = useCallback(
     (name: string): boolean => {
       const isValid =
-        /^[a-zA-Z0-9_\-\.]+$/.test(name) &&
-        name.length > 0 &&
-        name.length <= 60;
+        /^[a-zA-Z0-9_\-\.]+$/.test(name) && name.length > 0 && name.length <= 60;
       if (isValid) return true;
       toast.show({
         type: "error",
@@ -1057,7 +1104,7 @@ export function DCodeWorkspace({
       });
       return false;
     },
-    [toast],
+    [toast]
   );
 
   const handleAddFile = useCallback(() => {
@@ -1065,19 +1112,14 @@ export function DCodeWorkspace({
     if (!name) return;
     if (!validateFileName(name)) return;
     if (isBlockedPath(name)) {
-      toast.show({
-        type: "error",
-        title: "Unsupported file",
-        message: BLOCKED_FILE_MESSAGE,
-      });
+      toast.show({ type: "error", title: "Unsupported file", message: BLOCKED_FILE_MESSAGE });
       return;
     }
     if (isBinaryPath(name)) {
       toast.show({
         type: "error",
         title: "Binary files can't be created by hand",
-        message:
-          "Import images/fonts via “Upload” or “Connect GitHub” — they’re stored as Base64 previews.",
+        message: "Import images/fonts via “Upload” or “Connect GitHub” — they’re stored as Base64 previews.",
       });
       return;
     }
@@ -1096,7 +1138,6 @@ export function DCodeWorkspace({
       content: "",
     };
     setFiles((prev) => [...prev, file]);
-    setOpenFileIds((prev) => [...prev, file.id]);
     setActiveFileId(file.id);
     setNewFileName("");
     setAddingFile(false);
@@ -1123,11 +1164,7 @@ export function DCodeWorkspace({
     }
     if (!validateFileName(name)) return;
     if (isBlockedPath(name)) {
-      toast.show({
-        type: "error",
-        title: "Unsupported file",
-        message: BLOCKED_FILE_MESSAGE,
-      });
+      toast.show({ type: "error", title: "Unsupported file", message: BLOCKED_FILE_MESSAGE });
       return;
     }
 
@@ -1140,8 +1177,7 @@ export function DCodeWorkspace({
       toast.show({
         type: "error",
         title: "Binary files can't be created by hand",
-        message:
-          "Images/fonts are imported via “Upload” or “Connect GitHub” as Base64 previews.",
+        message: "Images/fonts are imported via “Upload” or “Connect GitHub” as Base64 previews.",
       });
       return;
     }
@@ -1149,11 +1185,7 @@ export function DCodeWorkspace({
       cancelRename();
       return;
     }
-    if (
-      files.some(
-        (f) => f.id !== id && f.name.toLowerCase() === name.toLowerCase(),
-      )
-    ) {
+    if (files.some((f) => f.id !== id && f.name.toLowerCase() === name.toLowerCase())) {
       toast.show({
         type: "error",
         title: "File already exists",
@@ -1164,21 +1196,15 @@ export function DCodeWorkspace({
 
     setFiles((prev) =>
       prev.map((f) =>
-        f.id === id ? { ...f, name, language: languageFromFilename(name) } : f,
-      ),
+        f.id === id
+          ? { ...f, name, language: languageFromFilename(name) }
+          : f
+      )
     );
     setRenamingFileId(null);
     setRenamingName("");
     markDirty();
-  }, [
-    cancelRename,
-    files,
-    markDirty,
-    renamingFileId,
-    renamingName,
-    toast,
-    validateFileName,
-  ]);
+  }, [cancelRename, files, markDirty, renamingFileId, renamingName, toast, validateFileName]);
 
   const handleDeleteFile = useCallback(
     (id: string) => {
@@ -1191,31 +1217,25 @@ export function DCodeWorkspace({
         return;
       }
       setDeletingFileId(id);
-      const remainingFiles = files.filter((file) => file.id !== id);
-      const remainingTabs = openFileIds.filter((tabId) => tabId !== id);
-      const nextActive =
-        remainingTabs[
-          Math.min(openFileIds.indexOf(id), remainingTabs.length - 1)
-        ] ??
-        remainingFiles[0]?.id ??
-        "";
+      // No confirm dialog in MVP — the file is recoverable via undo of your
+      // own edits only; keep it snappy but guard the last file (above).
       window.setTimeout(() => {
-        setFiles((prev) => prev.filter((file) => file.id !== id));
-        setOpenFileIds((prev) => {
-          const next = prev.filter((tabId) => tabId !== id);
-          return next.length ? next : nextActive ? [nextActive] : [];
-        });
-        setActiveFileId((current) => (current === id ? nextActive : current));
-        setDiagnostics((prev) => {
-          const next = { ...prev };
-          delete next[id];
+        setFiles((prev) => {
+          const index = prev.findIndex((f) => f.id === id);
+          const next = prev.filter((f) => f.id !== id);
+          if (id === activeFileId && next.length > 0) {
+            setActiveFileId(next[Math.min(index, next.length - 1)].id);
+          }
           return next;
         });
+        // Drop the deleted file's tab (the active-tab effect re-opens the
+        // neighbor if the tab list would otherwise go empty).
+        setOpenFileIds((prev) => prev.filter((openId) => openId !== id));
         setDeletingFileId(null);
         markDirty();
       }, 200);
     },
-    [files, markDirty, openFileIds, toast],
+    [activeFileId, files.length, markDirty, toast]
   );
 
   /* ----------------------------- file / folder upload --------------------- */
@@ -1238,6 +1258,7 @@ export function DCodeWorkspace({
       try {
         const added: DCodeFile[] = [];
         let skipped = 0;
+        let binaries = 0;
         for (const file of list) {
           if (added.length >= MAX_IMPORT_FILES) {
             skipped += 1;
@@ -1245,8 +1266,8 @@ export function DCodeWorkspace({
           }
           // Folder uploads carry a relative path; flat files have just a name.
           const relPath =
-            (file as File & { webkitRelativePath?: string })
-              .webkitRelativePath || file.name;
+            (file as File & { webkitRelativePath?: string }).webkitRelativePath ||
+            file.name;
           const name = relPath.split("/").pop() ?? file.name;
           if (isBlockedPath(relPath) || isBlockedPath(name)) {
             skipped += 1;
@@ -1264,6 +1285,7 @@ export function DCodeWorkspace({
               language: languageFromFilename(name),
               content: dataUrl,
             });
+            binaries += 1;
           } else {
             if (file.size > MAX_FILE_CONTENT_CHARS) {
               skipped += 1;
@@ -1289,46 +1311,30 @@ export function DCodeWorkspace({
           toast.show({
             type: "error",
             title: "Nothing to import",
-            message:
-              skipped > 0
-                ? `${skipped} file${skipped === 1 ? "" : "s"} skipped (unsupported or too large).`
-                : "No readable files were found in that selection.",
+            message: skipped > 0
+              ? `${skipped} file${skipped === 1 ? "" : "s"} skipped (unsupported or too large).`
+              : "No readable files were found in that selection.",
           });
           return;
         }
-        const presentNames = new Set(
-          latestRef.current.files.map((f) => f.name.toLowerCase()),
-        );
-        const newFiles = imported.filter((file) => {
-          const name = file.name.toLowerCase();
-          if (presentNames.has(name)) {
-            skipped += 1;
-            return false;
+        setFiles((prev) => {
+          const existing = new Set(prev.map((f) => f.name.toLowerCase()));
+          const next = [...prev];
+          for (const file of imported) {
+            if (!existing.has(file.name.toLowerCase())) {
+              next.push(file);
+              existing.add(file.name.toLowerCase());
+            } else {
+              skipped += 1;
+            }
           }
-          presentNames.add(name);
-          return true;
+          return next;
         });
-        if (newFiles.length === 0) {
-          toast.show({
-            type: "info",
-            title: "No new files",
-            message: "These files are already in your project.",
-          });
-          return;
-        }
-        setFiles((prev) => [...prev, ...newFiles]);
-        if (newFiles[0]) {
-          setOpenFileIds((prev) =>
-            prev.includes(newFiles[0].id) ? prev : [...prev, newFiles[0].id],
-          );
-          setActiveFileId(newFiles[0].id);
-        }
+        setActiveFileId(imported[0]?.id ?? "");
         markDirty();
         const notes = [
-          `${newFiles.length} file${newFiles.length === 1 ? "" : "s"} imported`,
-          newFiles.some((file) => isBinaryPath(file.name))
-            ? `${newFiles.filter((file) => isBinaryPath(file.name)).length} as Base64 assets`
-            : "",
+          `${imported.length} file${imported.length === 1 ? "" : "s"} imported`,
+          binaries > 0 ? `${binaries} as Base64 image${binaries === 1 ? "" : "s"}` : "",
           skipped > 0 ? `${skipped} skipped` : "",
         ].filter(Boolean);
         toast.show({
@@ -1340,10 +1346,7 @@ export function DCodeWorkspace({
         toast.show({
           type: "error",
           title: "Upload failed",
-          message:
-            error instanceof Error
-              ? error.message
-              : "Could not read those files.",
+          message: error instanceof Error ? error.message : "Could not read those files.",
         });
       } finally {
         setUploadingFiles(false);
@@ -1351,96 +1354,165 @@ export function DCodeWorkspace({
         if (folderInputRef.current) folderInputRef.current.value = "";
       }
     },
-    [markDirty, toast],
+    [markDirty, toast]
   );
 
   /* --------------------------------- share -------------------------------- */
 
-  const closeShareHub = useCallback(() => setShareHubOpen(false), []);
-
   const shareUrl = useMemo(() => {
     if (!shareSlug || typeof window === "undefined") return null;
-    return `${window.location.origin}/s/${shareSlug}`;
+    return `${window.location.origin}/d-code/share/${shareSlug}`;
   }, [shareSlug]);
 
-  const prepareShareHub = useCallback(async () => {
-    if (shareOperationRef.current) return;
-    shareOperationRef.current = true;
-    setSavingShare(true);
-    setShareError(null);
-    try {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      // Creating a draft or flushing pending edits must finish before a link
-      // can point at it. Opening the modal itself never publishes or copies.
-      const id = await persist("manual", { forShare: true });
-      if (!id)
-        throw new Error(
-          "Could not save this project. Resolve the save error and retry.",
-        );
-      const slug = shareSlug ?? (await ensureProjectShareSlug(id));
-      setShareSlug(slug);
-    } catch (error) {
-      setShareError(
-        error instanceof Error
-          ? error.message
-          : "Could not prepare the share link.",
-      );
-    } finally {
-      shareOperationRef.current = false;
-      setSavingShare(false);
-    }
-  }, [persist, shareSlug]);
+  /** Canonical short link handed to the Share Hub (null until a slug exists). */
+  const hubShareUrl = useMemo(() => {
+    if (!shareSlug || typeof window === "undefined") return null;
+    return buildShortShareUrl(window.location.origin, shareSlug);
+  }, [shareSlug]);
 
-  const handleShare = useCallback(() => {
-    setShareError(null);
-    setShareHubOpen(true);
-    if (
-      !projectId ||
-      !shareSlug ||
-      saveState === "dirty" ||
-      saveState === "saving" ||
-      saveState === "error"
-    ) {
-      void prepareShareHub();
-    }
-  }, [prepareShareHub, projectId, saveState, shareSlug]);
-
-  const handleVisibilityChange = useCallback(
-    async (publicAccess: boolean) => {
-      if (!projectId || shareOperationRef.current) return;
-      shareOperationRef.current = true;
-      setSavingShare(true);
-      setShareError(null);
+  /**
+   * Opens the Share Hub (link card, preview, composers, privacy, link
+   * management). A draft without a row is persisted first so the hub
+   * always manages a real project id.
+   */
+  const openShareHub = useCallback(async () => {
+    if (hubBusy) return;
+    if (!latestRef.current.projectId) {
+      setHubBusy("opening");
       try {
-        if (
-          publicAccess &&
-          (saveState === "dirty" ||
-            saveState === "saving" ||
-            saveState === "error")
-        ) {
-          if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-          const saved = await persist("manual", { forShare: true });
-          if (!saved)
-            throw new Error(
-              "Save the latest changes before enabling Public Access.",
-            );
-        }
-        const updated = await toggleProjectPublic(projectId, publicAccess);
-        setIsPublic(updated.isPublic);
-        setShareSlug(updated.shareSlug);
-      } catch (error) {
-        setShareError(
-          error instanceof Error
-            ? error.message
-            : "Could not change Public Access.",
-        );
+        await persist("manual");
       } finally {
-        shareOperationRef.current = false;
-        setSavingShare(false);
+        setHubBusy(null);
+      }
+      if (!latestRef.current.projectId) {
+        toast.show({
+          type: "error",
+          title: "Save the project before sharing.",
+        });
+        return;
+      }
+    }
+    setShareHubOpen(true);
+  }, [hubBusy, persist, toast]);
+
+  /** Share Hub privacy toggle — updates the DB in real time. */
+  const handleHubTogglePublic = useCallback(
+    async (next: boolean) => {
+      const id = latestRef.current.projectId;
+      if (!id || hubBusy) return;
+      setHubBusy("toggle");
+      try {
+        if (next) {
+          // Re-sharing a project that still has a slug keeps the SAME link;
+          // a first-time (or post-revoke) share mints a fresh slug.
+          const updated = shareSlug
+            ? await updateProject(id, { isPublic: true })
+            : await toggleProjectPublic(id, true);
+          if (!updated.shareSlug) {
+            throw new Error("Sharing succeeded but no link was assigned.");
+          }
+          setIsPublic(true);
+          setShareSlug(updated.shareSlug);
+          toast.show({
+            type: "success",
+            title: "Project is public 🎉",
+            message: "Anyone with the link can view it — no login needed.",
+          });
+        } else {
+          // Going private keeps the slug so re-enabling restores the link.
+          // (True revocation — killing the slug — is the Revoke action.)
+          await updateProject(id, { isPublic: false });
+          setIsPublic(false);
+          toast.show({
+            type: "info",
+            title: "Project is private",
+            message: "The share link no longer works.",
+          });
+        }
+      } catch (error) {
+        toast.show({
+          type: "error",
+          title: "Could not update sharing",
+          message: error instanceof Error ? error.message : "Please try again.",
+        });
+      } finally {
+        setHubBusy(null);
       }
     },
-    [persist, projectId, saveState],
+    [hubBusy, shareSlug, toast]
   );
+
+  /** Share Hub "Regenerate slug" — new link, stays public. */
+  const handleHubRegenerate = useCallback(async () => {
+    const id = latestRef.current.projectId;
+    if (!id || hubBusy) return;
+    setHubBusy("regenerate");
+    try {
+      const updated = await regenerateShareSlug(id);
+      setIsPublic(true);
+      setShareSlug(updated.shareSlug);
+      toast.show({
+        type: "success",
+        title: "New share link generated",
+        message: "The old link stopped working immediately.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not regenerate the link",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setHubBusy(null);
+    }
+  }, [hubBusy, toast]);
+
+  /** Share Hub "Revoke link" — private + slug wiped, irreversible. */
+  const handleHubRevoke = useCallback(async () => {
+    const id = latestRef.current.projectId;
+    if (!id || hubBusy) return;
+    setHubBusy("revoke");
+    try {
+      await revokeShareLink(id);
+      setIsPublic(false);
+      setShareSlug(null);
+      toast.show({
+        type: "info",
+        title: "Share link revoked",
+        message: "The project is private and the old link can never work again.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not revoke the link",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setHubBusy(null);
+    }
+  }, [hubBusy, toast]);
+
+  const handleUnshare = useCallback(async () => {
+    if (!projectId || savingShare) return;
+    setSavingShare(true);
+    try {
+      await toggleProjectPublic(projectId, false);
+      setIsPublic(false);
+      toast.show({
+        type: "info",
+        title: "Project is private",
+        message: "The share link no longer works.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not update sharing",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setSavingShare(false);
+    }
+  }, [projectId, savingShare, toast]);
 
   /* --------------------------------- github ------------------------------- */
 
@@ -1481,7 +1553,7 @@ export function DCodeWorkspace({
       setGithubError(
         error instanceof Error
           ? error.message
-          : "Could not list GitHub repositories.",
+          : "Could not list GitHub repositories."
       );
     } finally {
       setListingRepos(false);
@@ -1504,7 +1576,6 @@ export function DCodeWorkspace({
         // be persisted straight away for a fresh draft.
         const current = latestRef.current;
         const merged = [...current.files];
-        const added: DCodeFile[] = [];
         const existing = new Set(merged.map((f) => f.name.toLowerCase()));
         let duplicates = 0;
         for (const file of imported) {
@@ -1512,26 +1583,20 @@ export function DCodeWorkspace({
             duplicates += 1;
           } else {
             merged.push(file);
-            added.push(file);
             existing.add(file.name.toLowerCase());
           }
         }
-        const firstAdded = added[0];
+        const firstAdded =
+          imported.find((f) => !current.files.some((g) => g.id === f.id)) ??
+          imported[0];
 
         const isDraft = !current.projectId;
         const newTitle = isDraft
-          ? result.repoName
-              .replace(/[-_]+/g, " ")
-              .replace(/\b\w/g, (c) => c.toUpperCase())
+          ? result.repoName.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
           : current.title;
 
         setFiles(merged);
-        if (firstAdded) {
-          setOpenFileIds((prev) =>
-            prev.includes(firstAdded.id) ? prev : [...prev, firstAdded.id],
-          );
-          setActiveFileId(firstAdded.id);
-        }
+        setActiveFileId(firstAdded?.id ?? "");
         if (isDraft) setTitle(newTitle);
         // Keep the debounce/ref snapshot in sync so an immediate persist
         // (below) writes exactly what the user sees.
@@ -1539,6 +1604,7 @@ export function DCodeWorkspace({
           projectId: current.projectId,
           title: isDraft ? newTitle : current.title,
           files: merged,
+          activeFileId: firstAdded?.id ?? current.activeFileId,
         };
 
         const notes = [
@@ -1556,9 +1622,7 @@ export function DCodeWorkspace({
           .join(" · ");
         toast.show({
           type: "success",
-          title: isDraft
-            ? `Imported ${result.repoName}`
-            : "GitHub repo imported",
+          title: isDraft ? `Imported ${result.repoName}` : "GitHub repo imported",
           message: `${notes}.`,
         });
         closeGitHubModal();
@@ -1574,13 +1638,233 @@ export function DCodeWorkspace({
         setGithubError(
           error instanceof Error
             ? error.message
-            : "Could not import the repository.",
+            : "Could not import the repository."
         );
       } finally {
         setImportingRepo(false);
       }
     },
-    [closeGitHubModal, importingRepo, markDirty, persist, toast],
+    [closeGitHubModal, importingRepo, markDirty, persist, toast]
+  );
+
+  /* ---------------------------- extensions host --------------------------- */
+
+  /**
+   * DCodeWorkspaceApi adapter — the entire surface Dashy Extensions may
+   * touch. Stable across renders (refs + stable callbacks only) so the
+   * extension host activates exactly once.
+   */
+  const workspaceApi = useMemo<DCodeWorkspaceApi>(
+    () => ({
+      getActiveFile: () => {
+        const { files: all, activeFileId: activeId } = latestRef.current;
+        return all.find((f) => f.id === activeId) ?? all[0] ?? null;
+      },
+      getFiles: () => latestRef.current.files,
+      getSelectedText: () => {
+        const text = selectionRef.current;
+        return text ? text : null;
+      },
+      getCursorPosition: () => ({ ...cursorRef.current }),
+      openFile: (fileId: string) => handleSelectFile(fileId),
+      applyTheme: (id: string) => {
+        setStoredTheme(id);
+        setThemeId(id);
+      },
+      formatActiveFile: async () => {
+        const { files: all, activeFileId: activeId } = latestRef.current;
+        const file = all.find((f) => f.id === activeId) ?? all[0];
+        if (!file || file.content.startsWith("data:")) {
+          toast.info("Format Document needs an active text file.");
+          return false;
+        }
+        const result = await formatText(file.name, file.content);
+        if (!result.ok || result.text === undefined) {
+          toast.error(
+            "Format failed",
+            result.error ?? "Could not format this file."
+          );
+          return false;
+        }
+        if (result.text === file.content) {
+          toast.info("Already formatted — no changes.");
+          return true;
+        }
+        const next = result.text;
+        editorBufferRef.current = { fileId: file.id, content: next };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === file.id ? { ...f, content: next } : f))
+        );
+        markDirty();
+        return true;
+      },
+      getUserId: async () => {
+        try {
+          const supabase = createClient();
+          const { data } = await supabase.auth.getUser();
+          return data.user?.id ?? null;
+        } catch {
+          return null;
+        }
+      },
+      // The AI Output drawer streams into the Output channel (bottom panel).
+      showAiOutput: (title: string) => {
+        aiOutputRef.current = { title, chunks: [] };
+        setBottomTab("output");
+        setTerminalOpen(true);
+        appendOutput(`── ${title} ──`);
+      },
+      appendAiOutput: (text: string) => {
+        aiOutputRef.current?.chunks.push(text);
+      },
+      finishAiOutput: () => {
+        const pending = aiOutputRef.current;
+        aiOutputRef.current = null;
+        if (!pending) return;
+        for (const line of pending.chunks.join("").split("\n")) {
+          appendOutput(line);
+        }
+        appendOutput("── done ──");
+      },
+      saveActiveFile: async () => {
+        flushActiveBuffer();
+        await persistRef.current("manual");
+      },
+      writeFile: (name: string, content: string, language?: string) => {
+        const clean = name.trim();
+        if (!clean || !VALID_FILENAME.test(clean) || clean.length > 60) {
+          toast.error(
+            "Invalid file name",
+            "Use letters, numbers, dashes, underscores, dots. Max 60 chars."
+          );
+          return "";
+        }
+        if (isBlockedPath(clean)) {
+          toast.error("Unsupported file", BLOCKED_FILE_MESSAGE);
+          return "";
+        }
+        if (isBinaryPath(clean)) {
+          toast.error(
+            "Binary files can't be created by extensions",
+            "Images/fonts import via “Upload” as Base64 previews."
+          );
+          return "";
+        }
+        const existing = latestRef.current.files.find(
+          (f) => f.name.toLowerCase() === clean.toLowerCase()
+        );
+        const id = existing?.id ?? newId();
+        const lang = language ?? languageFromFilename(clean);
+        setFiles((prev) => {
+          const found = prev.some((f) => f.id === id);
+          if (found) {
+            return prev.map((f) =>
+              f.id === id ? { ...f, name: clean, language: lang, content } : f
+            );
+          }
+          return [...prev, { id, name: clean, language: lang, content }];
+        });
+        setActiveFileId(id);
+        editorBufferRef.current = { fileId: id, content };
+        markDirty();
+        return id;
+      },
+      replaceSelection: (text: string) => {
+        const editor = editorRef.current;
+        if (!editor) return false;
+        const selection = editor.getSelection();
+        if (!selection) return false;
+        editor.executeEdits("dashy-extension", [
+          { range: selection, text, forceMoveMarkers: true },
+        ]);
+        editor.focus();
+        return true;
+      },
+      setActiveFileContent: (content: string) => {
+        const activeId = latestRef.current.activeFileId;
+        editorBufferRef.current = { fileId: activeId, content };
+        setFiles((prev) =>
+          prev.map((f) => (f.id === activeId ? { ...f, content } : f))
+        );
+        markDirty();
+      },
+      getMonaco: () => monacoRef.current,
+      getEditor: () => editorRef.current,
+    }),
+    [appendOutput, flushActiveBuffer, handleSelectFile, markDirty, toast]
+  );
+
+  const extensionUi = useMemo<DCodeExtensionUiApi>(
+    () => ({
+      showQuickPick: async (items, title) => {
+        appendOutput(
+          `[extensions] quick pick requested (“${title ?? "options"}”, ${items.length} items) — no picker UI mounted`
+        );
+        toast.info(
+          title ?? "Pick an option",
+          "The quick-pick UI isn't mounted in this workspace yet."
+        );
+        return null;
+      },
+      notify: (message: string) => {
+        toast.info(message);
+      },
+      showView: (viewId: string) => {
+        appendOutput(`[extensions] view requested: ${viewId}`);
+        toast.info(
+          "Extension view",
+          `The “${viewId}” panel isn't mounted in this workspace yet.`
+        );
+      },
+    }),
+    [appendOutput, toast]
+  );
+
+  /* Activate enabled extensions once (skipped in read-only share views). */
+  useEffect(() => {
+    if (readOnly) return;
+    void activateEnabledExtensions(workspaceApi, extensionUi);
+    return () => {
+      void deactivateAllExtensions();
+    };
+  }, [extensionUi, readOnly, workspaceApi]);
+
+  /** Live editor refs for extensions + re-activation of Monaco providers. */
+  const handleEditorReady = useCallback(
+    (editor: DCodeMonacoEditor, monaco: DCodeMonacoNamespace) => {
+      editorRef.current = editor;
+      monacoRef.current = monaco;
+      if (!readOnly) void onMonacoEditorReady(workspaceApi, extensionUi);
+    },
+    [extensionUi, readOnly, workspaceApi]
+  );
+
+  const handleSelectionChange = useCallback((selectedText: string) => {
+    selectionRef.current = selectedText;
+  }, []);
+
+  /** Reliable enable/disable: persists + activates/deactivates live. */
+  const handleExtensionToggle = useCallback(
+    (id: string, enabled: boolean) => {
+      setEnabledExtensions((prev) =>
+        enabled
+          ? prev.includes(id)
+            ? prev
+            : [...prev, id]
+          : prev.filter((x) => x !== id)
+      );
+      if (readOnly) {
+        setExtensionEnabledState(
+          id,
+          enabled,
+          BUILTIN_EXTENSION_IDS,
+          DEFAULT_DISABLED_IDS
+        );
+        return;
+      }
+      void setExtensionEnabled(id, enabled, workspaceApi, extensionUi);
+    },
+    [extensionUi, readOnly, workspaceApi]
   );
 
   /* ------------------------------ save status ----------------------------- */
@@ -1589,12 +1873,8 @@ export function DCodeWorkspace({
     if (readOnly) {
       return (
         <>
-          {isPublic ? (
-            <GlobeIcon className="h-3 w-3 text-cyan-400" />
-          ) : (
-            <LockIcon className="h-3 w-3 text-violet-400" />
-          )}
-          {isPublic ? "Read-only view" : "Private preview"}
+          <GlobeIcon className="h-3 w-3 text-cyan-400" />
+          Read-only view
         </>
       );
     }
@@ -1651,13 +1931,16 @@ export function DCodeWorkspace({
   /* --------------------------------- render ------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
+    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#0b0f19]">
+      {/* VS Code-style application menu */}
+      <nav aria-label="Editor menu" className="flex flex-shrink-0 items-center gap-5 border-b border-white/[0.06] bg-[#111827] px-4 py-1.5 text-[11px] text-zinc-400">
+        <span className="mr-2 font-semibold text-cyan-300">D-Code</span>
+        {['File', 'Edit', 'Selection', 'View', 'Go', 'Run', 'Terminal', 'Help'].map((item) => <button key={item} type="button" className="transition-colors hover:text-white">{item}</button>)}
+      </nav>
       {/* Top bar: editable title + save status + share */}
       <div className="flex flex-shrink-0 items-center gap-3 border-b border-white/[0.06] bg-navy/60 px-4 py-2.5">
         {readOnly ? (
-          <h1 className="min-w-0 truncate text-sm font-semibold text-white">
-            {title}
-          </h1>
+          <h1 className="min-w-0 truncate text-sm font-semibold text-white">{title}</h1>
         ) : (
           <input
             type="text"
@@ -1689,20 +1972,16 @@ export function DCodeWorkspace({
 
           {readOnly ? (
             <span className="flex items-center gap-1.5 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1.5 text-[11px] font-medium text-cyan-300">
-              {isPublic ? (
-                <GlobeIcon className="h-3 w-3" />
-              ) : (
-                <LockIcon className="h-3 w-3" />
-              )}
-              {isPublic ? "Shared read-only" : "Owner-only preview"}
+              <GlobeIcon className="h-3 w-3" />
+              Shared read-only
             </span>
           ) : (
             <>
               <button
                 type="button"
                 onClick={() => setTerminalOpen((open) => !open)}
-                title="Toggle terminal (Ctrl + `)"
-                aria-label="Toggle terminal"
+                title="Toggle bottom panel (Ctrl + `)"
+                aria-label="Toggle bottom panel"
                 className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
                   terminalOpen
                     ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
@@ -1726,14 +2005,38 @@ export function DCodeWorkspace({
                 />
                 Connect GitHub
               </button>
+              {isPublic && (
+                <button
+                  type="button"
+                  onClick={() => void handleUnshare()}
+                  disabled={savingShare}
+                  title="Make private (revokes the share link)"
+                  aria-label="Make private"
+                  className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200 disabled:opacity-50"
+                >
+                  {savingShare ? (
+                    <LoaderIcon className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <LockIcon className="h-3 w-3" />
+                  )}
+                  Make private
+                </button>
+              )}
               <button
                 type="button"
-                onClick={handleShare}
-                title="Open Share Hub"
-                aria-label="Share project"
-                className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
+                onClick={() => void openShareHub()}
+                disabled={hubBusy !== null}
+                title="Open the Share Hub — link, preview, composers & privacy"
+                aria-label="Open share hub"
+                className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
-                <ShareIcon className="h-3.5 w-3.5" />
+                {hubBusy === "opening" ? (
+                  <LoaderIcon className="h-3 w-3 animate-spin" />
+                ) : isPublic ? (
+                  <GlobeIcon className="h-3 w-3" />
+                ) : (
+                  <ShareIcon className="h-3 w-3" />
+                )}
                 Share
               </button>
             </>
@@ -1741,11 +2044,12 @@ export function DCodeWorkspace({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 bg-[#0a0e1a]">
-        {/* Activity bar always stays at the far left of the workstation. */}
+      {/* VS Code body: activity bar + side panel + editor column */}
+      <div className="flex min-h-0 flex-1">
+        {/* Activity bar */}
         <nav
-          aria-label="D-Code activity bar"
-          className="flex w-12 flex-shrink-0 flex-col border-r border-white/[0.07] bg-[#0c1322] py-2"
+          aria-label="Activity bar"
+          className="flex w-12 flex-shrink-0 flex-col items-center gap-1 border-r border-white/[0.06] bg-[#0a0e1a]/80 py-2"
         >
           {(
             [
@@ -1759,680 +2063,608 @@ export function DCodeWorkspace({
               type="button"
               title={label}
               aria-label={label}
-              aria-pressed={sidePanel === id}
-              onClick={() =>
-                setSidePanel((current) => (current === id ? null : id))
-              }
-              className={`flex h-11 w-full items-center justify-center border-l-2 transition-colors ${sidePanel === id ? "border-cyan-400 bg-cyan-400/[0.07] text-cyan-300" : "border-transparent text-zinc-500 hover:text-zinc-200"}`}
+              aria-pressed={activityView === id}
+              onClick={() => setActivityView(id)}
+              className={`relative flex h-10 w-10 items-center justify-center rounded-lg transition-colors ${
+                activityView === id
+                  ? "bg-cyan-500/10 text-cyan-300"
+                  : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200"
+              }`}
             >
+              {activityView === id && (
+                <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-cyan-400" />
+              )}
               <Icon className="h-5 w-5" />
             </button>
           ))}
-          <button
-            type="button"
-            title="Editor settings"
-            aria-label="Editor settings"
-            aria-pressed={sidePanel === "settings"}
-            onClick={() =>
-              setSidePanel((current) =>
-                current === "settings" ? null : "settings",
-              )
-            }
-            className={`mt-auto flex h-11 w-full items-center justify-center border-l-2 transition-colors ${sidePanel === "settings" ? "border-violet-400 bg-violet-400/[0.08] text-violet-300" : "border-transparent text-zinc-500 hover:text-zinc-200"}`}
-          >
-            <SettingsIcon className="h-5 w-5" />
-          </button>
+          <div className="mt-auto">
+            <button
+              type="button"
+              title="Settings"
+              aria-label="Settings"
+              onClick={() => router.push("/settings")}
+              className="flex h-10 w-10 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-200"
+            >
+              <SettingsIcon className="h-5 w-5" />
+            </button>
+          </div>
         </nav>
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div
-            className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}
-          >
-            {sidePanel === "explorer" && (
-              <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.07] bg-[#10192a]">
-                <p className="px-3 pb-2 pt-3 text-[10px] font-semibold uppercase tracking-[0.17em] text-zinc-400">
-                  Explorer
-                </p>
-                <div className="flex items-center gap-1.5 border-y border-white/[0.05] px-3 py-2 text-xs font-semibold text-zinc-200">
-                  <FolderIcon className="h-3.5 w-3.5 text-cyan-300" />
-                  <span className="min-w-0 flex-1 truncate">
-                    {title || "my-app"}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 px-4 pb-1 pt-3 font-mono text-[11px] text-zinc-400">
-                  <span className="text-zinc-600">⌄</span>
-                  <FolderIcon className="h-3 w-3" /> src
-                </div>
-                <ul className="min-h-0 flex-1 overflow-y-auto pl-4 pr-2">
-                  {files.map((file) => {
-                    const isActive = activeFile?.id === file.id;
-                    const isRenaming = renamingFileId === file.id;
-                    return (
-                      <li key={file.id} className="group relative">
-                        {isRenaming ? (
-                          <div className="space-y-1.5 rounded-lg border border-cyan-400/40 bg-white/[0.03] p-1.5">
-                            <input
-                              type="text"
-                              value={renamingName}
-                              autoFocus
-                              onChange={(e) => setRenamingName(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") handleRenameFile();
-                                if (e.key === "Escape") cancelRename();
-                              }}
-                              placeholder="e.g. utils.ts"
-                              aria-label="Rename file"
-                              spellCheck={false}
-                              className="h-8 w-full rounded-md bg-transparent px-1 text-xs text-zinc-200 placeholder-zinc-500 outline-none"
-                            />
-                            <div className="flex gap-1.5">
-                              <button
-                                type="button"
-                                onClick={handleRenameFile}
-                                className="flex-1 rounded-md bg-cyan-500 px-2 py-1 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
-                              >
-                                Rename
-                              </button>
-                              <button
-                                type="button"
-                                onClick={cancelRename}
-                                className="flex-1 rounded-md border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:text-zinc-200"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectFile(file.id)}
-                              className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
-                                isActive
-                                  ? "bg-cyan-500/10 text-cyan-300"
-                                  : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
-                              }`}
-                            >
-                              <FileKindIcon name={file.name} />
-                              <span className="min-w-0 flex-1 truncate">
-                                {file.name}
-                              </span>
-                            </button>
-                            {!readOnly && (
-                              <div className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md bg-[#0d1020]/90 p-0.5 group-hover:flex">
-                                <button
-                                  type="button"
-                                  aria-label={`Rename ${file.name}`}
-                                  title={`Rename ${file.name}`}
-                                  onClick={() => startRename(file)}
-                                  className="rounded-md p-1 text-zinc-500 transition-colors hover:text-cyan-300"
-                                >
-                                  <PenIcon className="h-3 w-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  aria-label={`Delete ${file.name}`}
-                                  title={`Delete ${file.name}`}
-                                  onClick={() => handleDeleteFile(file.id)}
-                                  disabled={deletingFileId !== null}
-                                  className="rounded-md p-1 text-zinc-500 transition-colors hover:text-red-400 disabled:opacity-50"
-                                >
-                                  {deletingFileId === file.id ? (
-                                    <LoaderIcon className="h-3 w-3 animate-spin" />
-                                  ) : (
-                                    <TrashIcon className="h-3 w-3" />
-                                  )}
-                                </button>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-
-                {/* New file */}
-                {!readOnly && (
-                  <div className="flex-shrink-0 border-t border-white/[0.06] p-2">
-                    {addingFile ? (
-                      <div className="space-y-1.5">
-                        <input
-                          type="text"
-                          value={newFileName}
-                          autoFocus
-                          onChange={(e) => setNewFileName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleAddFile();
-                            if (e.key === "Escape") {
-                              setAddingFile(false);
-                              setNewFileName("");
-                            }
-                          }}
-                          placeholder="e.g. utils.ts"
-                          aria-label="New file name"
-                          spellCheck={false}
-                          className="h-8 w-full rounded-lg border border-cyan-400/40 bg-white/[0.03] px-2 text-xs text-zinc-200 placeholder-zinc-500 outline-none"
+        {/* Side panel — Explorer (file tree) */}
+        {activityView === "explorer" && (
+        <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+          <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+            Files
+          </p>
+          <ul className="min-h-0 flex-1 overflow-y-auto px-2">
+            {files.map((file) => {
+              const isActive = activeFile?.id === file.id;
+              const { Icon: FileIcon, color: fileColor } = fileIconFor(file.name);
+              const isRenaming = renamingFileId === file.id;
+              return (
+                <li key={file.id} className="group relative">
+                  {isRenaming ? (
+                    <div className="space-y-1.5 rounded-lg border border-cyan-400/40 bg-white/[0.03] p-1.5">
+                      <input
+                        type="text"
+                        value={renamingName}
+                        autoFocus
+                        onChange={(e) => setRenamingName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleRenameFile();
+                          if (e.key === "Escape") cancelRename();
+                        }}
+                        placeholder="e.g. utils.ts"
+                        aria-label="Rename file"
+                        spellCheck={false}
+                        className="h-8 w-full rounded-md bg-transparent px-1 text-xs text-zinc-200 placeholder-zinc-500 outline-none"
+                      />
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleRenameFile}
+                          className="flex-1 rounded-md bg-cyan-500 px-2 py-1 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRename}
+                          className="flex-1 rounded-md border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:text-zinc-200"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectFile(file.id)}
+                        className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
+                          isActive
+                            ? "bg-cyan-500/10 text-cyan-300"
+                            : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
+                        }`}
+                      >
+                        <FileIcon
+                          className={`h-3.5 w-3.5 flex-shrink-0 ${fileColor}`}
                         />
-                        <div className="flex gap-1.5">
+                        <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                      </button>
+                      {!readOnly && (
+                        <div className="absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded-md bg-[#0d1020]/90 p-0.5 group-hover:flex">
                           <button
                             type="button"
-                            onClick={handleAddFile}
-                            className="flex-1 rounded-lg bg-cyan-500 px-2 py-1 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
+                            aria-label={`Rename ${file.name}`}
+                            title={`Rename ${file.name}`}
+                            onClick={() => startRename(file)}
+                            className="rounded-md p-1 text-zinc-500 transition-colors hover:text-cyan-300"
                           >
-                            Add
+                            <PenIcon className="h-3 w-3" />
                           </button>
                           <button
                             type="button"
-                            onClick={() => {
-                              setAddingFile(false);
-                              setNewFileName("");
-                            }}
-                            className="flex-1 rounded-lg border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:text-zinc-200"
+                            aria-label={`Delete ${file.name}`}
+                            title={`Delete ${file.name}`}
+                            onClick={() => handleDeleteFile(file.id)}
+                            disabled={deletingFileId !== null}
+                            className="rounded-md p-1 text-zinc-500 transition-colors hover:text-red-400 disabled:opacity-50"
                           >
-                            Cancel
+                            {deletingFileId === file.id ? (
+                              <LoaderIcon className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <TrashIcon className="h-3 w-3" />
+                            )}
                           </button>
                         </div>
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setAddingFile(true)}
-                          className="flex w-full items-center gap-2 rounded-lg border border-dashed border-white/[0.10] px-2.5 py-2 text-[12px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
-                        >
-                          <PlusIcon className="h-3.5 w-3.5" />
-                          New file
-                        </button>
-                        {!readOnly && (
-                          <div className="flex gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => fileInputRef.current?.click()}
-                              disabled={uploadingFiles}
-                              title="Upload files — images import as Base64 previews"
-                              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
-                            >
-                              {uploadingFiles ? (
-                                <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <PaperclipIcon className="h-3.5 w-3.5" />
-                              )}
-                              Upload
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => folderInputRef.current?.click()}
-                              disabled={uploadingFiles}
-                              title="Upload an entire folder (images, fonts and source files)"
-                              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
-                            >
-                              <FolderIcon className="h-3.5 w-3.5" />
-                              Folder
-                            </button>
-                          </div>
-                        )}
-                        {/* Hidden inputs: multiple files, or a whole folder. */}
-                        <input
-                          ref={fileInputRef}
-                          type="file"
-                          multiple
-                          hidden
-                          onChange={(e) => {
-                            if (e.target.files)
-                              void handleImportFiles(e.target.files);
-                          }}
-                        />
-                        <input
-                          ref={folderInputRef}
-                          type="file"
-                          multiple
-                          hidden
-                          {...({ webkitdirectory: "", directory: "" } as Record<
-                            string,
-                            string
-                          >)}
-                          onChange={(e) => {
-                            if (e.target.files)
-                              void handleImportFiles(e.target.files);
-                          }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </aside>
-            )}
-
-            {sidePanel === "search" && (
-              <aside
-                aria-label="Search project files"
-                className="flex min-h-0 w-56 flex-shrink-0 flex-col border-r border-white/[0.07] bg-[#10192a]"
-              >
-                <h2 className="px-3 pb-3 pt-3 text-[10px] font-semibold uppercase tracking-[0.17em] text-zinc-400">
-                  Search
-                </h2>
-                <div className="px-3">
-                  <div className="flex items-center gap-1.5 rounded-md border border-white/[0.12] bg-[#0a1020] px-2 focus-within:border-cyan-400/50">
-                    <SearchIcon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-                    <input
-                      ref={searchInputRef}
-                      type="search"
-                      aria-label="Find in project"
-                      placeholder="Find in project"
-                      value={searchQuery}
-                      onChange={(event) => setSearchQuery(event.target.value)}
-                      className="h-9 min-w-0 flex-1 bg-transparent text-xs text-white placeholder-zinc-600 outline-none"
-                    />
-                  </div>
-                </div>
-                <p className="px-3 py-3 font-mono text-[10px] text-zinc-500">
-                  {searchQuery.trim()
-                    ? `${searchResults.length} matches`
-                    : "Search file names & content"}
-                </p>
-                <ul className="min-h-0 flex-1 overflow-y-auto px-2">
-                  {searchResults.map(({ file, line, excerpt }) => (
-                    <li key={file.id}>
-                      <button
-                        type="button"
-                        onClick={() => handleSelectFile(file.id)}
-                        className="w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-white/[0.06]"
-                      >
-                        <span className="flex items-center gap-2 text-[11px] text-zinc-200">
-                          <FileKindIcon name={file.name} />
-                          <span className="min-w-0 truncate">{file.name}</span>
-                        </span>
-                        {excerpt && (
-                          <span className="mt-1 block truncate pl-7 font-mono text-[10px] text-zinc-500">
-                            {line}: {excerpt}
-                          </span>
-                        )}
-                      </button>
-                    </li>
-                  ))}
-                  {searchQuery.trim() && searchResults.length === 0 && (
-                    <li className="px-2 py-4 text-xs text-zinc-500">
-                      No matches in this project.
-                    </li>
-                  )}
-                </ul>
-              </aside>
-            )}
-
-            {sidePanel === "extensions" && (
-              <aside
-                aria-label="Extensions"
-                className="flex min-h-0 w-56 flex-shrink-0 flex-col border-r border-white/[0.07] bg-[#10192a]"
-              >
-                <h2 className="px-3 pb-3 pt-3 text-[10px] font-semibold uppercase tracking-[0.17em] text-zinc-400">
-                  Extensions
-                </h2>
-                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3">
-                  <div className="rounded-lg border border-white/[0.08] bg-white/[0.025] p-3">
-                    <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
-                      <CodeIcon className="h-4 w-4 text-cyan-300" /> Monaco
-                      language tools
-                    </div>
-                    <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
-                      Syntax highlighting, suggestions and inline diagnostics
-                      for your code files.
-                    </p>
-                    <span className="mt-3 inline-block font-mono text-[10px] text-emerald-300">
-                      ● BUILT IN
-                    </span>
-                  </div>
-                  <div className="rounded-lg border border-white/[0.08] bg-white/[0.025] p-3">
-                    <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
-                      <GithubIcon className="h-4 w-4" /> GitHub importer
-                    </div>
-                    <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
-                      Bring repository source files into your workspace.
-                    </p>
-                    {!readOnly && (
-                      <button
-                        type="button"
-                        onClick={openGitHubModal}
-                        className="mt-3 w-full rounded-md bg-cyan-400/10 px-2 py-2 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20"
-                      >
-                        {githubConnected
-                          ? "Browse repositories"
-                          : "Connect GitHub"}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </aside>
-            )}
-
-            {sidePanel === "settings" && (
-              <aside
-                aria-label="Editor settings"
-                className="flex min-h-0 w-56 flex-shrink-0 flex-col border-r border-white/[0.07] bg-[#10192a]"
-              >
-                <h2 className="px-3 pb-3 pt-3 text-[10px] font-semibold uppercase tracking-[0.17em] text-zinc-400">
-                  Editor settings
-                </h2>
-                <div className="space-y-4 px-3">
-                  <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] pb-3 text-xs text-zinc-300">
-                    <span>Minimap</span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-label="Show minimap"
-                      aria-checked={minimapEnabled}
-                      onClick={() => setMinimapEnabled((prev) => !prev)}
-                      className={`relative h-5 w-9 rounded-full transition-colors ${minimapEnabled ? "bg-cyan-500" : "bg-zinc-700"}`}
-                    >
-                      <span
-                        className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${minimapEnabled ? "translate-x-4" : ""}`}
-                      />
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] pb-3 text-xs text-zinc-300">
-                    <span>Word wrap</span>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-label="Enable word wrap"
-                      aria-checked={wordWrapEnabled}
-                      onClick={() => setWordWrapEnabled((prev) => !prev)}
-                      className={`relative h-5 w-9 rounded-full transition-colors ${wordWrapEnabled ? "bg-cyan-500" : "bg-zinc-700"}`}
-                    >
-                      <span
-                        className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${wordWrapEnabled ? "translate-x-4" : ""}`}
-                      />
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 text-xs text-zinc-300">
-                    <span>Font size</span>
-                    <div className="flex items-center gap-2 font-mono">
-                      <button
-                        type="button"
-                        aria-label="Decrease editor font size"
-                        disabled={editorFontSize <= 11}
-                        onClick={() => setEditorFontSize((size) => size - 1)}
-                        className="rounded bg-white/[0.06] px-2 py-1 hover:bg-white/[0.1] disabled:opacity-40"
-                      >
-                        −
-                      </button>
-                      {editorFontSize}
-                      <button
-                        type="button"
-                        aria-label="Increase editor font size"
-                        disabled={editorFontSize >= 18}
-                        onClick={() => setEditorFontSize((size) => size + 1)}
-                        className="rounded bg-white/[0.06] px-2 py-1 hover:bg-white/[0.1] disabled:opacity-40"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                  <p className="pt-3 text-[11px] leading-relaxed text-zinc-500">
-                    Changes apply immediately to the current editor.
-                  </p>
-                </div>
-              </aside>
-            )}
-
-            {/* Editor column */}
-            <div className="flex min-w-0 flex-1 flex-col bg-[#0a0e1a]">
-              {/* Only open files have tabs; closing a tab doesn't delete it. */}
-              <div
-                role="tablist"
-                aria-label="Open files"
-                className="flex h-10 flex-shrink-0 items-stretch overflow-x-auto border-b border-white/[0.07] bg-[#101727] pl-1"
-              >
-                {openFiles.map((file) => {
-                  const isActive = activeFile?.id === file.id;
-                  return (
-                    <div
-                      key={file.id}
-                      className={`group flex shrink-0 items-center border-r border-white/[0.06] ${isActive ? "border-t-2 border-t-cyan-400 bg-[#0a0e1a] text-zinc-100" : "border-t-2 border-t-transparent bg-[#111a2b] text-zinc-400 hover:bg-[#172135]"}`}
-                    >
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={isActive}
-                        title={file.name}
-                        onClick={() => handleSelectFile(file.id)}
-                        className="flex h-full max-w-40 items-center gap-2 pl-3 pr-1 font-mono text-[11px] outline-none focus-visible:text-cyan-300"
-                      >
-                        <FileKindIcon name={file.name} />
-                        <span className="truncate">{file.name}</span>
-                        {isActive &&
-                          (saveState === "dirty" || saveState === "saving") && (
-                            <span
-                              className="text-amber-300"
-                              aria-label="Unsaved changes"
-                            >
-                              ●
-                            </span>
-                          )}
-                      </button>
-                      <button
-                        type="button"
-                        title={`Close ${file.name}`}
-                        aria-label={`Close ${file.name} tab`}
-                        onClick={() => handleCloseTab(file.id)}
-                        className="mx-1 flex h-6 w-6 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-white/[0.1] hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-cyan-400"
-                      >
-                        <XIcon className="h-3 w-3" />
-                      </button>
-                    </div>
-                  );
-                })}
-                {openFiles.length === 0 && (
-                  <span className="self-center px-4 font-mono text-[10px] uppercase tracking-widest text-zinc-600">
-                    No open editors
-                  </span>
-                )}
-              </div>
-
-              {/* Virtual source-tree breadcrumbs above the editor. */}
-              <nav
-                aria-label="File breadcrumbs"
-                className="flex h-8 flex-shrink-0 items-center gap-1.5 overflow-hidden border-b border-white/[0.05] bg-[#0a0e1a] px-4 font-mono text-[11px] text-zinc-500"
-              >
-                <span>projects</span>
-                <span className="text-zinc-700">›</span>
-                <span className="max-w-28 truncate">
-                  {title.trim() || "my-app"}
-                </span>
-                <span className="text-zinc-700">›</span>
-                <span>src</span>
-                {activeFile && (
-                  <>
-                    <span className="text-zinc-700">›</span>
-                    <FileKindIcon name={activeFile.name} />
-                    <span className="truncate text-zinc-200">
-                      {activeFile.name}
-                    </span>
-                  </>
-                )}
-              </nav>
-
-              {/* Monaco (or binary asset preview for images/fonts) */}
-              <div className="min-h-0 flex-1">
-                {activeFile ? (
-                  isPreviewableImage(activeFile.name, activeFile.content) ? (
-                    <BinaryAssetPreview file={activeFile} />
-                  ) : (
-                    <MonacoEditor
-                      key={`${activeFile.id}:${activeFile.language}`}
-                      value={activeFile.content}
-                      language={activeFile.language}
-                      onChange={readOnly ? undefined : updateActiveContent}
-                      onCursorChange={(line, column) =>
-                        setCursorPosition({ line, column })
-                      }
-                      onValidate={(markers) =>
-                        setDiagnostics((prev) => ({
-                          ...prev,
-                          [activeFile.id]: markers.map((marker) => ({
-                            fileId: activeFile.id,
-                            fileName: activeFile.name,
-                            line: marker.startLineNumber,
-                            column: marker.startColumn,
-                            severity:
-                              marker.severity >= 8
-                                ? "error"
-                                : marker.severity >= 4
-                                  ? "warning"
-                                  : "info",
-                            message: marker.message,
-                          })),
-                        }))
-                      }
-                      options={{
-                        minimap: {
-                          enabled: minimapEnabled,
-                          scale: 1,
-                          size: "proportional",
-                        },
-                        wordWrap: wordWrapEnabled ? "on" : "off",
-                        fontSize: editorFontSize,
-                      }}
-                      readOnly={readOnly}
-                    />
-                  )
-                ) : (
-                  <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-400/10 shadow-2xl shadow-cyan-500/10">
-                      <CodeIcon className="h-8 w-8 text-cyan-400" />
-                    </div>
-                    <h2 className="mt-6 text-xl font-semibold tracking-tight text-white">
-                      {files.length ? "No open editors" : "Welcome to D-Code"}
-                    </h2>
-                    <p className="mt-2 max-w-sm text-sm leading-relaxed text-zinc-500">
-                      {files.length
-                        ? "Select a file from Explorer to reopen it. Closing a tab keeps your file safe."
-                        : "Create a source file or open one of your projects to get started."}
-                    </p>
-                    <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-                      {files.length ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSidePanel("explorer");
-                            handleSelectFile(files[0].id);
-                          }}
-                          className="flex items-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
-                        >
-                          <FolderIcon className="h-4 w-4" /> Open{" "}
-                          {files[0].name}
-                        </button>
-                      ) : !readOnly ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSidePanel("explorer");
-                            setAddingFile(true);
-                          }}
-                          className="flex items-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
-                        >
-                          <PlusIcon className="h-4 w-4" /> Create New File
-                        </button>
-                      ) : null}
-                      {!readOnly && (
-                        <button
-                          type="button"
-                          onClick={() => router.push("/projects")}
-                          className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
-                        >
-                          <FolderIcon className="h-4 w-4" /> Open Project
-                        </button>
                       )}
-                    </div>
+                    </>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+
+          {/* New file */}
+          {!readOnly && (
+            <div className="flex-shrink-0 border-t border-white/[0.06] p-2">
+              {addingFile ? (
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    value={newFileName}
+                    autoFocus
+                    onChange={(e) => setNewFileName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleAddFile();
+                      if (e.key === "Escape") {
+                        setAddingFile(false);
+                        setNewFileName("");
+                      }
+                    }}
+                    placeholder="e.g. utils.ts"
+                    aria-label="New file name"
+                    spellCheck={false}
+                    className="h-8 w-full rounded-lg border border-cyan-400/40 bg-white/[0.03] px-2 text-xs text-zinc-200 placeholder-zinc-500 outline-none"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleAddFile}
+                      className="flex-1 rounded-lg bg-cyan-500 px-2 py-1 text-[11px] font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddingFile(false);
+                        setNewFileName("");
+                      }}
+                      className="flex-1 rounded-lg border border-white/[0.08] px-2 py-1 text-[11px] font-medium text-zinc-400 transition-colors hover:text-zinc-200"
+                    >
+                      Cancel
+                    </button>
                   </div>
-                )}
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setAddingFile(true)}
+                    className="flex w-full items-center gap-2 rounded-lg border border-dashed border-white/[0.10] px-2.5 py-2 text-[12px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                  >
+                    <PlusIcon className="h-3.5 w-3.5" />
+                    New file
+                  </button>
+                  {!readOnly && (
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploadingFiles}
+                        title="Upload files — images import as Base64 previews"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
+                      >
+                        {uploadingFiles ? (
+                          <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <PaperclipIcon className="h-3.5 w-3.5" />
+                        )}
+                        Upload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => folderInputRef.current?.click()}
+                        disabled={uploadingFiles}
+                        title="Upload an entire folder (images, fonts and source files)"
+                        className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[11px] font-medium text-zinc-500 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
+                      >
+                        <FolderIcon className="h-3.5 w-3.5" />
+                        Folder
+                      </button>
+                    </div>
+                  )}
+                  {/* Hidden inputs: multiple files, or a whole folder. */}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      if (e.target.files) void handleImportFiles(e.target.files);
+                    }}
+                  />
+                  <input
+                    ref={folderInputRef}
+                    type="file"
+                    multiple
+                    hidden
+                    {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                    onChange={(e) => {
+                      if (e.target.files) void handleImportFiles(e.target.files);
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </aside>
+        )}
+
+        {/* Side panel — Search */}
+        {activityView === "search" && (
+          <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+              Search
+            </p>
+            <div className="flex-shrink-0 px-2 pb-2">
+              <div className="relative">
+                <SearchIcon className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-500" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search files…"
+                  aria-label="Search files"
+                  spellCheck={false}
+                  className="h-8 w-full rounded-lg border border-white/[0.06] bg-white/[0.03] pl-8 pr-2 text-xs text-zinc-200 placeholder-zinc-600 outline-none transition-colors focus:border-cyan-400/40"
+                />
               </div>
             </div>
+            <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+              {searchResults.map((file) => {
+                const { Icon: FileIcon, color: fileColor } = fileIconFor(file.name);
+                return (
+                  <li key={file.id}>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectFile(file.id)}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
+                        activeFile?.id === file.id
+                          ? "bg-cyan-500/10 text-cyan-300"
+                          : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
+                      }`}
+                    >
+                      <FileIcon className={`h-3.5 w-3.5 flex-shrink-0 ${fileColor}`} />
+                      <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                    </button>
+                  </li>
+                );
+              })}
+              {searchResults.length === 0 && (
+                <li className="px-2 py-6 text-center text-xs leading-relaxed text-zinc-600">
+                  {searchQuery.trim()
+                    ? "No matching files."
+                    : "Type to search file names and contents."}
+                </li>
+              )}
+            </ul>
+          </aside>
+        )}
+
+        {/* Side panel — Extensions (real Discover + Installed, web-safe) */}
+        {activityView === "extensions" && (
+          <aside className="flex min-h-0 w-72 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
+            <ExtensionsPanel
+              enabled={enabledExtensions}
+              onToggle={handleExtensionToggle}
+            />
+          </aside>
+        )}
+
+        {/* Editor column */}
+        <div className="flex min-w-0 flex-1 flex-col">
+     
+          {/* Tab bar (VS Code chrome) */}
+          <div
+            role="tablist"
+            aria-label="Open files"
+            className="flex flex-shrink-0 items-end gap-0.5 overflow-x-auto border-b border-white/[0.06] bg-[#0d1220]/60 px-2 pt-1.5"
+          >
+            {openFiles.map((file) => {
+              const isActive = activeFile?.id === file.id;
+              const { Icon: TabIcon, color: tabColor } = fileIconFor(file.name);
+              return (
+                <div
+                  key={file.id}
+                  role="tab"
+                  aria-selected={isActive}
+                  className={`group flex flex-shrink-0 items-center gap-1 rounded-t-lg border-x border-t px-2.5 py-1.5 font-mono text-[11px] transition-colors ${
+                    isActive
+                      ? "border-white/[0.08] bg-[#0a0e1a] text-zinc-100"
+                      : "border-transparent text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleSelectFile(file.id)}
+                    className="flex items-center gap-1.5"
+                    aria-label={`Open ${file.name}`}
+                  >
+                    <TabIcon className={`h-3.5 w-3.5 ${tabColor}`} />
+                    {file.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCloseTab(file.id);
+                    }}
+                    aria-label={`Close ${file.name}`}
+                    title={`Close ${file.name}`}
+                    className={`rounded p-0.5 transition-all hover:bg-white/10 hover:text-zinc-100 ${
+                      isActive
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100"
+                    }`}
+                  >
+                    <XIcon className="h-3 w-3" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
 
-          {/* Integrated, tabbed bottom panel; CLI history survives tab switches. */}
-          {terminalOpen && (
-            <DCodeTerminal
-              files={files}
-              projectTitle={title}
-              userEmail={userEmail}
-              onOpenFile={handleSelectFile}
-              problems={problems}
-              outputLines={outputLines}
-              activeTab={terminalTab}
-              onTabChange={setTerminalTab}
-              onClose={() => setTerminalOpen(false)}
-              className="flex-[3] min-h-0"
-            />
-          )}
-        </div>
-      </div>
+          {/* Breadcrumbs (VS Code chrome) */}
+          <div className="flex flex-shrink-0 items-center gap-1 border-b border-white/[0.06] bg-[#0a0e1a]/60 px-3 py-1 text-[11px]">
+            <span className="max-w-[12rem] truncate font-medium text-zinc-400">
+              {title.trim() || "Untitled project"}
+            </span>
+            <ChevronRightIcon className="h-3 w-3 flex-shrink-0 text-zinc-600" />
+            {activeFile ? (
+              <span className="flex min-w-0 items-center gap-1 truncate text-zinc-200">
+                {(() => {
+                  const { Icon: CrumbIcon, color: crumbColor } = fileIconFor(
+                    activeFile.name
+                  );
+                  return (
+                    <CrumbIcon
+                      className={`h-3 w-3 flex-shrink-0 ${crumbColor}`}
+                    />
+                  );
+                })()}
+                <span className="truncate">{activeFile.name}</span>
+              </span>
+            ) : (
+              <span className="text-zinc-600">no file open</span>
+            )}
+          </div>
 
-      {/* Solid workstation status bar, synced to cursor, save state and model. */}
-      <div className="flex h-7 flex-shrink-0 items-center justify-between gap-4 overflow-x-auto bg-[#614bb5] px-3 font-mono text-[10px] font-medium text-white sm:px-4">
-        <div className="flex shrink-0 items-center gap-4">
-          <span
-            className="flex items-center gap-1.5"
-            title="Workspace branch and unsaved changes"
-          >
-            <CodeIcon className="h-3 w-3" />
-            Main
-            {!readOnly && (!projectId || ["dirty", "saving", "error"].includes(saveState))
-              ? "*"
-              : ""}
+          {/* Monaco (or binary asset preview for images/fonts) */}
+          <div className="min-h-0 flex-1">
+            {activeFile ? (
+              isPreviewableImage(activeFile.name, activeFile.content) ? (
+                <BinaryAssetPreview file={activeFile} />
+              ) : (
+                <MonacoEditor
+                  key={`${activeFile.id}:${activeFile.language}`}
+                  value={activeFile.content}
+                  language={activeFile.language}
+                  onChange={readOnly ? undefined : updateActiveContent}
+                  readOnly={readOnly}
+                  theme={themeId}
+                  onEditorReady={handleEditorReady}
+                  onSelectionChange={handleSelectionChange}
+                  onCursorPosition={handleCursorPosition}
+                />
+              )
+            ) : (
+              <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+                <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-400/10 shadow-2xl shadow-cyan-500/10">
+                  <CodeIcon className="h-8 w-8 text-cyan-400" />
+                </div>
+                <h2 className="mt-6 text-xl font-semibold tracking-tight text-white">
+                  Welcome to D-Code Workspace
+                </h2>
+                <p className="mt-2 max-w-sm text-sm leading-relaxed text-zinc-500">
+                  Create a source file to start coding, or open one of your
+                  existing projects.
+                </p>
+                <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setAddingFile(true)}
+                    className="flex items-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400"
+                  >
+                    <PlusIcon className="h-4 w-4" />
+                    Create New File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                  >
+                    <FolderIcon className="h-4 w-4" />
+                    Open Project
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        </div>
+
+      {/* Bottom panel — Terminal / Output / Problems (VS Code chrome) */}
+      {terminalOpen && (
+        <div
+          className="flex h-64 flex-shrink-0 flex-col border-t border-white/[0.06]"
+          style={{ backgroundColor: "#05070d" }}
+        >
+          <div className="flex flex-shrink-0 items-center gap-1 border-b border-white/[0.06] bg-[#0a0e1a] px-2 py-1">
+            {(
+              [
+                { id: "terminal", label: "Terminal" },
+                { id: "output", label: "Output" },
+                {
+                  id: "problems",
+                  label: `Problems${problems.length > 0 ? ` (${problems.length})` : ""}`,
+                },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setBottomTab(tab.id)}
+                aria-pressed={bottomTab === tab.id}
+                className={`rounded-md px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors ${
+                  bottomTab === tab.id
+                    ? "bg-white/[0.06] text-cyan-300"
+                    : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <span className="ml-1 hidden font-mono text-[10px] text-zinc-600 sm:inline">
+              Ctrl + `
+            </span>
+            <button
+              type="button"
+              onClick={() => setTerminalOpen(false)}
+              aria-label="Close panel"
+              title="Close panel (Ctrl + `)"
+              className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+            >
+              <XIcon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1">
+            {bottomTab === "terminal" ? (
+              <DCodeTerminal
+                bare
+                files={files}
+                projectTitle={title}
+                userEmail={userEmail}
+                onOpenFile={handleSelectFile}
+                onClose={() => setTerminalOpen(false)}
+              />
+            ) : bottomTab === "output" ? (
+              <div className="h-full overflow-y-auto px-3 py-2 font-mono text-[12px] leading-relaxed">
+                {outputLines.map((line, index) => (
+                  <div
+                    key={index}
+                    className="whitespace-pre-wrap text-zinc-300"
+                  >
+                    {line || " "}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="h-full overflow-y-auto px-3 py-2 text-[12px]">
+                {problems.length === 0 ? (
+                  <div className="flex h-full items-center justify-center gap-2 text-zinc-500">
+                    <CheckIcon className="h-4 w-4 text-emerald-400" />
+                    <span>No problems detected in this workspace.</span>
+                  </div>
+                ) : (
+                  problems.map((problem, index) => (
+                    <div
+                      key={index}
+                      className="flex items-center gap-2 border-b border-white/[0.04] py-1.5"
+                    >
+                      <AlertIcon className="h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
+                      <span className="font-mono text-zinc-200">
+                        {problem.file}
+                      </span>
+                      <span className="truncate text-zinc-500">
+                        {problem.message}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Status bar (VS Code chrome) */}
+      <footer className="flex h-7 flex-shrink-0 items-center gap-3 bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 px-3 text-[11px] font-medium text-white">
+        <span
+          className="flex items-center gap-1.5"
+          title={isPublic ? "Public project" : "Private project"}
+        >
+          <BranchIcon className="h-3 w-3" />
+          main{saveState === "dirty" || saveState === "saving" ? "*" : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            setBottomTab("problems");
+            setTerminalOpen(true);
+          }}
+          title="Show problems"
+          className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
+        >
+          <AlertIcon className="h-3 w-3" />
+          {problems.length}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActivityView("extensions")}
+          title={`${enabledExtensions.length} extensions enabled — open Extensions`}
+          className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
+        >
+          <ExtensionsIcon className="h-3 w-3" />
+          {enabledExtensions.length}
+        </button>
+        <span className="hidden items-center gap-1 md:flex">
+          {enabledExtensions.slice(0, 3).map((id) => (
+            <span
+              key={id}
+              title={extensionFullName(id)}
+              className="rounded bg-white/15 px-1.5 py-px text-[10px] font-semibold"
+            >
+              {extensionShortLabel(id)}
+            </span>
+          ))}
+          {enabledExtensions.length > 3 && (
+            <span
+              className="text-[10px] opacity-80"
+              title={enabledExtensions
+                .slice(3)
+                .map(extensionFullName)
+                .join(", ")}
+            >
+              +{enabledExtensions.length - 3}
+            </span>
+          )}
+        </span>
+        <span className="hidden items-center gap-1.5 opacity-90 sm:flex">
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "dirty"
+              ? projectId
+                ? "Unsaved changes"
+                : "Draft — press ⌘S to save"
+              : saveState === "error"
+                ? "Save failed"
+                : "Saved"}
+        </span>
+        <div className="ml-auto flex items-center gap-3">
+          <span>
+            Ln {cursor.line}, Col {cursor.column}
+          </span>
+          <span className="hidden sm:inline">Spaces: 2</span>
+          <span className="hidden sm:inline">UTF-8</span>
+          <span className="hidden capitalize md:inline">
+            {activeFile?.language ?? "plaintext"}
           </span>
           <button
             type="button"
-            disabled={readOnly}
-            onClick={() => {
-              setTerminalOpen(true);
-              setTerminalTab("problems");
-            }}
-            className="flex items-center gap-1.5 rounded px-1 transition-colors hover:bg-white/15 disabled:cursor-default disabled:hover:bg-transparent"
-            title={
-              readOnly
-                ? "Problems are available in the editor"
-                : "Open Problems panel"
-            }
+            onClick={() => setTerminalOpen((open) => !open)}
+            title="Toggle panel (Ctrl + `)"
+            aria-label="Toggle panel"
+            className="flex items-center gap-1 rounded px-1 py-0.5 transition-colors hover:bg-white/15"
           >
-            <span className="text-white/80">◇</span>
-            {problems.length} Problems
+            <TerminalIcon className="h-3 w-3" />
           </button>
+          <BellIcon className="hidden h-3 w-3 opacity-80 sm:block" />
         </div>
-        <div className="flex shrink-0 items-center gap-4 sm:gap-5">
-          <span>
-            Ln {cursorPosition.line}, Col {cursorPosition.column}
-          </span>
-          <span>UTF-8</span>
-          <span
-            className="inline-flex items-center gap-1.5 rounded border border-white/25 bg-white/10 px-1.5 py-0.5"
-            title={`Active AI model: ${activeModel.label}`}
-          >
-            <span
-              className="h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: activeModel.accent }}
-            />
-            {activeModel.label}
-          </span>
-        </div>
-      </div>
-
-      <ShareHub
-        open={shareHubOpen}
-        onClose={closeShareHub}
-        kind="D-Code"
-        title={title}
-        description={
-          project?.description?.trim() ||
-          `Explore ${title || "this project"} in D-Code, the DashyCore workspace.`
-        }
-        url={shareUrl}
-        isPublic={isPublic}
-        busy={savingShare}
-        error={shareError}
-        onVisibilityChange={(value) => void handleVisibilityChange(value)}
-        onRetry={() => void prepareShareHub()}
-      />
+      </footer>
 
       {/* GitHub connect / import modal */}
       {githubModalOpen && (
@@ -2454,9 +2686,7 @@ export function DCodeWorkspace({
                 <GithubIcon className="h-5 w-5" />
               </span>
               <div className="min-w-0 flex-1">
-                <h2 className="text-sm font-semibold text-white">
-                  Connect GitHub
-                </h2>
+                <h2 className="text-sm font-semibold text-white">Connect GitHub</h2>
                 <p className="mt-0.5 text-xs text-zinc-500">
                   Import a repository or fetch raw files into this project.
                 </p>
@@ -2509,10 +2739,9 @@ export function DCodeWorkspace({
                   </button>
                 </div>
                 <p className="mt-1.5 text-[11px] text-zinc-600">
-                  Paste any public repo (e.g.
-                  https://github.com/PPpro-blip/Dashy-core). Source files plus
-                  up to {MAX_IMPORT_FILES} — images and fonts come in as Base64
-                  previews.
+                  Paste any public repo (e.g. https://github.com/PPpro-blip/Dashy-core).
+                  Source files plus up to {MAX_IMPORT_FILES} — images and fonts come in as
+                  Base64 previews.
                 </p>
               </div>
 
@@ -2594,6 +2823,29 @@ export function DCodeWorkspace({
             </div>
           </div>
         </>
+      )}
+
+      {/* Share Hub — owner-only (visitors get it via the public share page). */}
+      {shareHubOpen && !readOnly && (
+        <ShareHub
+          key={shareSlug ?? "private"}
+          project={
+            projectId ? { id: projectId, title, files } : null
+          }
+          shareUrl={hubShareUrl}
+          privacy={{
+            isPublic,
+            busy: hubBusy === "toggle",
+            onToggle: (next) => void handleHubTogglePublic(next),
+          }}
+          management={{
+            busy: hubBusy === "regenerate" || hubBusy === "revoke" ? hubBusy : null,
+            canManage: isPublic || shareSlug !== null,
+            onRegenerate: () => void handleHubRegenerate(),
+            onRevoke: () => void handleHubRevoke(),
+          }}
+          onClose={() => setShareHubOpen(false)}
+        />
       )}
     </div>
   );
