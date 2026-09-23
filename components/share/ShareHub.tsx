@@ -38,6 +38,7 @@ import { ShareComposer } from "@/components/share/ShareComposer";
 import { ShareQr } from "@/components/share/ShareQr";
 import { useToast } from "@/components/Toast";
 import {
+  CheckIcon,
   CopyIcon,
   GlobeIcon,
   LinkIcon,
@@ -89,6 +90,7 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
   const toast = useToast();
   const [selectedApp, setSelectedApp] = useState<ShareAppId | null>(null);
   const [copying, setCopying] = useState(false);
+  const [copyResult, setCopyResult] = useState<"copied" | "failed" | null>(null);
   const [sharingNow, setSharingNow] = useState(false);
   const [showQr, setShowQr] = useState(false);
   /** Two-step confirm for the destructive revoke action. */
@@ -127,11 +129,18 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
     return () => window.clearTimeout(timer);
   }, [confirmingRevoke]);
 
+  useEffect(() => {
+    if (!copyResult) return;
+    const timer = window.setTimeout(() => setCopyResult(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [copyResult]);
+
   // Keep the composer's permalink in sync with the canonical share URL —
   // e.g. the owner hits "Make public" while the hub is open and the freshly
   // assigned slug must flow into copy/QR/intents immediately.
   useEffect(() => {
     if (!shareUrl) return;
+    setCopyResult(null);
     setDraft((current) =>
       current.url === shareUrl ? current : { ...current, url: shareUrl }
     );
@@ -173,18 +182,9 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
 
   const handleCopyLink = async () => {
     setCopying(true);
+    setCopyResult(null);
     try {
-      const ok = await copyText(url);
-      const message = ok
-        ? privacy && !privacy.isPublic
-          ? "The project is private — visitors will see the private notice until you make it public."
-          : "Anyone with the link can view this project."
-        : "Please copy manually.";
-      toast.show({
-        type: ok ? "success" : "error",
-        title: ok ? "Link copied to clipboard!" : "Copy failed",
-        message,
-      });
+      setCopyResult((await copyText(url)) ? "copied" : "failed");
     } finally {
       setCopying(false);
     }
@@ -331,22 +331,29 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
             {/* Public URL row: link + Copy + QR */}
             <div className="flex items-center gap-2 border-t border-white/[0.06] bg-black/20 px-4 py-3">
               <GlobeIcon className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400/70" />
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-400">
-                {url || "Assigning share link…"}
-              </span>
+              <input
+                aria-label="Share link"
+                readOnly
+                value={url}
+                placeholder="Assigning share link…"
+                onFocus={(event) => event.currentTarget.select()}
+                className="min-w-0 flex-1 truncate bg-transparent font-mono text-[11px] text-zinc-400 outline-none placeholder:text-zinc-500"
+              />
               <button
                 type="button"
                 onClick={() => void handleCopyLink()}
                 disabled={!url || copying}
-                title="Copy the public project link"
+                title="Copy the share link"
                 className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20 disabled:opacity-40"
               >
                 {copying ? (
                   <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                ) : copyResult === "copied" ? (
+                  <CheckIcon className="h-3.5 w-3.5" />
                 ) : (
                   <CopyIcon className="h-3.5 w-3.5" />
                 )}
-                Copy
+                {copyResult === "copied" ? "Copied" : "Copy"}
               </button>
               <button
                 type="button"
@@ -363,6 +370,20 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
                 QR
               </button>
             </div>
+            {copyResult && (
+              <p
+                role="status"
+                className={`border-t border-white/[0.06] px-4 py-2 text-[11px] ${
+                  copyResult === "copied" ? "text-cyan-300" : "text-amber-300"
+                }`}
+              >
+                {copyResult === "failed"
+                  ? "Copy failed. Select the link above to copy it manually."
+                  : privacy && !privacy.isPublic
+                  ? "Copied. Visitors cannot open this link until you make it public."
+                  : "Link copied — ready to share."}
+              </p>
+            )}
 
             {showQr && (
               <div className="flex flex-col items-center border-t border-white/[0.06] px-4 py-4">

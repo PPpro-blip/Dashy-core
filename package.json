@@ -28,6 +28,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:share": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/share-links.test.mjs",
+    "test:share:access": "node scripts/verify-share-access.mjs"
   }
 }

@@ -430,25 +430,33 @@ function safeText(value: string | null | undefined, max = 200): string | null {
 /* CRUD                                                                    */
 /* ---------------------------------------------------------------------- */
 
-/** Lists the signed-in user's projects, most recently touched first. */
+/** Lists only the signed-in user's projects, most recently touched first. */
 export async function listProjects(): Promise<DCodeProject[]> {
   const supabase = createClient();
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError || !user) throw classError(userError ?? { message: "Sign in to list projects." });
+  // RLS also permits SELECT on *other users' public projects*. Filter by
+  // owner explicitly so public shares never appear in the editor's list.
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
+    .eq("user_id", user.id)
     .order("updated_at", { ascending: false })
     .limit(100);
   if (error) throw classError(error);
   return (data as DCodeProjectRow[]).map(rowToProject);
 }
 
-/** Fetches one owned project (RLS hides other users' rows → null). */
+/** Fetches one owned project (use the share viewer for public projects). */
 export async function getProject(id: string): Promise<DCodeProject | null> {
   const supabase = createClient();
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError || !user) throw classError(userError ?? { message: "Sign in to open a project." });
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
     .eq("id", id)
+    .eq("user_id", user.id)
     .maybeSingle();
   if (error) throw classError(error);
   return data ? rowToProject(data as DCodeProjectRow) : null;

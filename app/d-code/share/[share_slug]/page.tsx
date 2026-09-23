@@ -14,7 +14,7 @@ import { SharePageView } from "@/components/share/SharePageView";
  * params (`title`, `desc`, `img`, `v`) — see lib/share-intents#buildOgShareUrl.
  * When a crawler (or anyone) visits that URL, this metadata injects those
  * values into the OG tags. The `img` param points at a project image served
- * by the /og-image route; it falls back to the DashyCore logo.
+ * by the /og-image route; otherwise use a branded D-Code preview card.
  */
 
 interface SharePageProps {
@@ -54,7 +54,7 @@ export async function generateMetadata({
     ? `${origin}/d-code/share/${encodeURIComponent(
         share_slug
       )}/og-image?file=${encodeURIComponent(img)}`
-    : `${origin}/icon-512.png`;
+    : `${origin}/share-card.png`;
 
   return {
     title: ogTitle,
@@ -65,7 +65,9 @@ export async function generateMetadata({
       url: pageUrl,
       type: "website",
       siteName: "DashyCore",
-      images: [{ url: ogImage, width: 512, height: 512, alt: ogTitle }],
+      images: [
+        { url: ogImage, width: img ? 512 : 1200, height: img ? 512 : 630, alt: ogTitle },
+      ],
     },
     twitter: {
       card: "summary_large_image",

@@ -359,8 +359,13 @@ export function buildWhatsAppUrl(draft: ShareDraft): string {
 }
 
 export function buildXUrl(draft: ShareDraft): string {
-  const text = buildXText(draft.caption, draft.tags, draft.url, 280);
-  return `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`;
+  // The URL must be a separate intent parameter: truncating a long caption
+  // must never chop off the actual share link at the end of the tweet.
+  // X counts a URL as ~23 characters, leaving room for the caption/tags.
+  const text = buildXText(draft.caption, draft.tags, "", 256);
+  const params = new URLSearchParams({ url: draft.url });
+  if (text) params.set("text", text);
+  return `https://twitter.com/intent/tweet?${params.toString()}`;
 }
 
 export function buildTelegramUrl(draft: ShareDraft): string {
