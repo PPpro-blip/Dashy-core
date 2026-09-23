@@ -2,6 +2,8 @@ import { type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
 export async function middleware(request: NextRequest) {
+  // updateSession exempts /s/<slug> (and legacy D-Code shares) from the
+  // sign-in redirect and returns 403 for private links opened by non-owners.
   return updateSession(request);
 }
 

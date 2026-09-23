@@ -29,6 +29,17 @@ import {
 } from "@/lib/dcode-binary";
 import { XIcon } from "@/components/icons";
 
+export type TerminalPanelTab = "terminal" | "output" | "problems";
+
+export interface DCodeProblem {
+  fileId: string;
+  fileName: string;
+  line: number;
+  column: number;
+  severity: "error" | "warning" | "info";
+  message: string;
+}
+
 export interface DCodeTerminalProps {
   /** Project files — powering `ls`, `cat`, `open`, `node` and `git status`. */
   files: DCodeFile[];
@@ -38,26 +49,25 @@ export interface DCodeTerminalProps {
   userEmail: string | null;
   /** Switches the active editor file (called by `open <name>`). */
   onOpenFile: (id: string) => void;
-  /** Closes the terminal drawer. */
+  /** Real Monaco diagnostics and current workspace events. */
+  problems: DCodeProblem[];
+  outputLines: string[];
+  activeTab: TerminalPanelTab;
+  onTabChange: (tab: TerminalPanelTab) => void;
+  /** Closes the bottom panel. */
   onClose: () => void;
   /** Applied to the drawer root so the workspace can size it (30%). */
   className?: string;
 }
 
-type LineKind =
-  | "prompt"
-  | "output"
-  | "error"
-  | "success"
-  | "muted"
-  | "accent";
+type LineKind = "prompt" | "output" | "error" | "success" | "muted" | "accent";
 
 interface TermLine {
   kind: LineKind;
   text: string;
 }
 
-const PROMPT = "dashy@dcode:~$ ";
+const PROMPT = "dashy@user:~$ ";
 
 const HELP_TEXT = [
   "DashyCore D-Code terminal — available commands:",
@@ -80,7 +90,7 @@ const HELP_TEXT = [
   "  git",
   "    git status         Show modified / new files in this project",
   "    git add            Stage all changes",
-  "    git commit -m \"…\"  Commit staged changes",
+  '    git commit -m "…"  Commit staged changes',
   "    git push           Push to origin/main",
   "",
   "  Deploy & run",
@@ -114,6 +124,10 @@ export function DCodeTerminal({
   projectTitle,
   userEmail,
   onOpenFile,
+  problems,
+  outputLines,
+  activeTab,
+  onTabChange,
   onClose,
   className = "",
 }: DCodeTerminalProps) {
@@ -155,10 +169,10 @@ export function DCodeTerminal({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [lines]);
 
-  /* Focus the input whenever the drawer opens. */
+  /* Focus the prompt when the Terminal tab becomes active. */
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (activeTab === "terminal") inputRef.current?.focus();
+  }, [activeTab]);
 
   const emit = useCallback((text: string, kind: LineKind = "output") => {
     if (!aliveRef.current) return;
@@ -171,7 +185,7 @@ export function DCodeTerminal({
   const tick = useCallback(
     (ms: number) =>
       new Promise<void>((resolve) => setTimeout(() => resolve(undefined), ms)),
-    []
+    [],
   );
 
   /** Streams an array of [text, kind] lines with small realistic delays. */
@@ -182,7 +196,7 @@ export function DCodeTerminal({
         await tick(delay);
       }
     },
-    [emit, tick]
+    [emit, tick],
   );
 
   /* ------------------------------ git helpers ----------------------------- */
@@ -192,7 +206,7 @@ export function DCodeTerminal({
     const base = new Map(baseline.map((f) => [f.name, f.content]));
     const untracked = current.filter((f) => !base.has(f.name));
     const modified = current.filter(
-      (f) => base.has(f.name) && base.get(f.name) !== f.content
+      (f) => base.has(f.name) && base.get(f.name) !== f.content,
     );
     return { current, untracked, modified };
   }, [baseline]);
@@ -213,9 +227,9 @@ export function DCodeTerminal({
       if (isBinaryPath(file.name) || file.content.startsWith("data:")) {
         emit(
           `node: ${file.name}: binary asset (${formatBytes(
-            dataUrlByteSize(file.content)
+            dataUrlByteSize(file.content),
           )}, Base64) — use 'open ${file.name}' to preview it.`,
-          "error"
+          "error",
         );
         return;
       }
@@ -224,17 +238,23 @@ export function DCodeTerminal({
         if (/\.(ts|tsx)$/.test(name)) {
           emit(
             "node: TypeScript isn't executed by node directly (build first, or use tsx). File contents:",
-            "error"
+            "error",
           );
         } else {
-          emit(`node: ${file.name}: only .js files run in this sandbox. Printing contents:`, "error");
+          emit(
+            `node: ${file.name}: only .js files run in this sandbox. Printing contents:`,
+            "error",
+          );
         }
         emit(file.content.slice(0, 4000));
         return;
       }
 
       if (file.content.length > 2000) {
-        emit("node: file too large for the sandbox — printing source:", "muted");
+        emit(
+          "node: file too large for the sandbox — printing source:",
+          "muted",
+        );
         emit(file.content.slice(0, 4000));
         return;
       }
@@ -244,7 +264,7 @@ export function DCodeTerminal({
       if (blocked.test(file.content)) {
         emit(
           "node: this file uses browser/node APIs unavailable in the sandbox — printing source:",
-          "muted"
+          "muted",
         );
         emit(file.content.slice(0, 4000));
         return;
@@ -270,7 +290,7 @@ export function DCodeTerminal({
         // eslint-disable-next-line @typescript-eslint/no-implied-eval
         const fn = new Function(
           "console",
-          `"use strict";\n${file.content}`
+          `"use strict";\n${file.content}`,
         ) as (c: unknown) => unknown;
         const result = fn(consoleShim);
         if (out.length > 0) {
@@ -285,11 +305,11 @@ export function DCodeTerminal({
       } catch (error) {
         emit(
           `node: ${error instanceof Error ? error.message : "evaluation failed"}`,
-          "error"
+          "error",
         );
       }
     },
-    [emit]
+    [emit],
   );
 
   /* ------------------------------ command runner -------------------------- */
@@ -338,7 +358,7 @@ export function DCodeTerminal({
                     ? `(binary · ${formatBytes(dataUrlByteSize(file.content))} · base64)`
                     : "(svg · text)"
                 }`,
-                "muted"
+                "muted",
               );
             } else {
               emit(`  ${file.name}`);
@@ -352,7 +372,7 @@ export function DCodeTerminal({
             return;
           }
           const file = filesRef.current.find(
-            (f) => f.name.toLowerCase() === rest.toLowerCase()
+            (f) => f.name.toLowerCase() === rest.toLowerCase(),
           );
           if (!file) {
             emit(`cat: ${rest}: No such file`, "error");
@@ -361,9 +381,9 @@ export function DCodeTerminal({
           if (file.content.startsWith("data:")) {
             emit(
               `cat: ${file.name}: binary file (${formatBytes(
-                dataUrlByteSize(file.content)
+                dataUrlByteSize(file.content),
               )}, Base64 data URL) — use 'open ${file.name}' to preview.`,
-              "muted"
+              "muted",
             );
             return;
           }
@@ -376,7 +396,7 @@ export function DCodeTerminal({
             return;
           }
           const file = filesRef.current.find(
-            (f) => f.name.toLowerCase() === rest.toLowerCase()
+            (f) => f.name.toLowerCase() === rest.toLowerCase(),
           );
           if (!file) {
             emit(`open: ${rest}: No such file`, "error");
@@ -389,14 +409,17 @@ export function DCodeTerminal({
         case "node": {
           if (!rest) {
             await stream([
-              ["Welcome to Node.js v22.14.0 (D-Code simulated runtime).", "muted"],
+              [
+                "Welcome to Node.js v22.14.0 (D-Code simulated runtime).",
+                "muted",
+              ],
               ["Type 'node <file>.js' to run a project file.", "muted"],
             ]);
             return;
           }
           const fileName = rest.split(/\s+/)[0] ?? "";
           const file = filesRef.current.find(
-            (f) => f.name.toLowerCase() === fileName.toLowerCase()
+            (f) => f.name.toLowerCase() === fileName.toLowerCase(),
           );
           if (!file) {
             emit(`node: ${fileName}: No such file`, "error");
@@ -428,48 +451,60 @@ export function DCodeTerminal({
         }
         if (sub === "run" && (restParts[1] ?? "") === "dev") {
           setBusy(true);
-          await stream([
-            [`> ${slugify(projectTitle)}@1.0.0 dev`, "muted"],
-            ["> next dev", "muted"],
-            [""],
-            ["   ▲ Next.js 15.1.6", "accent"],
-            ["   - Local:        http://localhost:3000"],
-            ["   - Environments: .env.local"],
-            [""],
-            [" ✓ Ready in 820 ms", "success"],
-            [" ○ Compiling / ..."],
-            [" ✓ Compiled / in 640 ms", "success"],
-            [""],
-            ["(simulated dev server — it keeps running until you close the terminal)", "muted"],
-          ], 300);
+          await stream(
+            [
+              [`> ${slugify(projectTitle)}@1.0.0 dev`, "muted"],
+              ["> next dev", "muted"],
+              [""],
+              ["   ▲ Next.js 15.1.6", "accent"],
+              ["   - Local:        http://localhost:3000"],
+              ["   - Environments: .env.local"],
+              [""],
+              [" ✓ Ready in 820 ms", "success"],
+              [" ○ Compiling / ..."],
+              [" ✓ Compiled / in 640 ms", "success"],
+              [""],
+              [
+                "(simulated dev server — it keeps running until you close the terminal)",
+                "muted",
+              ],
+            ],
+            300,
+          );
           setBusy(false);
           return;
         }
         if (sub === "run" && (restParts[1] ?? "") === "build") {
           setBusy(true);
-          await stream([
-            [`> ${slugify(projectTitle)}@1.0.0 build`, "muted"],
-            ["> next build", "muted"],
-            [""],
-            ["   ▲ Next.js 15.1.6", "accent"],
-            ["   Creating an optimized production build ..."],
-            [" ✓ Compiled successfully", "success"],
-            ["   Linting and checking validity of types ..."],
-            ["   Collecting page data ..."],
-            ["   Generating static pages (5/5) ..."],
-            [" ✓ Generated all static pages", "success"],
-            [""],
-            [" Route (app)                              Size     Addons"],
-            [" ─ ○ /                                  5.2 kB          "],
-            [" ─ ○ /d-code                           18.4 kB         "],
-            [" ƒ /api/chat                           1.1 kB          "],
-            [""],
-            [" ✓  Built in 4.2s", "success"],
-          ], 260);
+          await stream(
+            [
+              [`> ${slugify(projectTitle)}@1.0.0 build`, "muted"],
+              ["> next build", "muted"],
+              [""],
+              ["   ▲ Next.js 15.1.6", "accent"],
+              ["   Creating an optimized production build ..."],
+              [" ✓ Compiled successfully", "success"],
+              ["   Linting and checking validity of types ..."],
+              ["   Collecting page data ..."],
+              ["   Generating static pages (5/5) ..."],
+              [" ✓ Generated all static pages", "success"],
+              [""],
+              [" Route (app)                              Size     Addons"],
+              [" ─ ○ /                                  5.2 kB          "],
+              [" ─ ○ /d-code                           18.4 kB         "],
+              [" ƒ /api/chat                           1.1 kB          "],
+              [""],
+              [" ✓  Built in 4.2s", "success"],
+            ],
+            260,
+          );
           setBusy(false);
           return;
         }
-        emit(`npm: unknown script "${rest}". Try 'npm install', 'npm run dev' or 'npm run build'.`, "error");
+        emit(
+          `npm: unknown script "${rest}". Try 'npm install', 'npm run dev' or 'npm run build'.`,
+          "error",
+        );
         return;
       }
 
@@ -477,8 +512,14 @@ export function DCodeTerminal({
       if (lower === "wrangler" || lower === "npx") {
         const args = lower === "npx" ? restParts.slice(1) : restParts;
         const action = (args[0] ?? "").toLowerCase();
-        if (lower === "npx" && (restParts[0] ?? "").toLowerCase() !== "wrangler") {
-          emit(`npx: '${rest}' isn't part of the simulated CLI. Try 'wrangler deploy'.`, "error");
+        if (
+          lower === "npx" &&
+          (restParts[0] ?? "").toLowerCase() !== "wrangler"
+        ) {
+          emit(
+            `npx: '${rest}' isn't part of the simulated CLI. Try 'wrangler deploy'.`,
+            "error",
+          );
           return;
         }
         if (action !== "deploy" && action !== "publish") {
@@ -497,7 +538,7 @@ export function DCodeTerminal({
             [`  https://${slug}.workers.dev`, "accent"],
             [`Current Deployment ID: ${fakeSha()}-${fakeSha()}`],
           ],
-          280
+          280,
         );
         setBusy(false);
         return;
@@ -515,7 +556,7 @@ export function DCodeTerminal({
             emit(
               `Your branch is ahead of 'origin/${branch}' by ${ahead} commit${
                 ahead === 1 ? "" : "s"
-              }.`
+              }.`,
             );
             emit('  (use "git push" to publish your commits)', "muted");
           } else {
@@ -527,13 +568,19 @@ export function DCodeTerminal({
           } else {
             if (modified.length > 0) {
               emit("Changes not staged for commit:");
-              emit('  (use "git add <file>..." to update what will be committed)', "muted");
+              emit(
+                '  (use "git add <file>..." to update what will be committed)',
+                "muted",
+              );
               modified.forEach((f) => emit(`\tmodified:   ${f.name}`, "error"));
               emit("");
             }
             if (untracked.length > 0) {
               emit("Untracked files:");
-              emit('  (use "git add <file>..." to include in what will be committed)', "muted");
+              emit(
+                '  (use "git add <file>..." to include in what will be committed)',
+                "muted",
+              );
               untracked.forEach((f) => emit(`\t${f.name}`, "success"));
             }
           }
@@ -545,7 +592,10 @@ export function DCodeTerminal({
           if (count === 0) {
             emit("nothing to add — working tree clean");
           } else {
-            emit(`Staged ${count} file${count === 1 ? "" : "s"} for commit.`, "success");
+            emit(
+              `Staged ${count} file${count === 1 ? "" : "s"} for commit.`,
+              "success",
+            );
           }
           return;
         }
@@ -554,7 +604,10 @@ export function DCodeTerminal({
           const msgMatch = raw.match(/-m\s+(['"])([\s\S]*?)\1/);
           const message = msgMatch?.[2]?.trim();
           if (!message) {
-            emit("Aborting commit: provide a message with git commit -m \"<message>\".", "error");
+            emit(
+              'Aborting commit: provide a message with git commit -m "<message>".',
+              "error",
+            );
             return;
           }
           const changed = modified.length + untracked.length;
@@ -575,10 +628,14 @@ export function DCodeTerminal({
                 } insertions(+), ${Math.floor(Math.random() * 20)} deletions(-)`,
               ],
               ...untracked.map(
-                (f) => [` create mode 100644 ${f.name}`, "muted" as LineKind] as [string, LineKind]
+                (f) =>
+                  [` create mode 100644 ${f.name}`, "muted" as LineKind] as [
+                    string,
+                    LineKind,
+                  ],
               ),
             ],
-            180
+            180,
           );
           setBusy(false);
           return;
@@ -600,18 +657,27 @@ export function DCodeTerminal({
               ["Compressing objects: 100% (8/8), done."],
               ["Writing objects: 100% (9/9), 2.13 KiB | 1.06 MiB/s, done."],
               ["Total 9 (delta 4), reused 0 (delta 0), pack-reused 0"],
-              [`To https://github.com/ppro-blip/${slugify(projectTitle)}.git`, "muted"],
+              [
+                `To https://github.com/ppro-blip/${slugify(projectTitle)}.git`,
+                "muted",
+              ],
               [`   ${fakeSha()}..${fakeSha()}  main -> main`, "accent"],
               [""],
-              [`✓ Pushed ${count} commit${count === 1 ? "" : "s"} to origin/main`, "success"],
+              [
+                `✓ Pushed ${count} commit${count === 1 ? "" : "s"} to origin/main`,
+                "success",
+              ],
             ],
-            200
+            200,
           );
           setBusy(false);
           return;
         }
 
-        emit(`git: '${sub || ""}' is not a simulated command. Try: status, add, commit -m, push.`, "error");
+        emit(
+          `git: '${sub || ""}' is not a simulated command. Try: status, add, commit -m, push.`,
+          "error",
+        );
         return;
       }
 
@@ -627,7 +693,7 @@ export function DCodeTerminal({
       stream,
       tick,
       userEmail,
-    ]
+    ],
   );
 
   const handleSubmit = useCallback(
@@ -636,7 +702,7 @@ export function DCodeTerminal({
       const trimmed = raw.trim();
       if (trimmed) {
         setHistory((prev) =>
-          [trimmed, ...prev.filter((h) => h !== trimmed)].slice(0, 50)
+          [trimmed, ...prev.filter((h) => h !== trimmed)].slice(0, 50),
         );
       }
       setHistoryIndex(-1);
@@ -649,7 +715,7 @@ export function DCodeTerminal({
         inputRef.current?.focus();
       });
     },
-    [runCommand]
+    [runCommand],
   );
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -673,7 +739,7 @@ export function DCodeTerminal({
       if (history.length === 0 || historyIndex === -1) return;
       const next = historyIndex - 1;
       setHistoryIndex(next);
-      setCommand(next >= 0 ? history[next] ?? "" : "");
+      setCommand(next >= 0 ? (history[next] ?? "") : "");
       return;
     }
   };
@@ -697,57 +763,149 @@ export function DCodeTerminal({
 
   return (
     <div
-      className={`flex min-h-0 flex-col overflow-hidden border-t border-white/[0.06] bg-black/90 ${className}`}
-      style={{ backgroundColor: "#05070d" }}
+      className={`flex min-h-0 flex-col overflow-hidden border-t border-white/[0.09] bg-[#070b14] ${className}`}
+      role="region"
+      aria-label="D-Code bottom panel"
     >
-      {/* Tab header */}
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-white/[0.06] bg-[#0a0e1a] px-3 py-1.5">
-        <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-400">
-          <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-          Terminal
+      <div
+        className="flex flex-shrink-0 items-center gap-1 border-b border-white/[0.07] bg-[#101726] px-3"
+        role="tablist"
+        aria-label="Bottom panel tabs"
+      >
+        {(["terminal", "output", "problems"] as const).map((tab) => (
+          <button
+            key={tab}
+            id={`dcode-panel-${tab}-tab`}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            aria-controls={`dcode-panel-${tab}`}
+            onClick={() => onTabChange(tab)}
+            className={`border-b-2 px-3 py-2.5 text-[11px] font-semibold capitalize transition-colors ${
+              activeTab === tab
+                ? "border-cyan-400 text-cyan-300"
+                : "border-transparent text-zinc-500 hover:text-zinc-200"
+            }`}
+          >
+            {tab}
+            {tab === "problems" && problems.length > 0 && (
+              <span className="ml-1.5 rounded-full bg-red-400/15 px-1.5 py-0.5 font-mono text-[10px] text-red-300">
+                {problems.length}
+              </span>
+            )}
+          </button>
+        ))}
+        <span className="ml-2 hidden font-mono text-[10px] text-zinc-600 sm:inline">
+          Ctrl + `
         </span>
-        <span className="font-mono text-[10px] text-zinc-600">Ctrl + `</span>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close terminal"
-          title="Close terminal (Ctrl + `)"
-          className="ml-auto flex h-5 w-5 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+          aria-label="Close bottom panel"
+          title="Close panel (Ctrl + `)"
+          className="ml-auto flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
         >
           <XIcon className="h-3.5 w-3.5" />
         </button>
       </div>
 
-      {/* Output scroll area */}
+      {/* Keep the terminal mounted while switching tabs: commands and history survive. */}
       <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-[12px] leading-relaxed"
+        id="dcode-panel-terminal"
+        role="tabpanel"
+        aria-labelledby="dcode-panel-terminal-tab"
+        className={`${activeTab === "terminal" ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}
       >
-        {lines.map((line, index) => (
-          <div key={index} className={lineClass(line.kind)}>
-            {line.text || "\u00a0"}
-          </div>
-        ))}
+        <div
+          ref={scrollRef}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[12px] leading-relaxed"
+        >
+          {lines.map((line, index) => (
+            <div key={index} className={lineClass(line.kind)}>
+              {line.text || "\u00a0"}
+            </div>
+          ))}
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-0 border-t border-white/[0.06] px-4 py-2 font-mono text-[12px]">
+          <span className="flex-shrink-0 text-cyan-300">{PROMPT}</span>
+          <input
+            ref={inputRef}
+            type="text"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            onKeyDown={handleKeyDown}
+            aria-label="Terminal command"
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            disabled={busy}
+            placeholder={busy ? "running…" : "Type 'help'…"}
+            className="min-w-0 flex-1 bg-transparent px-1 text-zinc-100 placeholder-zinc-600 outline-none disabled:opacity-60"
+          />
+        </div>
       </div>
 
-      {/* Input row */}
-      <div className="flex flex-shrink-0 items-center gap-0 border-t border-white/[0.06] px-3 py-1.5 font-mono text-[12px]">
-        <span className="flex-shrink-0 text-cyan-300">{PROMPT}</span>
-        <input
-          ref={inputRef}
-          type="text"
-          value={command}
-          onChange={(e) => setCommand(e.target.value)}
-          onKeyDown={handleKeyDown}
-          aria-label="Terminal command"
-          autoComplete="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          disabled={busy}
-          placeholder={busy ? "running…" : "Type 'help'…"}
-          className="min-w-0 flex-1 bg-transparent px-1 text-zinc-100 placeholder-zinc-600 outline-none disabled:opacity-60"
-        />
-      </div>
+      {activeTab === "output" && (
+        <div
+          id="dcode-panel-output"
+          role="tabpanel"
+          aria-labelledby="dcode-panel-output-tab"
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-xs"
+        >
+          <p className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+            D-Code / workspace output
+          </p>
+          {outputLines.map((line, index) => (
+            <p key={index} className="py-1 text-zinc-300">
+              <span className="mr-3 text-cyan-400">›</span>
+              {line}
+            </p>
+          ))}
+          <p className="mt-4 text-[11px] text-zinc-600">
+            Run simulated commands in the Terminal tab. No processes run on your
+            device.
+          </p>
+        </div>
+      )}
+
+      {activeTab === "problems" && (
+        <div
+          id="dcode-panel-problems"
+          role="tabpanel"
+          aria-labelledby="dcode-panel-problems-tab"
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-xs"
+        >
+          {problems.length === 0 ? (
+            <div className="flex h-full min-h-24 items-center justify-center text-zinc-500">
+              No editor problems reported.
+            </div>
+          ) : (
+            <ul className="space-y-1">
+              {problems.map((problem, index) => (
+                <li
+                  key={`${problem.fileId}-${problem.line}-${problem.column}-${index}`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onOpenFile(problem.fileId)}
+                    className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-white/[0.05]"
+                  >
+                    <span
+                      className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${problem.severity === "error" ? "bg-red-400" : problem.severity === "warning" ? "bg-amber-400" : "bg-blue-400"}`}
+                    />
+                    <span className="min-w-0 flex-1 text-zinc-200">
+                      {problem.message}
+                    </span>
+                    <span className="shrink-0 font-mono text-[11px] text-zinc-500">
+                      {problem.fileName}:{problem.line}:{problem.column}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

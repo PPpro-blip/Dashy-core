@@ -12,8 +12,8 @@
  */
 
 import dynamic from "next/dynamic";
-import { useCallback } from "react";
-import type { Monaco, OnMount } from "@monaco-editor/react";
+import { useCallback, useEffect, useRef } from "react";
+import type { Monaco, OnMount, OnValidate } from "@monaco-editor/react";
 import { LoaderIcon } from "@/components/icons";
 
 const MonacoReact = dynamic(() => import("@monaco-editor/react"), {
@@ -73,6 +73,9 @@ export interface MonacoEditorProps {
   value: string;
   language: string;
   onChange?: (value: string | undefined) => void;
+  /** Monaco's real diagnostics for the active model. */
+  onValidate?: OnValidate;
+  onCursorChange?: (line: number, column: number) => void;
   readOnly?: boolean;
   /** Extra editor options (merged over the D-Code defaults). */
   options?: Record<string, unknown>;
@@ -83,14 +86,28 @@ export function MonacoEditor({
   value,
   language,
   onChange,
+  onValidate,
+  onCursorChange,
   readOnly = false,
   options,
   className,
 }: MonacoEditorProps) {
-  const handleMount = useCallback<OnMount>((_editor, monaco) => {
-    defineDcodeTheme(monaco);
-    monaco.editor.setTheme(DCODE_THEME);
-  }, []);
+  const cursorListenerRef = useRef<{ dispose: () => void } | null>(null);
+  useEffect(() => () => cursorListenerRef.current?.dispose(), []);
+
+  const handleMount = useCallback<OnMount>(
+    (editor, monaco) => {
+      defineDcodeTheme(monaco);
+      monaco.editor.setTheme(DCODE_THEME);
+      const position = editor.getPosition();
+      onCursorChange?.(position?.lineNumber ?? 1, position?.column ?? 1);
+      cursorListenerRef.current?.dispose();
+      cursorListenerRef.current = editor.onDidChangeCursorPosition((event) => {
+        onCursorChange?.(event.position.lineNumber, event.position.column);
+      });
+    },
+    [onCursorChange],
+  );
 
   return (
     <div className={`h-full w-full ${className ?? ""}`}>
@@ -100,6 +117,7 @@ export function MonacoEditor({
         language={language}
         value={value}
         onChange={onChange}
+        onValidate={onValidate}
         onMount={handleMount}
         options={{
           fontFamily:
