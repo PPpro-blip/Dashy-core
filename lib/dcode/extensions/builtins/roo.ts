@@ -27,7 +27,7 @@ export const rooExtension: ExtensionModule = {
     description:
       "Architect & context builder for multi-file edits. Select code and chat about it with filename context; apply a returned code block straight back over your selection.",
     author: "DashyCore",
-    icon: "👥",
+    icon: "𝚯",
     categories: ["AI", "Productivity"],
     contributes: {
       commands: [

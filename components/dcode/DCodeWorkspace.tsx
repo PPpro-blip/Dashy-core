@@ -172,6 +172,11 @@ function extensionFullName(id: string): string {
   return found?.manifest.name ?? id;
 }
 
+/** Emoji glyph for a status-bar badge (manifest icon; none for unknown ids). */
+function extensionGlyph(id: string): string | undefined {
+  return BUILTIN_EXTENSIONS.find((m) => m.manifest.id === id)?.manifest.icon;
+}
+
 interface GithubRepo {
   full_name: string;
   clone_url: string;
@@ -2615,9 +2620,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
           {enabledExtensions.slice(0, 3).map((id) => (
             <span
               key={id}
-              title={extensionFullName(id)}
-              className="rounded bg-white/15 px-1.5 py-px text-[10px] font-semibold"
+              title={`${extensionFullName(id)} — active`}
+              className="flex items-center gap-1 rounded bg-white/15 px-1.5 py-px text-[10px] font-semibold"
             >
+              {extensionGlyph(id) ? (
+                <span aria-hidden="true">{extensionGlyph(id)}</span>
+              ) : null}
               {extensionShortLabel(id)}
             </span>
           ))}

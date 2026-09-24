@@ -212,18 +212,29 @@ export function useToast(): {
   dismiss: ToastApi["dismiss"];
 } {
   const api = useContext(ToastContext);
-  if (!api) {
+  // Memoised on the provider's (already memoised) api so the returned object
+  // keeps ONE identity across renders. Consumers put `toast` in hook deps
+  // (e.g. DocumentsList's loader → effect); a fresh object per render turned
+  // those into an endless reload loop ("Maximum update depth exceeded").
+  const toast = useMemo(
+    () =>
+      api
+        ? {
+            show: api.show,
+            update: api.update,
+            dismiss: api.dismiss,
+            success: (title: string, message?: string, duration?: number) =>
+              api.show({ type: "success", title, message, duration }),
+            error: (title: string, message?: string, duration?: number) =>
+              api.show({ type: "error", title, message, duration }),
+            info: (title: string, message?: string, duration?: number) =>
+              api.show({ type: "info", title, message, duration }),
+          }
+        : null,
+    [api]
+  );
+  if (!toast) {
     throw new Error("useToast must be used inside <ToastProvider>.");
   }
-  return {
-    show: api.show,
-    update: api.update,
-    dismiss: api.dismiss,
-    success: (title, message, duration) =>
-      api.show({ type: "success", title, message, duration }),
-    error: (title, message, duration) =>
-      api.show({ type: "error", title, message, duration }),
-    info: (title, message, duration) =>
-      api.show({ type: "info", title, message, duration }),
-  };
+  return toast;
 }

@@ -18,6 +18,7 @@ export const prettierExtension: ExtensionModule = {
     description:
       "Code beautifier on save. Format JavaScript, TypeScript, JSON, CSS, HTML, Markdown and YAML with Prettier's browser build.",
     author: "DashyCore",
+    icon: "🧹",
     categories: ["Formatters"],
     contributes: {
       commands: [

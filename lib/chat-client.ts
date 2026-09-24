@@ -70,12 +70,36 @@ export interface ChatMemory {
 /**
  * One entry in the worker's agent-mode `activity` timeline.
  *
- * Contract: `activity: [{ type, message, tool }]`.
+ * Contract: `activity: [{ type, message, tool, status }]` — every field but
+ * `type` is optional so older worker payloads (and plain-string steps) still
+ * render. `status` is free text ("done", "running", "error", …); the UI maps
+ * the known values to colours and shows anything else verbatim.
  */
 export interface AgentActivity {
   type: string;
   message?: string;
   tool?: string;
+  status?: string;
+}
+
+/** Statuses the activity log colours specially. */
+export type AgentActivityStatus = "running" | "done" | "error" | "skipped";
+
+/** Maps a raw status string onto the known set (undefined = show verbatim). */
+export function normalizeActivityStatus(
+  status: string | undefined
+): AgentActivityStatus | undefined {
+  if (!status) return undefined;
+  const value = status.trim().toLowerCase();
+  if (["running", "in_progress", "in-progress", "pending", "working"].includes(value)) {
+    return "running";
+  }
+  if (["done", "complete", "completed", "success", "ok", "finished"].includes(value)) {
+    return "done";
+  }
+  if (["error", "failed", "failure", "errored"].includes(value)) return "error";
+  if (["skipped", "skip", "ignored"].includes(value)) return "skipped";
+  return undefined;
 }
 
 export interface ChatCallbacks {
@@ -210,8 +234,9 @@ function normalizeActivity(raw: unknown): AgentActivity[] {
       const type = pickString(obj, ["type", "kind"]);
       return {
         type: type ?? "step",
-        message: pickString(obj, ["message", "text", "description"]),
+        message: pickString(obj, ["message", "text", "description", "detail"]),
         tool: pickString(obj, ["tool", "toolName", "name"]),
+        status: pickString(obj, ["status", "state", "result", "outcome"]),
       };
     })
     .filter((activity): activity is AgentActivity => activity !== null);
@@ -600,7 +625,9 @@ export async function sendChatMessage(
 
   // On the normal streaming path `message` carries the ENTIRE thread so a
   // single-`message` worker still sees every prior turn. The agent/JSON path
-  // and the first turn keep the plain latest user line.
+  // and the first turn keep the plain latest user line — the agent contract
+  // (`{ userId, agentMode: true, message, messages, model }`) reads the
+  // structured `messages` array below for context instead.
   const wireMessage =
     !request.agentMode && hasHistory
       ? transcriptOfThread(threadMessages)
@@ -625,11 +652,13 @@ export async function sendChatMessage(
         ...(request.conversationId
           ? { conversation_id: request.conversationId }
           : {}),
-        // Additive field: full conversation history (all user+assistant turns
-        // in order, placeholder-stripped and capped), ending with the latest
-        // user message. The core contract fields above are unchanged, and the
-        // SSE response handling is untouched.
-        ...(!request.agentMode && threadMessages.length > 0 ? { messages: threadMessages } : {}),
+        // Full conversation history (all user+assistant turns in order,
+        // placeholder-stripped and capped), ending with the latest user
+        // message. Sent on EVERY request — streaming and Agent Mode alike —
+        // so a multi-turn agent conversation never loses its earlier turns.
+        // The core contract fields above are unchanged, and the SSE response
+        // handling is untouched.
+        ...(threadMessages.length > 0 ? { messages: threadMessages } : {}),
       }),
       signal: request.signal,
     });

@@ -52,6 +52,7 @@ export const aiExtension: ExtensionModule = {
     description:
       "Explain the current file or refactor a selection with DashyAI — the same model router as Dashy chat.",
     author: "DashyCore",
+    icon: "🧠",
     categories: ["AI"],
     contributes: {
       commands: [

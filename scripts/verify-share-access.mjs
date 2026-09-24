@@ -16,6 +16,10 @@ const PRIVATE_ID = "44444444-4444-4444-8444-444444444444";
 const PUBLIC_SLUG = "abcdefgh2345";
 const PRIVATE_SLUG = "pqrstuvw2345";
 const SERVICE_KEY = "test-service-key";
+const FACEBOOK_CRAWLER =
+  "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
+const BROWSER =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36";
 const created = "2026-09-23T00:00:00.000Z";
 const projects = new Map([
   [PUBLIC_SLUG, { id: PUBLIC_ID, title: "Public Example", is_public: true }],
@@ -182,11 +186,14 @@ async function main() {
 
     async function check(
       path,
-      { cookie, status, contains, location, search, absent } = {},
+      { cookie, status, contains, location, search, absent, userAgent } = {},
     ) {
       const response = await fetch(base + path, {
         redirect: "manual",
-        headers: cookie ? { Cookie: cookie } : {},
+        headers: {
+          ...(cookie ? { Cookie: cookie } : {}),
+          ...(userAgent ? { "User-Agent": userAgent } : {}),
+        },
         signal: AbortSignal.timeout(100_000),
       });
       const body = await response.text();
@@ -208,7 +215,9 @@ async function main() {
         if (search !== undefined) assert.equal(redirected.search, search);
       }
       console.log(
-        `✓ ${response.status} ${path}${cookie ? " (authenticated)" : " (anonymous)"}`,
+        `✓ ${response.status} ${path}${cookie ? " (authenticated)" : " (anonymous)"}${
+          userAgent ? ` [${userAgent.split(/[/ ]/)[0]}]` : ""
+        }`,
       );
       return body;
     }
@@ -241,6 +250,33 @@ async function main() {
       location: `/d-code/share/${PUBLIC_ID}`,
     });
 
+    // Link-preview crawlers read /s/[slug]'s own dynamic Open Graph tags (200)
+    // — built from the project row, with the composer's ?title= overrides —
+    // while browsers keep the 307 to the canonical viewer.
+    const crawlerBody = await check(`/s/${PUBLIC_SLUG}`, {
+      userAgent: FACEBOOK_CRAWLER,
+      status: 200,
+      contains: 'property="og:title" content="Public Example"',
+    });
+    assert.match(crawlerBody, /property="og:description" content="A project worth sharing\."/);
+    assert.match(crawlerBody, /property="og:url" content="[^"]*\/s\/abcdefgh2345"/);
+    assert.match(crawlerBody, /name="twitter:card" content="summary_large_image"/);
+    await check(`/s/${PUBLIC_SLUG}?title=Custom+Draft+Title`, {
+      userAgent: "Twitterbot/1.0",
+      status: 200,
+      contains: 'property="og:title" content="Custom Draft Title"',
+    });
+    await check(`/s/${PUBLIC_SLUG}`, {
+      userAgent: BROWSER,
+      status: 307,
+      location: `/d-code/share/${PUBLIC_SLUG}`,
+    });
+    await check(`/d-code/share/${PUBLIC_SLUG}`, {
+      userAgent: "LinkedInBot/1.0 (compatible; Mozilla/5.0)",
+      status: 200,
+      contains: 'property="og:title" content="Public Example"',
+    });
+
     for (const path of [`/s/${PRIVATE_SLUG}`, `/d-code/share/${PRIVATE_SLUG}`, `/s/${PRIVATE_ID}`]) {
       await check(path, {
         status: 403,
@@ -248,6 +284,12 @@ async function main() {
         absent: "Owner Only Example",
       });
     }
+    // Crawlers get the same 403 — metadata never describes a private project.
+    await check(`/s/${PRIVATE_SLUG}`, {
+      userAgent: FACEBOOK_CRAWLER,
+      status: 403,
+      absent: "Owner Only Example",
+    });
     await check(`/s/${PRIVATE_SLUG}`, {
       cookie: sessionCookie("other-token"),
       status: 403,
@@ -299,6 +341,12 @@ async function main() {
     await check(`/api/share/${PRIVATE_SLUG}`, {
       status: 404,
       absent: "Owner Only Example",
+    });
+    // Crawler metadata recovers through the same public-only service lane.
+    await check(`/s/${PUBLIC_SLUG}`, {
+      userAgent: FACEBOOK_CRAWLER,
+      status: 200,
+      contains: 'property="og:title" content="Public Example"',
     });
     assert.ok(serviceReads > readsBefore, "No filtered public recovery reads occurred");
     assert.equal(unsafeServiceReads, 0, "A service-role read lacked is_public=true");

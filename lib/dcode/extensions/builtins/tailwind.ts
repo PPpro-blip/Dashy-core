@@ -177,7 +177,7 @@ export const tailwindExtension: ExtensionModule = {
     description:
       "Live CSS utility helper & previewer. Utility completions inside class attributes plus one-click Tailwind Play CDN injection for HTML files.",
     author: "DashyCore",
-    icon: "🌊",
+    icon: "🎨",
     categories: ["Language", "Productivity"],
     contributes: {
       commands: [
