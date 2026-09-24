@@ -1,6 +1,13 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
 import { SharePageView } from "@/components/share/SharePageView";
+import {
+  isLinkPreviewRequest,
+  lookupShareProject,
+  requestOrigin,
+  resolveShareOg,
+  shareOgMetadata,
+  type ShareSearchParams,
+} from "@/lib/share-og";
 
 /**
  * DashyCore v7 — /d-code/share/[share_slug] (public read-only viewer).
@@ -12,70 +19,39 @@ import { SharePageView } from "@/components/share/SharePageView";
  *
  * The owner's composer builds a public share URL carrying the draft as query
  * params (`title`, `desc`, `img`, `v`) — see lib/share-intents#buildOgShareUrl.
- * When a crawler (or anyone) visits that URL, this metadata injects those
- * values into the OG tags. The `img` param points at a project image served
- * by the /og-image route; otherwise use a branded D-Code preview card.
+ * Those values win; link-preview crawlers additionally get the project's own
+ * title / description / largest image from the database, and everything
+ * falls back to the branded share card. Resolution lives in lib/share-og and
+ * is shared with the /s/[slug] short link.
  */
 
 interface SharePageProps {
   params: Promise<{ share_slug: string }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
-}
-
-function first(params: Record<string, string | string[] | undefined>, key: string): string {
-  const value = params[key];
-  if (Array.isArray(value)) return value[0] ?? "";
-  return value ?? "";
+  searchParams: Promise<ShareSearchParams>;
 }
 
 export async function generateMetadata({
   params,
   searchParams,
 }: SharePageProps): Promise<Metadata> {
-  const { share_slug } = await params;
-  const sp = await searchParams;
-
-  const title = first(sp, "title");
-  const desc = first(sp, "desc");
-  const img = first(sp, "img");
-
-  const ogTitle = title.trim() || "A shared D-Code project";
-  const ogDesc =
-    desc.trim() || "Built with DashyCore D-Code ⚡ — view, copy and remix it.";
-
-  // Build an absolute origin at request time (dev = localhost, prod = real).
-  const h = await headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const origin = `${proto}://${host}`;
-  const pageUrl = `${origin}/d-code/share/${share_slug}`;
-
-  const ogImage = img
-    ? `${origin}/d-code/share/${encodeURIComponent(
-        share_slug
-      )}/og-image?file=${encodeURIComponent(img)}`
-    : `${origin}/share-card.png`;
-
-  return {
-    title: ogTitle,
-    description: ogDesc,
-    openGraph: {
-      title: ogTitle,
-      description: ogDesc,
-      url: pageUrl,
-      type: "website",
-      siteName: "DashyCore",
-      images: [
-        { url: ogImage, width: img ? 512 : 1200, height: img ? 512 : 630, alt: ogTitle },
-      ],
-    },
-    twitter: {
-      card: "summary_large_image",
-      title: ogTitle,
-      description: ogDesc,
-      images: [ogImage],
-    },
-  };
+  const [{ share_slug }, sp, origin, crawler] = await Promise.all([
+    params,
+    searchParams,
+    requestOrigin(),
+    isLinkPreviewRequest(),
+  ]);
+  // Visitors' browsers load the project client-side; only crawlers need the
+  // database-backed preview, so people never pay for an extra read.
+  const project = crawler ? await lookupShareProject(share_slug) : null;
+  return shareOgMetadata(
+    resolveShareOg({
+      origin,
+      shareKey: share_slug,
+      pagePath: `/d-code/share/${encodeURIComponent(share_slug)}`,
+      searchParams: sp,
+      project,
+    })
+  );
 }
 
 export default function DCodeSharePage() {

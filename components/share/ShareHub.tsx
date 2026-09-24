@@ -13,9 +13,13 @@
  *        · else the LAST-USED app composer (dashy.share.prefs), prefilled
  *        · else it points the user at the app grid below
  *   3. Owner-only privacy controls (make public / private)
- *   4. Clean per-app grid (composers keep full customization)
+ *   4. Meta export — Instagram + Facebook cards, Standard (copy caption +
+ *      Meta web share) or Direct API Pro (Graph API with the user's own token
+ *      from Settings → Meta Share; see components/share/MetaExportCards)
+ *   5. Clean per-app grid (composers keep full customization)
  *
- * Honest by design: composers deep-link or copy — nothing fakes a post.
+ * Honest by design: composers deep-link or copy — nothing fakes a post, and
+ * Direct API Pro publishes only after an explicit two-step confirm.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -35,6 +39,7 @@ import {
 import { applyPrefsToDraft, getSharePrefs, saveSharePrefs } from "@/lib/share-prefs";
 import { copyText } from "@/lib/clipboard";
 import { ShareComposer } from "@/components/share/ShareComposer";
+import { MetaExportCards } from "@/components/share/MetaExportCards";
 import { ShareQr } from "@/components/share/ShareQr";
 import { useToast } from "@/components/Toast";
 import {
@@ -462,6 +467,9 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
             </div>
           </div>
 
+          {/* Meta export — Instagram + Facebook, Standard or Direct API Pro. */}
+          <MetaExportCards draft={draft} onCustomize={(appId) => setSelectedApp(appId)} />
+
           {/* Owner privacy controls — hidden for plain visitors, who never
               see this prop at all. A private project still renders the full
               hub for its owner; this row is how they publish/revoke. */}
@@ -616,7 +624,8 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
             <p className="mt-3 flex items-center gap-1.5 text-[11px] leading-relaxed text-zinc-600">
               <LinkIcon className="h-3.5 w-3.5 flex-shrink-0" />
               Tapping an app opens a composer to refine title, caption &amp;
-              image first — we never post for you.
+              image first — composers never post for you (only Direct API Pro
+              does, after you confirm).
             </p>
           </div>
         </div>
