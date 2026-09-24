@@ -183,7 +183,7 @@ export function PairCoderPanel({ api, onClose }: PairCoderPanelProps) {
   return (
     <div className="flex h-full min-h-0 w-80 flex-shrink-0 flex-col border-l border-white/[0.06] bg-[#0a0e1a]/95">
       <div className="flex flex-shrink-0 items-center gap-2 border-b border-white/[0.06] px-3 py-2">
-        <span className="text-base">👥</span>
+        <span className="text-base">𝚯</span>
         <div className="min-w-0 flex-1">
           <p className="text-[12px] font-semibold text-zinc-100">Pair Coder</p>
           <p className="text-[9px] text-zinc-600">Roo-style pair programming</p>

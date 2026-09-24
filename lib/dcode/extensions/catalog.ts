@@ -67,7 +67,7 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     description:
       "Architect & context builder for multi-file edits. Select code, chat about it with filename context, and apply a returned code block back over the selection.",
     version: "1.0.0",
-    icon: "👥",
+    icon: "𝚯",
     categories: ["AI", "Productivity"],
     installs: "8.1k",
     rating: 4.7,
@@ -79,7 +79,7 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     description:
       "Live CSS utility helper & previewer. Utility completions inside class attributes plus one-click Tailwind Play CDN injection for HTML files.",
     version: "1.0.0",
-    icon: "🌊",
+    icon: "🎨",
     categories: ["Language", "Productivity"],
     installs: "18.6k",
     rating: 4.8,
@@ -127,7 +127,7 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     description:
       "Monaco color themes tuned for DashyCore — obsidian cyan, dark classic, ocean and high contrast.",
     version: "1.0.0",
-    icon: "🎨",
+    icon: "🌈",
     categories: ["Themes"],
     installs: "31.2k",
     rating: 4.9,
@@ -139,7 +139,7 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     description:
       "Code beautifier on save. Format JavaScript, TypeScript, JSON, CSS, HTML, Markdown and YAML with Prettier's browser build.",
     version: "1.0.0",
-    icon: "💅",
+    icon: "🧹",
     categories: ["Formatters"],
     installs: "27.5k",
     rating: 4.8,

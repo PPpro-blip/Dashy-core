@@ -25,6 +25,7 @@ export const themesExtension: ExtensionModule = {
     description:
       "Monaco color themes tuned for DashyCore — obsidian cyan, dark classic, ocean and high contrast.",
     author: "DashyCore",
+    icon: "🌈",
     categories: ["Themes"],
     contributes: {
       commands: [

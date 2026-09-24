@@ -7,7 +7,7 @@
  *   - INSTALLED: enable/disable toggles, version/author, uninstall (disable).
  *     Built-ins are always listed (labelled "Built-in") — uninstall just
  *     disables and removes them from the enabled set.
- *   - DISCOVER: the curated, third-party-feel marketplace. Search + category
+ *   - DISCOVER: the curated catalog of web-safe Dashy tools. Search + category
  *     chips + Install/Installed cards. Data source is the local catalog
  *     (lib/dcode/extensions/catalog.ts).
  *
@@ -254,9 +254,9 @@ function DiscoverTab({ enabled, onToggle }: ExtensionsPanelProps) {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search the marketplace…"
+            placeholder="Search Dashy extensions…"
             spellCheck={false}
-            aria-label="Search extensions marketplace"
+            aria-label="Search Dashy extensions"
             className="h-8 w-full bg-transparent text-xs text-zinc-200 placeholder-zinc-600 outline-none"
           />
         </div>
