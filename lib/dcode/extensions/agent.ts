@@ -13,7 +13,11 @@
  *     selection-scoped help (Pair Coder).
  */
 
-import { sendChatMessage, type ChatCallbacks } from "@/lib/chat-client";
+import {
+  sendChatMessage,
+  type ChatCallbacks,
+  type ChatHistoryEntry,
+} from "@/lib/chat-client";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
 import type { DCodeFile } from "@/lib/dcode";
 
@@ -37,6 +41,12 @@ export async function runAgentTurn(
     userId: string | null;
     agentMode: boolean;
     callbacks?: ChatCallbacks;
+    /**
+     * Prior turns of the panel conversation (oldest first, WITHOUT the
+     * current prompt). Forwarded as the request's `messages[]` so follow-ups
+     * like "now add a test for that" keep their context.
+     */
+    history?: ChatHistoryEntry[];
   }
 ): Promise<string> {
   const result = await sendChatMessage(
@@ -45,10 +55,30 @@ export async function runAgentTurn(
       model: DEFAULT_MODEL_ID,
       userId: opts.userId ?? undefined,
       agentMode: opts.agentMode,
+      history: opts.history,
     },
     opts.callbacks ?? {}
   );
   return result.content;
+}
+
+/**
+ * Converts a panel transcript into chat history (oldest first). Error
+ * bubbles and empty streaming placeholders are skipped so the worker never
+ * sees our own UI chrome as conversation. Only the concise user text is
+ * kept — the project snapshot rides on the CURRENT prompt, so earlier file
+ * dumps are never re-sent.
+ */
+export function panelHistory(
+  turns: ReadonlyArray<{ role: string; text: string }>
+): ChatHistoryEntry[] {
+  const history: ChatHistoryEntry[] = [];
+  for (const turn of turns) {
+    const text = turn.text.trim();
+    if (!text || /^\[(?:Agent Code|Pair Coder) error\]/.test(text)) continue;
+    history.push({ role: turn.role === "user" ? "user" : "assistant", content: text });
+  }
+  return history;
 }
 
 /** A compact, token-friendly listing of the project files for context. */

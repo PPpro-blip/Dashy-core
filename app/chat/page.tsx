@@ -13,6 +13,10 @@
  *   localStorage) and sync with the sidebar via events
  * - Code blocks offer Copy + "Open in D-Code" (hands the snapshot to the
  *   D-Code editor via sessionStorage; streaming is untouched)
+ * - Agent Mode toggle (composer): the worker runs its tool pipeline and
+ *   answers with one JSON document `{ reply, activity: [{ tool, status, … }] }`;
+ *   the timeline renders as a collapsible "Agent Thinking / Activity"
+ *   accordion ABOVE the reply text
  */
 
 import { useCallback, useEffect, isValidElement, useMemo, useRef, useState, type ReactNode } from "react";
@@ -41,13 +45,21 @@ import {
   type HistoryMessage,
 } from "@/lib/conversations";
 import { getModelById } from "@/lib/models";
-import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
+import {
+  AGENT_MODE_CHANGED_EVENT,
+  getStoredAgentMode,
+  getStoredModel,
+  MODEL_CHANGED_EVENT,
+  setStoredAgentMode,
+} from "@/lib/preferences";
+import { AgentActivityLog } from "@/components/chat/AgentActivityLog";
 import { proxyPromptUrlFromDirect, proxyUrlFor } from "@/lib/img-engine";
 import { AttachmentButton } from "@/components/AttachmentButton";
 import ImgStudio from "@/components/img-engine/ImgStudio";
 import { useToast } from "@/components/Toast";
 import {
   ArrowUpRightIcon,
+  BrainIcon,
   CheckIcon,
   CodeIcon,
   CopyIcon,
@@ -164,6 +176,13 @@ export default function ChatPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
   const [studioPrompt, setStudioPrompt] = useState("");
+  /**
+   * Agent Mode is a workspace-wide preference (lib/preferences). When on, the
+   * worker runs its tool pipeline and answers with one JSON document
+   * `{ reply, activity: [...] }` instead of a token stream. Read after mount
+   * so server and client render the same initial markup.
+   */
+  const [agentMode, setAgentMode] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -180,6 +199,25 @@ export default function ChatPage() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    setAgentMode(getStoredAgentMode());
+    const sync = () => setAgentMode(getStoredAgentMode());
+    window.addEventListener(AGENT_MODE_CHANGED_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(AGENT_MODE_CHANGED_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  const toggleAgentMode = useCallback(() => {
+    setAgentMode((previous) => {
+      const next = !previous;
+      setStoredAgentMode(next);
+      return next;
+    });
+  }, []);
 
   /* ---------------------------------- auth --------------------------------- */
 
@@ -354,6 +392,7 @@ export default function ChatPage() {
       conversationId: string,
       model: string,
       history: ChatHistoryEntry[],
+      agentMode: boolean,
       authToken?: string
     ): Promise<void> => {
       const controller = new AbortController();
@@ -375,7 +414,7 @@ export default function ChatPage() {
             message: promptText,
             model,
             userId: userId ?? undefined,
-            agentMode: false,
+            agentMode,
             conversationId,
             history,
             authToken,
@@ -402,6 +441,31 @@ export default function ChatPage() {
         // Source of truth: the aggregated stream result, not the typing placeholder.
         if (!isPlaceholderAssistantContent(result.content)) {
           applyAssistantContent(result.content);
+        }
+        /**
+         * Agent Mode never streams: `reply` + `activity` arrive together in
+         * one JSON document, so attach the timeline to the bubble in a single
+         * update. `messagesRef` is written too — the `finally` below persists
+         * from it before React re-renders. A reply that is only a timeline
+         * (no text) gets an honest note instead of an empty bubble.
+         */
+        const timeline = result.activity ?? [];
+        if (agentMode || timeline.length > 0) {
+          const next = messagesRef.current.map((m) =>
+            m.id === assistantMessageId
+              ? {
+                  ...m,
+                  agent: true,
+                  activity: timeline,
+                  content:
+                    isPlaceholderAssistantContent(result.content) && timeline.length > 0
+                      ? "_The agent finished without a written reply — see its activity above._"
+                      : m.content,
+                }
+              : m
+          );
+          messagesRef.current = next;
+          setMessages(next);
         }
       } catch (error) {
         if (error instanceof ChatClientError && error.kind === "aborted") {
@@ -559,6 +623,16 @@ export default function ChatPage() {
         return;
       }
 
+      // The worker's agent contract requires a signed-in userId — say so
+      // up front instead of sending a request that can only fail.
+      if (agentMode && !userId) {
+        toast.error(
+          "Please log in to use Agent mode",
+          "Agent Mode needs a signed-in session. Turn it off to chat normally."
+        );
+        return;
+      }
+
       setInput("");
       setStatuses([]);
 
@@ -581,6 +655,7 @@ export default function ChatPage() {
         content: "",
         timestamp: Date.now(),
         model: selectedModel,
+        ...(agentMode ? { agent: true } : {}),
       };
 
       const withUserMessage = [...messages, userMessage, assistantMessage];
@@ -624,11 +699,13 @@ export default function ChatPage() {
         conversationId,
         selectedModel,
         history,
+        agentMode,
         authToken
       );
     },
     [
       activeConversationId,
+      agentMode,
       handleGenerateImage,
       input,
       isStreaming,
@@ -637,6 +714,7 @@ export default function ChatPage() {
       selectedModel,
       streamAssistantReply,
       toast,
+      userId,
     ]
   );
 
@@ -662,6 +740,7 @@ export default function ChatPage() {
         content: "",
         timestamp: Date.now(),
         model: selectedModel,
+        ...(agentMode ? { agent: true } : {}),
       };
       const withoutOld = messages
         .filter((m) => m.id !== assistantMessageId)
@@ -695,11 +774,13 @@ export default function ChatPage() {
         freshAssistant.id,
         conversationId,
         selectedModel,
-        history
+        history,
+        agentMode
       );
     },
     [
       activeConversationId,
+      agentMode,
       handleImageRetry,
       isStreaming,
       messages,
@@ -858,6 +939,26 @@ export default function ChatPage() {
               disabled={isStreaming}
               className="h-8 w-8 flex-shrink-0"
             />
+            <button
+              type="button"
+              onClick={toggleAgentMode}
+              disabled={isStreaming}
+              aria-pressed={agentMode}
+              aria-label="Toggle Agent Mode"
+              title={
+                agentMode
+                  ? "Agent Mode ON — the worker runs its tool pipeline and returns the reply with its activity timeline"
+                  : "Agent Mode OFF — standard streaming reply"
+              }
+              className={`flex h-8 flex-shrink-0 items-center gap-1 rounded-lg border px-2 text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                agentMode
+                  ? "border-violet-400/40 bg-gradient-to-r from-cyan-500/20 to-violet-500/20 text-violet-200"
+                  : "border-white/[0.08] bg-white/[0.03] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200"
+              }`}
+            >
+              <BrainIcon className="h-3.5 w-3.5" />
+              Agent
+            </button>
             <textarea
               ref={textareaRef}
               value={input}
@@ -960,7 +1061,7 @@ function MessageRow({
 
       <div className={`max-w-[85%] min-w-0 space-y-2 ${isUser ? "flex flex-col items-end" : ""}`}>
         {/* Model / engine badge */}
-        {!isUser && (modelLabel || isImgMessage || message.engine === "img") && (
+        {!isUser && (modelLabel || isImgMessage || message.engine === "img" || message.agent) && (
           <div className="flex items-center gap-2">
             {isImgMessage || message.engine === "img" ? (
               <span className="rounded-md border border-cyan-400/25 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
@@ -969,6 +1070,12 @@ function MessageRow({
             ) : modelLabel ? (
               <span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">
                 {modelLabel}
+              </span>
+            ) : null}
+            {message.agent && !isImgMessage ? (
+              <span className="flex items-center gap-1 rounded-md border border-violet-400/25 bg-violet-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-300">
+                <BrainIcon className="h-3 w-3" />
+                Agent
               </span>
             ) : null}
           </div>
@@ -981,6 +1088,14 @@ function MessageRow({
             <span className="text-xs text-zinc-500">{statuses[statuses.length - 1]}</span>
           </div>
         )}
+
+        {/* Agent Mode reasoning — always ABOVE the answer it produced */}
+        {!isUser && !isImgMessage && (message.activity?.length ?? 0) > 0 ? (
+          <AgentActivityLog
+            activity={message.activity}
+            live={isThisStreaming && isAssistantEmpty}
+          />
+        ) : null}
 
         {/* Bubble */}
         {isUser ? (

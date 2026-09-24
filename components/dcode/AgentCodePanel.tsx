@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DCodeWorkspaceApi } from "@/lib/dcode/extensions/types";
 import {
   fileList,
+  panelHistory,
   parseProposedEdits,
   runAgentTurn,
   summarizeFiles,
@@ -54,6 +55,11 @@ export function AgentCodePanel({ api, onClose }: AgentCodePanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastEditsRef = useRef<ProposedEdit[] | null>(null);
+  /** Latest transcript for request history (`send` is memoized on [api, busy]). */
+  const turnsRef = useRef<Turn[]>([]);
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -97,6 +103,8 @@ export function AgentCodePanel({ api, onClose }: AgentCodePanelProps) {
     async (task: string) => {
       const trimmed = task.trim();
       if (!trimmed || busy) return;
+      // Prior turns only — captured before the new task is appended.
+      const history = panelHistory(turnsRef.current);
       setInput("");
       setTurns((prev) => [...prev, { role: "user", text: trimmed }]);
       setBusy(true);
@@ -111,6 +119,7 @@ export function AgentCodePanel({ api, onClose }: AgentCodePanelProps) {
         const content = await runAgentTurn(prompt, {
           userId,
           agentMode: true,
+          history,
         });
         const edits = parseProposedEdits(content);
         if (edits.length > 0) lastEditsRef.current = edits;

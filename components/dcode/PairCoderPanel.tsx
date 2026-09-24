@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DCodeWorkspaceApi } from "@/lib/dcode/extensions/types";
-import { firstCodeBlock, runAgentTurn } from "@/lib/dcode/extensions/agent";
+import { firstCodeBlock, panelHistory, runAgentTurn } from "@/lib/dcode/extensions/agent";
 import { onViewAction } from "@/lib/dcode/extensions/view-bridge";
 import { useToast } from "@/components/Toast";
 import { LoaderIcon, SendIcon, UsersIcon, XIcon } from "@/components/icons";
@@ -45,6 +45,11 @@ export function PairCoderPanel({ api, onClose }: PairCoderPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef("");
+  /** Latest transcript for request history (`send` is memoized). */
+  const turnsRef = useRef<Turn[]>([]);
+  useEffect(() => {
+    turnsRef.current = turns;
+  }, [turns]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -97,6 +102,8 @@ export function PairCoderPanel({ api, onClose }: PairCoderPanelProps) {
       }
       if (!seed) setSeed(activeSeed);
 
+      // Prior turns only — captured before the new question is appended.
+      const history = panelHistory(turnsRef.current);
       setInput("");
       setTurns((prev) => [...prev, { role: "user", text: trimmed }]);
       setBusy(true);
@@ -113,6 +120,7 @@ export function PairCoderPanel({ api, onClose }: PairCoderPanelProps) {
         await runAgentTurn(prompt, {
           userId,
           agentMode: false,
+          history,
           callbacks: {
             onDelta: (delta) => {
               streamRef.current += delta;

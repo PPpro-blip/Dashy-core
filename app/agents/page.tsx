@@ -21,9 +21,9 @@ import {
   type ChatMemory,
 } from "@/lib/chat-client";
 import { useToast } from "@/components/Toast";
+import { AgentActivityLog } from "@/components/chat/AgentActivityLog";
 import {
   BotIcon,
-  ChevronDownIcon,
   LoaderIcon,
   SendIcon,
   SparklesIcon,
@@ -404,6 +404,8 @@ function AgentTurnRow({ turn }: { turn: AgentTurn }) {
             {turn.modelId}
           </span>
         )}
+        {/* Agent reasoning — shared accordion, always ABOVE the reply text */}
+        <AgentActivityLog activity={turn.activity} />
         <div className="rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
           <div className="md-prose">
             <Markdown
@@ -433,61 +435,7 @@ function AgentTurnRow({ turn }: { turn: AgentTurn }) {
             ))}
           </div>
         )}
-        {turn.activity && turn.activity.length > 0 && (
-          <AgentActivityLog activity={turn.activity} />
-        )}
       </div>
-    </div>
-  );
-}
-
-function AgentActivityLog({ activity }: { activity: AgentActivity[] }) {
-  const [open, setOpen] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.matchMedia("(min-width: 768px)").matches;
-  });
-
-  return (
-    <div className="overflow-hidden rounded-xl border border-cyan-400/20 bg-cyan-500/[0.04]">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-cyan-500/[0.06]"
-      >
-        <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-        <span className="text-xs font-semibold text-cyan-300">
-          Agent activity
-        </span>
-        <span className="ml-auto flex items-center gap-1 text-[10px] text-zinc-500">
-          {activity.length} {activity.length === 1 ? "step" : "steps"}
-          <ChevronDownIcon
-            className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`}
-          />
-        </span>
-      </button>
-
-      {open && (
-        <div className="space-y-1.5 border-t border-cyan-400/10 px-3 py-2.5">
-          {activity.map((step, index) => (
-            <div key={index} className="flex items-start gap-2 text-xs">
-              <span className="mt-px flex-shrink-0 rounded-md border border-cyan-400/25 bg-cyan-400/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-cyan-300">
-                {step.type}
-              </span>
-              {step.message && (
-                <span className="min-w-0 flex-1 leading-relaxed text-zinc-400">
-                  {step.message}
-                </span>
-              )}
-              {step.tool && (
-                <span className="flex-shrink-0 rounded-md border border-white/[0.08] bg-black/30 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
-                  {step.tool}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

@@ -16,6 +16,7 @@
  */
 
 import { createClient } from "@/lib/supabase/client";
+import type { AgentActivity } from "@/lib/chat-client";
 
 export interface HistoryMessage {
   id: string;
@@ -38,6 +39,15 @@ export interface HistoryMessage {
   /** Render lifecycle state for <IMG> bubbles. */
   imageStatus?: "loading" | "ready" | "error";
   imageError?: string;
+  /** True when this reply came back through Agent Mode. */
+  agent?: boolean;
+  /**
+   * Agent Mode pipeline timeline for this reply (`[{ type, message, tool,
+   * status }]`). Kept in memory and in the local (signed-out) store; the
+   * cloud `messages` table has no column for it, so a cloud-restored thread
+   * shows the reply text without its timeline.
+   */
+  activity?: AgentActivity[];
 }
 
 export interface Conversation {
