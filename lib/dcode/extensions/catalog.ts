@@ -34,9 +34,6 @@ export interface CatalogEntry {
   categories: CatalogCategory[];
   /** Whether this card presents as a web-native equivalent of a desktop ext. */
   equivalentOf?: string;
-  /** Fake-but-honest social proof for the marketplace feel. */
-  installs?: string;
-  rating?: number;
 }
 
 export const CATALOG_CATEGORIES: CatalogCategory[] = [
@@ -57,8 +54,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🤖",
     categories: ["AI", "Productivity"],
-    installs: "12.4k",
-    rating: 4.8,
   },
   {
     id: "dashy.roo",
@@ -69,8 +64,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "𝚯",
     categories: ["AI", "Productivity"],
-    installs: "8.1k",
-    rating: 4.7,
   },
   {
     id: "dashy.tailwind",
@@ -81,8 +74,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🎨",
     categories: ["Language", "Productivity"],
-    installs: "18.6k",
-    rating: 4.8,
   },
   {
     id: "dashy.gitlens",
@@ -93,8 +84,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🔍",
     categories: ["Productivity"],
-    installs: "11.2k",
-    rating: 4.6,
   },
   {
     id: "dashy.ai",
@@ -105,8 +94,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🧠",
     categories: ["AI"],
-    installs: "22.9k",
-    rating: 4.9,
   },
   {
     id: "dashy.autocomplete",
@@ -117,8 +104,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "✨",
     categories: ["AI", "Productivity"],
-    installs: "5.6k",
-    rating: 4.4,
   },
   {
     id: "dashy.themes",
@@ -129,8 +114,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🌈",
     categories: ["Themes"],
-    installs: "31.2k",
-    rating: 4.9,
   },
   {
     id: "dashy.prettier",
@@ -141,8 +124,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🧹",
     categories: ["Formatters"],
-    installs: "27.5k",
-    rating: 4.8,
   },
   {
     id: "dashy.snippets",
@@ -153,8 +134,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "🧩",
     categories: ["Productivity", "Language"],
-    installs: "9.9k",
-    rating: 4.6,
   },
   {
     id: "dashy.markdown-preview",
@@ -165,8 +144,6 @@ export const DISCOVER_CATALOG: CatalogEntry[] = [
     version: "1.0.0",
     icon: "📄",
     categories: ["Productivity", "Language"],
-    installs: "14.3k",
-    rating: 4.7,
   },
 ];
 
