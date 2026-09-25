@@ -1936,7 +1936,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   /* --------------------------------- render ------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#0b0f19]">
+    // 100dvh (with a 100vh fallback) keeps the activity bar + status bar on
+    // screen when mobile browser chrome shrinks the visible viewport.
+    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden bg-[#0b0f19] supports-[height:100dvh]:h-[calc(100dvh-4rem)]">
       {/* VS Code-style application menu */}
       <nav aria-label="Editor menu" className="flex flex-shrink-0 items-center gap-5 border-b border-white/[0.06] bg-[#111827] px-4 py-1.5 text-[11px] text-zinc-400">
         <span className="mr-2 font-semibold text-cyan-300">D-Code</span>
@@ -2494,7 +2496,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
       {/* Bottom panel — Terminal / Output / Problems (VS Code chrome) */}
       {terminalOpen && (
         <div
-          className="flex h-64 flex-shrink-0 flex-col border-t border-white/[0.06]"
+          className="flex h-64 max-h-[45%] flex-shrink-0 flex-col border-t border-white/[0.06]"
           style={{ backgroundColor: "#05070d" }}
         >
           <div className="flex flex-shrink-0 items-center gap-1 border-b border-white/[0.06] bg-[#0a0e1a] px-2 py-1">

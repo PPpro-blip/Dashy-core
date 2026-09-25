@@ -83,15 +83,34 @@ export interface ShareHubManagement {
   onRevoke: () => void;
 }
 
+/**
+ * Standalone media share (e.g. a Dashy Studio image). When present the Hub
+ * shares this image instead of a D-Code project: it becomes the preview,
+ * the composers' image and the Meta export image, and `shareUrl` should be
+ * a page whose og:image is this media (Studio uses /m/<slug>).
+ */
+export interface ShareHubMedia {
+  /** Image URL for in-UI previews (same-origin proxied path is fine). */
+  imageUrl: string;
+  /** Absolute, publicly reachable image URL (Instagram Direct API Pro). */
+  publicImageUrl?: string;
+  title: string;
+  caption?: string;
+  tags?: string[];
+  /** File name used for downloads / composer labels. */
+  fileName?: string;
+}
+
 interface ShareHubProps {
   onClose: () => void;
   project: { id: string; title: string; files: DCodeFile[] } | null;
   shareUrl: string | null;
   privacy?: ShareHubPrivacy;
   management?: ShareHubManagement;
+  media?: ShareHubMedia;
 }
 
-export function ShareHub({ onClose, project, shareUrl, privacy, management }: ShareHubProps) {
+export function ShareHub({ onClose, project, shareUrl, privacy, management, media }: ShareHubProps) {
   const toast = useToast();
   const [selectedApp, setSelectedApp] = useState<ShareAppId | null>(null);
   const [copying, setCopying] = useState(false);
@@ -103,9 +122,13 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
   const gridRef = useRef<HTMLDivElement>(null);
 
   const imageOptions = useMemo(
-    () => collectProjectImages(project?.files ?? []),
-    [project?.files]
+    () =>
+      media
+        ? [{ name: media.fileName ?? "dashy-studio.jpg", dataUrl: media.imageUrl }]
+        : collectProjectImages(project?.files ?? []),
+    [media, project?.files]
   );
+  const subjectLabel = media ? "image" : "project";
 
   // Last-used destination + caption/tags (dashy.share.prefs). Seeds the
   // draft so "Share now" opens the last-used composer prefilled.
@@ -117,16 +140,25 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
 
   // The hub remounts on each open (conditional render in the workspace), so
   // this initializer gives us fresh smart defaults every time it opens.
-  const [draft, setDraft] = useState<ShareDraft>(() =>
-    applyPrefsToDraft(
+  const [draft, setDraft] = useState<ShareDraft>(() => {
+    const base = applyPrefsToDraft(
       makeDefaultDraft(
-        project?.title ?? "Untitled project",
+        media?.title ?? project?.title ?? "Untitled project",
         shareUrl ?? "",
         imageOptions
       ),
       prefs
-    )
-  );
+    );
+    // Media shares get media-flavoured copy (remembered D-Code captions
+    // like "Built with D-Code" would be wrong under a Studio image).
+    return media
+      ? {
+          ...base,
+          caption: media.caption ?? "Made with Dashy Studio ⚡",
+          tags: media.tags ?? ["DashyCore", "DashyStudio", "AIArt"],
+        }
+      : base;
+  });
 
   useEffect(() => {
     if (!confirmingRevoke) return;
@@ -279,7 +311,7 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Share this project"
+        aria-label={`Share this ${subjectLabel}`}
         className="fixed left-1/2 top-1/2 z-[80] flex max-h-[92vh] w-[min(40rem,calc(100vw-1.5rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0d1220] shadow-2xl shadow-black/80"
       >
         {/* Header */}
@@ -288,8 +320,8 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
             <ShareIcon className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold text-white">Share this project</h2>
-            <p className="truncate text-[11px] text-zinc-500">{project?.title}</p>
+            <h2 className="text-sm font-semibold text-white">Share this {subjectLabel}</h2>
+            <p className="truncate text-[11px] text-zinc-500">{media?.title ?? project?.title}</p>
           </div>
           <button
             type="button"
@@ -305,7 +337,11 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
           {/* Big centered preview card */}
           <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02] transition-colors hover:border-cyan-400/25">
             <div className="flex flex-col items-center px-5 pb-4 pt-6 text-center">
-              <div className="relative h-20 w-20 overflow-hidden rounded-2xl border border-white/[0.08] bg-black/30 shadow-lg shadow-black/40">
+              <div
+                className={`relative overflow-hidden rounded-2xl border border-white/[0.08] bg-black/30 shadow-lg shadow-black/40 ${
+                  media ? "h-44 w-44 shadow-cyan-500/10 sm:h-52 sm:w-52" : "h-20 w-20"
+                }`}
+              >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={draft.imageDataUrl ?? "/icon-512.png"}
@@ -314,7 +350,7 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
                 />
               </div>
               <p className="mt-3 max-w-full truncate px-2 text-base font-semibold text-white">
-                {draft.title || "Untitled project"}
+                {draft.title || (media ? "Dashy Studio image" : "Untitled project")}
               </p>
               <p className="mt-1 line-clamp-2 max-w-sm text-xs leading-relaxed text-zinc-400">
                 {draft.caption || "Built with DashyCore D-Code ⚡"}
@@ -394,7 +430,7 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
               <div className="flex flex-col items-center border-t border-white/[0.06] px-4 py-4">
                 <ShareQr value={url} />
                 <p className="mt-2 text-[11px] text-zinc-500">
-                  Scan to open this public project
+                  Scan to open this public {subjectLabel}
                 </p>
               </div>
             )}
@@ -468,7 +504,11 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management }: Sh
           </div>
 
           {/* Meta export — Instagram + Facebook, Standard or Direct API Pro. */}
-          <MetaExportCards draft={draft} onCustomize={(appId) => setSelectedApp(appId)} />
+          <MetaExportCards
+            draft={draft}
+            onCustomize={(appId) => setSelectedApp(appId)}
+            publicImageUrl={media?.publicImageUrl}
+          />
 
           {/* Owner privacy controls — hidden for plain visitors, who never
               see this prop at all. A private project still renders the full

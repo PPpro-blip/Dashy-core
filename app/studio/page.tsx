@@ -19,14 +19,27 @@
  *     `pending` / `loading`) in `dashy.media.library` to `error` so they can
  *     be retried or cleared instead of hanging forever.
  *
+ * SHARE: every ready Media Library card has a Share button that opens the
+ * Share Hub for that image. The share link is /m/<slug>, where the slug
+ * encodes the tile's proxied image params (lib/studio-share) — the public
+ * page uses that exact `asset.url` as og:image so WhatsApp / X unfurl it.
+ *
  * Video tab is intentionally honest: real AI video needs paid API keys, so it
  * shows a glassmorphism banner pointing at Settings / Image Mode.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { proxyPromptUrlFor } from "@/lib/img-engine";
 import { copyText } from "@/lib/clipboard";
+import {
+  buildStudioShareUrl,
+  studioAssetFromTile,
+  studioProxyPath,
+  studioShareTitle,
+} from "@/lib/studio-share";
+import { ShareHub, type ShareHubMedia } from "@/components/share/ShareHub";
+import { useToast } from "@/components/Toast";
 import {
   SparklesIcon,
   RefreshIcon,
@@ -36,6 +49,7 @@ import {
   TrashIcon,
   ArrowUpRightIcon,
   ImageIcon,
+  ShareIcon,
 } from "@/components/icons";
 
 export interface Tile {
@@ -192,6 +206,9 @@ export default function StudioPage() {
   const [hydrated, setHydrated] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  /** Tile currently open in the Share Hub (null = closed). */
+  const [shareTile, setShareTile] = useState<Tile | null>(null);
+  const toast = useToast();
 
   // Keep track of active image objects and timers for cleanup on unmount
   const activeJobsRef = useRef<
@@ -397,6 +414,35 @@ export default function StudioPage() {
   };
 
   const failedCount = tiles.filter((t) => t.status === "error").length;
+
+  /**
+   * Share Hub payload for the selected tile: the /m/<slug> public link plus
+   * the proxied image (asset.url) that page emits as og:image.
+   */
+  const share = useMemo(() => {
+    if (!shareTile || typeof window === "undefined") return null;
+    const asset = studioAssetFromTile(shareTile);
+    if (!asset) return null;
+    const origin = window.location.origin;
+    const proxyPath = studioProxyPath(asset);
+    const media: ShareHubMedia = {
+      // Show the exact render the card displays; og:image uses the proxy path.
+      imageUrl: shareTile.url ?? proxyPath,
+      publicImageUrl: `${origin}${proxyPath}`,
+      title: studioShareTitle(asset.prompt),
+      fileName: `dashy-studio-${asset.seed}.jpg`,
+    };
+    return { url: buildStudioShareUrl(origin, asset), media };
+  }, [shareTile]);
+
+  const openShare = (tile: Tile) => {
+    if (tile.status !== "ready" || !tile.url) return;
+    if (!studioAssetFromTile(tile)) {
+      toast.error("Can't share this image", "Its render details are missing — try Remix, then share the new one.");
+      return;
+    }
+    setShareTile(tile);
+  };
 
   return (
     <div className="min-h-full bg-[#080b14] px-4 py-8 text-white sm:px-6 md:px-12">
@@ -655,6 +701,15 @@ export default function StudioPage() {
                             <div className="flex justify-end gap-2">
                               <button
                                 type="button"
+                                onClick={() => openShare(tile)}
+                                title="Share image"
+                                aria-label="Share image"
+                                className="flex h-8 w-8 items-center justify-center rounded-xl bg-black/60 text-white backdrop-blur-md transition hover:bg-violet-500 hover:text-white"
+                              >
+                                <ShareIcon className="h-4 w-4" />
+                              </button>
+                              <button
+                                type="button"
                                 onClick={() => window.open(tile.url, "_blank", "noopener,noreferrer")}
                                 title="Open full resolution"
                                 className="flex h-8 w-8 items-center justify-center rounded-xl bg-black/60 text-white backdrop-blur-md transition hover:bg-cyan-500 hover:text-black"
@@ -733,11 +788,23 @@ export default function StudioPage() {
                       <p className="min-w-0 flex-1 truncate text-xs text-zinc-300" title={tile.prompt}>
                         {tile.prompt}
                       </p>
+                      {tile.status === "ready" && tile.url && (
+                        <button
+                          type="button"
+                          onClick={() => openShare(tile)}
+                          title="Share image"
+                          aria-label="Share image"
+                          className="ml-2 flex h-7 flex-shrink-0 items-center gap-1 rounded-lg border border-cyan-400/25 bg-cyan-400/[0.08] px-2 text-[11px] font-semibold text-cyan-300 shadow-[0_0_12px_-4px] shadow-cyan-400/40 transition hover:border-violet-400/50 hover:bg-violet-500/15 hover:text-violet-200"
+                        >
+                          <ShareIcon className="h-3.5 w-3.5" />
+                          Share
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => copyPrompt(tile.id, tile.prompt)}
                         title="Copy prompt"
-                        className="ml-2 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-zinc-500 transition hover:bg-white/10 hover:text-zinc-200"
+                        className="ml-1 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg text-zinc-500 transition hover:bg-white/10 hover:text-zinc-200"
                       >
                         {copiedId === tile.id ? (
                           <CheckIcon className="h-3.5 w-3.5 text-cyan-400" />
@@ -753,6 +820,16 @@ export default function StudioPage() {
           </>
         )}
       </div>
+
+      {share && (
+        <ShareHub
+          key={shareTile?.id}
+          onClose={() => setShareTile(null)}
+          project={null}
+          shareUrl={share.url}
+          media={share.media}
+        />
+      )}
     </div>
   );
 }

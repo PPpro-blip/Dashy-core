@@ -19,6 +19,7 @@ const PROTECTED_ROUTES = [
   "/knowledge",
   "/agents",
   "/voice",
+  "/analytics",
 ];
 
 const SHARE_PAGE_PREFIXES = ["/d-code/share/", "/s/"];
