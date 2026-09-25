@@ -69,6 +69,11 @@ interface MetaExportCardsProps {
   draft: ShareDraft;
   /** Opens the full per-app composer (title / caption / tags / image). */
   onCustomize: (appId: MetaPublishTarget) => void;
+  /**
+   * Absolute public image URL to publish (e.g. a proxied Studio image).
+   * Overrides the D-Code project og-image URL derived from the share link.
+   */
+  publicImageUrl?: string;
 }
 
 /** `/s/<key>` or `/d-code/share/<key>` → key (slug or project uuid). */
@@ -90,7 +95,7 @@ function readStoredMode(): MetaMode {
   }
 }
 
-export function MetaExportCards({ draft, onCustomize }: MetaExportCardsProps) {
+export function MetaExportCards({ draft, onCustomize, publicImageUrl }: MetaExportCardsProps) {
   const toast = useToast();
   const [mode, setMode] = useState<MetaMode>("standard");
   const [token, setToken] = useState("");
@@ -163,11 +168,12 @@ export function MetaExportCards({ draft, onCustomize }: MetaExportCardsProps) {
 
   /** Public URL of the chosen project image (served by the og-image route). */
   const projectImageUrl = useMemo(() => {
+    if (publicImageUrl && draft.imageName) return publicImageUrl;
     if (!draft.imageName || !shareKey || UUID_RE.test(shareKey) || !origin) return "";
     return `${origin}/d-code/share/${encodeURIComponent(shareKey)}/og-image?file=${encodeURIComponent(
       draft.imageName
     )}`;
-  }, [draft.imageName, origin, shareKey]);
+  }, [draft.imageName, origin, publicImageUrl, shareKey]);
 
   // Follow the draft's image until the user types their own URL.
   useEffect(() => {

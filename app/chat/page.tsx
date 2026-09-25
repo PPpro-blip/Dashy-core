@@ -69,9 +69,18 @@ import {
   RocketIcon,
   SendIcon,
   SparklesIcon,
+  SpeakerIcon,
+  SpeakerOffIcon,
   SquareIcon,
   UserIcon,
 } from "@/components/icons";
+import {
+  activeSpeechId,
+  speak,
+  speechTextFromMarkdown,
+  stopSpeaking,
+  type SpeakState,
+} from "@/lib/voice-elevenlabs";
 
 const ACTIONS = [
   {
@@ -1050,6 +1059,35 @@ function MessageRow({
     window.setTimeout(() => setCopied(false), 2000);
   };
 
+  /* ElevenLabs read-aloud (one global player — see lib/voice-elevenlabs). */
+  const toast = useToast();
+  const [speakState, setSpeakState] = useState<SpeakState>("idle");
+  useEffect(() => {
+    const id = message.id;
+    return () => {
+      if (activeSpeechId() === id) stopSpeaking();
+    };
+  }, [message.id]);
+
+  const handleSpeakClick = () => {
+    if (speakState === "loading" || speakState === "playing") {
+      stopSpeaking();
+      return;
+    }
+    speak(message.id, speechTextFromMarkdown(message.content), (state, error) => {
+      setSpeakState(state === "error" ? "idle" : state);
+      if (state === "error" && error) {
+        const needsKey = error.status === 412 || error.status === 401;
+        toast.error(
+          needsKey ? "Voice engine needs a key" : "Couldn't play voice",
+          error.message,
+          needsKey ? 7000 : undefined
+        );
+      }
+    });
+  };
+  const speakActive = speakState !== "idle";
+
   return (
     <div className={`group flex w-full gap-3 px-4 py-4 ${isUser ? "justify-end" : "justify-start"}`}>
       {/* Assistant avatar */}
@@ -1191,9 +1229,42 @@ function MessageRow({
               )}
             </div>
 
-            {/* Copy / Regenerate — reveal on hover */}
+            {/* Speak / Copy / Regenerate — reveal on hover (pinned while speaking) */}
             {!isThisStreaming && (
-              <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 opacity-0 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100">
+              <div
+                className={`absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100 ${
+                  speakActive ? "opacity-100" : "opacity-0 focus-within:opacity-100"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={handleSpeakClick}
+                  title={
+                    speakState === "loading"
+                      ? "Loading voice… (click to cancel)"
+                      : speakState === "playing"
+                      ? "Stop reading"
+                      : "Read aloud (ElevenLabs)"
+                  }
+                  aria-label={speakState === "idle" ? "Read response aloud" : "Stop reading aloud"}
+                  aria-pressed={speakActive}
+                  className={`relative rounded-md p-1.5 transition-colors hover:bg-white/[0.06] ${
+                    speakActive
+                      ? "text-cyan-300 shadow-[0_0_12px_-3px] shadow-cyan-400/60"
+                      : "text-zinc-500 hover:text-cyan-300"
+                  }`}
+                >
+                  {speakState === "loading" ? (
+                    <span className="block h-3.5 w-3.5 animate-spin rounded-full border-[1.5px] border-cyan-400/30 border-t-cyan-300" />
+                  ) : speakState === "playing" ? (
+                    <SpeakerOffIcon className="h-3.5 w-3.5" />
+                  ) : (
+                    <SpeakerIcon className="h-3.5 w-3.5" />
+                  )}
+                  {speakState === "playing" && (
+                    <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 animate-ping rounded-full bg-violet-400" />
+                  )}
+                </button>
                 <button
                   type="button"
                   onClick={() => void handleCopyClick()}

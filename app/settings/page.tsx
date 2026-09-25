@@ -6,6 +6,7 @@
  * - Profile: avatar / name / email (read-only from Supabase Auth)
  * - Preferences: default model, theme (dark locked)
  * - Memory: documents list from Supabase `documents` (shared DocumentsList)
+ * - Voice: ElevenLabs API key + voice for the chat "Read aloud" speaker
  * - Meta Share: Graph token for the Share Hub's Direct API Pro mode
  * - Danger Zone: sign out, delete account (placeholder)
  *
@@ -27,8 +28,10 @@ import {
   InstagramIcon,
   LockIcon,
   MoonIcon,
+  SpeakerIcon,
 } from "@/components/icons";
 import { MetaTokenSettings } from "@/components/share/MetaTokenSettings";
+import { ElevenLabsSettings } from "@/components/voice/ElevenLabsSettings";
 
 interface UserProfile {
   name: string;
@@ -268,6 +271,29 @@ export default function SettingsPage() {
         <div className="mt-4">
           <DocumentsList reloadKey={docsReloadKey} />
         </div>
+      </section>
+
+      {/* --------------------------- Voice (ElevenLabs) ------------------------ */}
+      <section
+        id="voice"
+        className="mt-6 scroll-mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6"
+      >
+        <div className="flex items-start gap-3">
+          <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500/25 to-violet-500/25">
+            <SpeakerIcon className="h-4 w-4 text-cyan-300" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+              Voice · ElevenLabs
+            </h2>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+              Realistic, human-sounding read-aloud for AI replies. Your key is
+              stored in this browser only and relayed per request — DashyCore
+              never saves it.
+            </p>
+          </div>
+        </div>
+        <ElevenLabsSettings />
       </section>
 
       {/* ------------------------------ Meta Share ----------------------------- */}

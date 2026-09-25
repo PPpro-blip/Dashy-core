@@ -32,6 +32,7 @@ import {
   type Conversation,
 } from "@/lib/conversations";
 import {
+  ActivityIcon,
   BookOpenIcon,
   BotIcon,
   BrainIcon,
@@ -268,6 +269,10 @@ export function Sidebar() {
           <span className="ml-auto rounded-md bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-cyan-300">
             New
           </span>
+        </Link>
+        <Link href="/analytics" className={navItemClass(pathname === "/analytics")}>
+          <ActivityIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Analytics</span>
         </Link>
         <Link
           href="/settings#memory"
