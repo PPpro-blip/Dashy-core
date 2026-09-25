@@ -6,6 +6,7 @@
  * - Profile: avatar / name / email (read-only from Supabase Auth)
  * - Preferences: default model, theme (dark locked)
  * - Memory: documents list from Supabase `documents` (shared DocumentsList)
+ * - Meta Share: Graph token for the Share Hub's Direct API Pro mode
  * - Danger Zone: sign out, delete account (placeholder)
  *
  * Executive dark-mode aesthetic (zinc-900 / zinc-950).
@@ -23,9 +24,11 @@ import {
   AlertIcon,
   CheckIcon,
   ChevronDownIcon,
+  InstagramIcon,
   LockIcon,
   MoonIcon,
 } from "@/components/icons";
+import { MetaTokenSettings } from "@/components/share/MetaTokenSettings";
 
 interface UserProfile {
   name: string;
@@ -265,6 +268,30 @@ export default function SettingsPage() {
         <div className="mt-4">
           <DocumentsList reloadKey={docsReloadKey} />
         </div>
+      </section>
+
+      {/* ------------------------------ Meta Share ----------------------------- */}
+      <section
+        id="meta"
+        className="mt-6 scroll-mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6"
+      >
+        <div className="flex items-start gap-3">
+          <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#1877f2]/25 to-[#e1306c]/25">
+            <InstagramIcon className="h-4 w-4 text-pink-300" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+              Meta Share
+            </h2>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+              Optional token for the Share Hub&apos;s Direct API Pro mode — post
+              to a Facebook Page and an Instagram professional account without
+              leaving DashyCore. Standard mode (copy caption + Meta&apos;s web
+              share) needs nothing.
+            </p>
+          </div>
+        </div>
+        <MetaTokenSettings />
       </section>
 
       {/* ----------------------------- Danger Zone ----------------------------- */}
