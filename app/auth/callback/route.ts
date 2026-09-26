@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createRouteHandlerClient } from "@/lib/supabase/server";
 
 /**
- * Supabase OAuth PKCE callback.
+ * Supabase OAuth / email-link PKCE callback.
  * Exchanges the `code` for a session, then redirects to /chat.
  */
 export async function GET(request: Request) {
@@ -15,8 +15,11 @@ export async function GET(request: Request) {
     const supabase = await createRouteHandlerClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      // Only allow relative paths to prevent open-redirects.
-      const safeNext = next.startsWith("/") ? next : "/chat";
+      // Only allow local paths ("//host" is a protocol-relative redirect).
+      const safeNext =
+        next.startsWith("/") && !next.startsWith("//") && !next.includes("\\")
+          ? next
+          : "/chat";
       return NextResponse.redirect(`${origin}${safeNext}`);
     }
   }

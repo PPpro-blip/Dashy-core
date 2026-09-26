@@ -1,4 +1,5 @@
 import { createServerClient } from "@supabase/ssr";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
 /**
@@ -54,4 +55,27 @@ export async function createRouteHandlerClient() {
       },
     }
   );
+}
+
+/**
+ * Service-role client for SERVER-SIDE recovery paths only (never exposed to
+ * the browser). Optional by design: returns null when SUPABASE_SERVICE_ROLE_KEY
+ * is not configured, and callers must degrade to the anon/RLS client.
+ *
+ * Used by /api/share/[key] so a PUBLIC share link still opens when the live
+ * database is missing the anonymous SELECT policy (the #1 cause of the
+ * "Private or no longer exists" empty state). The route hard-filters
+ * is_public = true on every service-role read, so private rows can never
+ * leak through this path.
+ */
+export function createServiceClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !serviceKey) return null;
+  return createSupabaseClient(url, serviceKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
 }

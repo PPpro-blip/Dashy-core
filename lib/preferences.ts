@@ -33,3 +33,37 @@ export function setStoredModel(id: string): void {
   }
   window.dispatchEvent(new CustomEvent(MODEL_CHANGED_EVENT, { detail: { model: id } }));
 }
+
+/* ---------------------------------------------------------------------- */
+/* Agent Mode                                                              */
+/* ---------------------------------------------------------------------- */
+
+const AGENT_MODE_KEY = "dashycore:agent-mode";
+export const AGENT_MODE_CHANGED_EVENT = "dashy:agent-mode-changed";
+
+/**
+ * Agent Mode is a workspace-wide preference (like the model): the chat
+ * composer toggles it, and any other surface that sends chat requests reads
+ * the same flag so one conversation never mixes modes by accident.
+ */
+export function getStoredAgentMode(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(AGENT_MODE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setStoredAgentMode(enabled: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (enabled) window.localStorage.setItem(AGENT_MODE_KEY, "1");
+    else window.localStorage.removeItem(AGENT_MODE_KEY);
+  } catch {
+    // Storage unavailable — the toggle stays session-only.
+  }
+  window.dispatchEvent(
+    new CustomEvent(AGENT_MODE_CHANGED_EVENT, { detail: { agentMode: enabled } })
+  );
+}

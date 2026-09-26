@@ -1,18 +1,17 @@
 "use client";
 
 /**
- * DashyCore v7 — Voice chat.
+ * DashyCore v7 — Voice chat (Web Speech API, zero backend).
  *
  * - SpeechRecognition → speech-to-text (browser STT)
- * - ElevenLabs streamed TTS when a Settings key or server key is available
- * - Browser SpeechSynthesis fallback when ElevenLabs is not configured
+ * - SpeechSynthesis → text-to-speech (browser TTS)
  * - A large centered cyan orb that pulses while listening / thinking / speaking
- * - Browser voice presets remain available for fallback playback.
+ * - 5 named voice presets (Noah / James / Galileo / Aria / Nova) mapped to the
+ *   browser's available voices (preferring English) with custom rate/pitch.
  *
  * The transcribed phrase is sent to the SAME dashy-flow-state worker contract
  * as chat (`{ message, model, userId, agentMode, history }`), using the user's
- * default model preference; the reply is spoken aloud through ElevenLabs or
- * the browser fallback without exposing the stored key to Supabase.
+ * default model preference; the reply is spoken aloud with the selected voice.
  *
  * All `window.speechSynthesis` / `SpeechRecognition` access happens client-side
  * (guarded so SSR never touches the Web Speech globals).
@@ -22,7 +21,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { ChatClientError, sendChatMessage } from "@/lib/chat-client";
 import { getStoredModel } from "@/lib/preferences";
-import { DEFAULT_ELEVENLABS_VOICE_ID, getElevenLabsKey } from "@/lib/elevenlabs";
 import { MicIcon, SquareIcon } from "@/components/icons";
 
 type VoicePresetId = "noah" | "james" | "galileo" | "aria" | "nova";
@@ -72,13 +70,9 @@ export default function VoicePage() {
   const [turns, setTurns] = useState<VoiceTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [elevenLabsVoiceId, setElevenLabsVoiceId] = useState(DEFAULT_ELEVENLABS_VOICE_ID);
-  const [speechEngine, setSpeechEngine] = useState<"elevenlabs" | "browser" | null>(null);
 
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
 
   const preset = VOICE_PRESETS.find((p) => p.id === presetId) ?? VOICE_PRESETS[1];
 
@@ -121,31 +115,17 @@ export default function VoicePage() {
   /* ------------------------------ speech aloud ---------------------------- */
 
   const stopSpeaking = useCallback(() => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
-    if (audioRef.current) {
-      audioRef.current.onplay = null;
-      audioRef.current.onended = null;
-      audioRef.current.onerror = null;
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
     setIsSpeaking(false);
   }, []);
 
-  const speakWithBrowser = useCallback(
+  const speak = useCallback(
     (text: string) => {
-      if (typeof window === "undefined" || !window.speechSynthesis) {
-        setError("No speech engine is available in this browser.");
-        return;
-      }
+      if (typeof window === "undefined" || !window.speechSynthesis) return;
       const synth = window.speechSynthesis;
       synth.cancel();
+
       const utterance = new SpeechSynthesisUtterance(text);
       const voice = pickVoice(synth.getVoices(), preset);
       if (voice) utterance.voice = voice;
@@ -155,70 +135,9 @@ export default function VoicePage() {
       utterance.onstart = () => setIsSpeaking(true);
       utterance.onend = () => setIsSpeaking(false);
       utterance.onerror = () => setIsSpeaking(false);
-      setSpeechEngine("browser");
       synth.speak(utterance);
     },
     [preset]
-  );
-
-  /**
-   * Prefer a real ElevenLabs stream. The key is read from Settings at the
-   * moment of playback and sent only as a request header to our same-origin
-   * proxy. The API's clean missing-key response intentionally falls back to
-   * Web Speech so Voice still works without configuration.
-   */
-  const speak = useCallback(
-    async (text: string) => {
-      const key = getElevenLabsKey();
-      stopSpeaking();
-      try {
-        const response = await fetch("/api/voice/elevenlabs", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(key ? { "x-elevenlabs-api-key": key } : {}),
-          },
-          body: JSON.stringify({ text, voice_id: elevenLabsVoiceId || DEFAULT_ELEVENLABS_VOICE_ID }),
-        });
-
-        if (!response.ok) {
-          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-          if (payload?.error && !/API Key required/i.test(payload.error)) {
-            setError(payload.error);
-          }
-          speakWithBrowser(text);
-          return;
-        }
-
-        const audioUrl = URL.createObjectURL(await response.blob());
-        audioUrlRef.current = audioUrl;
-        const audio = new Audio(audioUrl);
-        audioRef.current = audio;
-        audio.onplay = () => {
-          setSpeechEngine("elevenlabs");
-          setIsSpeaking(true);
-        };
-        const finish = () => {
-          setIsSpeaking(false);
-          if (audioUrlRef.current === audioUrl) {
-            URL.revokeObjectURL(audioUrl);
-            audioUrlRef.current = null;
-          }
-          if (audioRef.current === audio) audioRef.current = null;
-        };
-        audio.onended = finish;
-        audio.onerror = () => {
-          finish();
-          setError("ElevenLabs audio could not play. Using browser speech instead.");
-          speakWithBrowser(text);
-        };
-        await audio.play();
-      } catch {
-        setError("Could not reach ElevenLabs. Using browser speech instead.");
-        speakWithBrowser(text);
-      }
-    },
-    [elevenLabsVoiceId, speakWithBrowser, stopSpeaking]
   );
 
   /* ---------------------------- send to worker ---------------------------- */
@@ -267,7 +186,7 @@ export default function VoicePage() {
         );
         const reply = result.content.trim();
         setTurns((prev) => [...prev, { role: "assistant", text: reply }]);
-        void speak(reply);
+        speak(reply);
       } catch (error) {
         if (error instanceof ChatClientError && error.kind === "aborted") {
           return;
@@ -374,8 +293,6 @@ export default function VoicePage() {
       if (typeof window !== "undefined" && window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
-      audioRef.current?.pause();
-      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
     };
   }, []);
 
@@ -438,7 +355,7 @@ export default function VoicePage() {
             htmlFor="voice-selector"
             className="mb-2 block text-center text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500"
           >
-            Browser fallback voice
+            Voice
           </label>
           <select
             id="voice-selector"
@@ -458,26 +375,6 @@ export default function VoicePage() {
             {voices.length > 0
               ? `${voices.length} browser voice${voices.length === 1 ? "" : "s"} available · ${preset.name}, ${preset.rate}× rate, ${preset.pitch} pitch`
               : "Loading available voices…"}
-          </p>
-          <label htmlFor="elevenlabs-voice-id" className="mt-5 mb-2 block text-center text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
-            ElevenLabs voice ID
-          </label>
-          <input
-            id="elevenlabs-voice-id"
-            value={elevenLabsVoiceId}
-            onChange={(event) => setElevenLabsVoiceId(event.target.value)}
-            maxLength={128}
-            spellCheck={false}
-            disabled={isListening || isThinking || isSpeaking}
-            aria-label="ElevenLabs voice ID"
-            className="h-10 w-full rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 text-center font-mono text-xs text-zinc-100 outline-none transition-colors focus:border-cyan-400/50 disabled:opacity-50"
-          />
-          <p className="mt-2 text-center text-[11px] text-zinc-600">
-            {speechEngine === "elevenlabs"
-              ? "Speaking with ElevenLabs"
-              : speechEngine === "browser"
-                ? "Browser speech fallback active — add a key in Settings for ElevenLabs."
-                : "Rachel is used by default. Add an API key in Settings for real streamed voice."}
           </p>
         </div>
 
