@@ -16,6 +16,7 @@ import {
   deleteProject,
   listProjects,
   starterProjectDraft,
+  toggleProjectPublic,
   type DCodeProject,
 } from "@/lib/dcode";
 import { useToast } from "@/components/Toast";
@@ -27,7 +28,9 @@ import {
   LockIcon,
   PlusIcon,
   TrashIcon,
+  ShareIcon,
 } from "@/components/icons";
+import { ShareHubModal } from "@/components/ShareHubModal";
 
 function formatRelative(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -54,6 +57,7 @@ export default function ProjectsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   /** Two-step delete confirm: the id staged for deletion. */
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [sharing, setSharing] = useState<DCodeProject | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -133,6 +137,16 @@ export default function ProjectsPage() {
     },
     [confirmingId, toast]
   );
+
+  const handleShare = useCallback(async (project: DCodeProject) => {
+    try {
+      const ready = project.isPublic ? project : await toggleProjectPublic(project.id, true);
+      setProjects((prev) => prev.map((item) => item.id === ready.id ? ready : item));
+      setSharing(ready);
+    } catch (error) {
+      toast.show({ type: "error", title: "Could not share project", message: error instanceof Error ? error.message : "Please try again." });
+    }
+  }, [toast]);
 
   return (
     <div className="mx-auto w-full max-w-5xl px-6 py-8">
@@ -272,6 +286,15 @@ export default function ProjectsPage() {
                     </Link>
                     <button
                       type="button"
+                      onClick={() => void handleShare(project)}
+                      aria-label={`Share ${project.title}`}
+                      className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                    >
+                      <ShareIcon className="h-3.5 w-3.5" />
+                      Share
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void handleDelete(project)}
                       disabled={deletingId !== null}
                       aria-label={`Delete ${project.title}`}
@@ -299,6 +322,13 @@ export default function ProjectsPage() {
           </ul>
         )}
       </div>
+      {sharing?.shareSlug && typeof window !== "undefined" && (
+        <ShareHubModal
+          title={sharing.title}
+          url={`${window.location.origin}/d-code/share/${sharing.shareSlug}`}
+          onClose={() => setSharing(null)}
+        />
+      )}
     </div>
   );
 }

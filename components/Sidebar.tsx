@@ -260,6 +260,10 @@ export function Sidebar() {
           <BookOpenIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Knowledge</span>
         </Link>
+        <Link href="/analytics" className={navItemClass(pathname === "/analytics")}>
+          <BrainIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Analytics</span>
+        </Link>
         <Link
           href="/settings#memory"
           className={navItemClass(pathname === "/settings" && hash.includes("memory"))}

@@ -55,6 +55,7 @@ import {
   SparklesIcon,
   SquareIcon,
   UserIcon,
+  Volume2Icon,
 } from "@/components/icons";
 
 const ACTIONS = [
@@ -593,6 +594,28 @@ export default function ChatPage() {
     }
   };
 
+  /* ---------------------------- neural speaker ----------------------------- */
+  // Fetching on click begins immediately and lets the browser buffer the MP3
+  // while the player starts; unlike SpeechSynthesis this is consistent across
+  // browsers and does not require an API key.
+  const playNeuralVoice = useCallback(async (text: string) => {
+    try {
+      const response = await fetch("/api/voice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice: "Brian" }),
+      });
+      if (!response.ok) throw new Error("Voice service unavailable");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch {
+      toast.error("Could not play voice", "Try again in a moment.");
+    }
+  }, [toast]);
+
   /* --------------------------------- render -------------------------------- */
 
   return (
@@ -664,6 +687,7 @@ export default function ChatPage() {
               onCopy={() => void handleCopy(message.content)}
               onOpenInDcode={handleOpenInDcode}
               onRegenerate={() => handleRegenerate(message.id)}
+              onSpeak={(text) => void playNeuralVoice(text)}
             />
           ))}
           <div ref={messagesEndRef} />
@@ -743,6 +767,7 @@ function MessageRow({
   onCopy,
   onOpenInDcode,
   onRegenerate,
+  onSpeak,
 }: {
   message: HistoryMessage;
   isStreaming: boolean;
@@ -750,6 +775,7 @@ function MessageRow({
   onCopy: () => void;
   onOpenInDcode: (code: string, language: string) => void;
   onRegenerate: () => void;
+  onSpeak: (text: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
@@ -842,6 +868,15 @@ function MessageRow({
             {/* Copy / Regenerate — reveal on hover */}
             {!isThisStreaming && (
               <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 opacity-0 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100">
+                <button
+                  type="button"
+                  onClick={() => onSpeak(message.content)}
+                  title="Play neural voice"
+                  aria-label="Play neural voice"
+                  className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-cyan-400/10 hover:text-cyan-300"
+                >
+                  <Volume2Icon className="h-3.5 w-3.5" />
+                </button>
                 <button
                   type="button"
                   onClick={() => void handleCopyClick()}

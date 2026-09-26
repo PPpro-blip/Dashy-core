@@ -74,6 +74,13 @@ export const PaperclipIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const Volume2Icon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M11 5 6 9H2v6h4l5 4V5Z" />
+    <path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" />
+  </Svg>
+);
+
 export const SendIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="m22 2-7 20-4-9-9-4Z" />
