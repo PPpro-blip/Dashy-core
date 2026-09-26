@@ -6,8 +6,6 @@
  * - Profile: avatar / name / email (read-only from Supabase Auth)
  * - Preferences: default model, theme (dark locked)
  * - Memory: documents list from Supabase `documents` (shared DocumentsList)
- * - Voice: ElevenLabs API key + voice for the chat "Read aloud" speaker
- * - Meta Share: Graph token for the Share Hub's Direct API Pro mode
  * - Danger Zone: sign out, delete account (placeholder)
  *
  * Executive dark-mode aesthetic (zinc-900 / zinc-950).
@@ -25,13 +23,9 @@ import {
   AlertIcon,
   CheckIcon,
   ChevronDownIcon,
-  InstagramIcon,
   LockIcon,
   MoonIcon,
-  SpeakerIcon,
 } from "@/components/icons";
-import { MetaTokenSettings } from "@/components/share/MetaTokenSettings";
-import { ElevenLabsSettings } from "@/components/voice/ElevenLabsSettings";
 
 interface UserProfile {
   name: string;
@@ -52,7 +46,17 @@ export default function SettingsPage() {
   const [model, setModel] = useState<string>(() => getStoredModel());
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [docsReloadKey, setDocsReloadKey] = useState(0);
+  const [elevenLabsKey, setElevenLabsKey] = useState("");
   const toast = useToast();
+
+  useEffect(() => {
+    try { setElevenLabsKey(window.localStorage.getItem("dashycore:elevenlabs-key") ?? ""); } catch { /* storage optional */ }
+  }, []);
+
+  const saveElevenLabsKey = (value: string) => {
+    setElevenLabsKey(value);
+    try { window.localStorage.setItem("dashycore:elevenlabs-key", value); } catch { /* best effort */ }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -244,6 +248,25 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      {/* ----------------------------- Voice upgrade --------------------------- */}
+      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">Voice</h2>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-medium text-zinc-200">ElevenLabs key</p>
+            <p className="mt-0.5 text-xs text-zinc-500">Optional Upgrade for Custom Voices</p>
+          </div>
+          <input
+            type="password"
+            value={elevenLabsKey}
+            onChange={(event) => saveElevenLabsKey(event.target.value)}
+            placeholder="Optional — keyless neural voice is enabled"
+            aria-label="ElevenLabs API key, optional upgrade for custom voices"
+            className="w-full rounded-lg border border-white/[0.08] bg-black/20 px-3 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-cyan-400/50 sm:max-w-xs"
+          />
+        </div>
+      </section>
+
       {/* ------------------------------- Memory ------------------------------- */}
       <section
         id="memory"
@@ -271,53 +294,6 @@ export default function SettingsPage() {
         <div className="mt-4">
           <DocumentsList reloadKey={docsReloadKey} />
         </div>
-      </section>
-
-      {/* --------------------------- Voice (ElevenLabs) ------------------------ */}
-      <section
-        id="voice"
-        className="mt-6 scroll-mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6"
-      >
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500/25 to-violet-500/25">
-            <SpeakerIcon className="h-4 w-4 text-cyan-300" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-              Voice · ElevenLabs
-            </h2>
-            <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-              Realistic, human-sounding read-aloud for AI replies. Your key is
-              stored in this browser only and relayed per request — DashyCore
-              never saves it.
-            </p>
-          </div>
-        </div>
-        <ElevenLabsSettings />
-      </section>
-
-      {/* ------------------------------ Meta Share ----------------------------- */}
-      <section
-        id="meta"
-        className="mt-6 scroll-mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6"
-      >
-        <div className="flex items-start gap-3">
-          <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#1877f2]/25 to-[#e1306c]/25">
-            <InstagramIcon className="h-4 w-4 text-pink-300" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-              Meta Share
-            </h2>
-            <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-              Optional token for the Share Hub&apos;s Direct API Pro mode — post
-              to a Facebook Page and an Instagram professional account without
-              leaving DashyCore. Standard mode (copy caption + Meta&apos;s web
-              share) needs nothing.
-            </p>
-          </div>
-        </div>
-        <MetaTokenSettings />
       </section>
 
       {/* ----------------------------- Danger Zone ----------------------------- */}

@@ -1,11 +1,10 @@
 "use client";
 
 /**
- * DashyCore v7 — Voice chat.
+ * DashyCore v7 — Voice chat (Web Speech API, zero backend).
  *
  * - SpeechRecognition → speech-to-text (browser STT)
- * - ElevenLabs streamed speech when a Settings or workspace key is present
- * - Browser SpeechSynthesis fallback when no ElevenLabs key is configured
+ * - SpeechSynthesis → text-to-speech (browser TTS)
  * - A large centered cyan orb that pulses while listening / thinking / speaking
  * - 5 named voice presets (Noah / James / Galileo / Aria / Nova) mapped to the
  *   browser's available voices (preferring English) with custom rate/pitch.
@@ -22,7 +21,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { ChatClientError, sendChatMessage } from "@/lib/chat-client";
 import { getStoredModel } from "@/lib/preferences";
-import { speak as speakElevenLabs, stopSpeaking as stopElevenLabs } from "@/lib/voice-elevenlabs";
 import { MicIcon, SquareIcon } from "@/components/icons";
 
 type VoicePresetId = "noah" | "james" | "galileo" | "aria" | "nova";
@@ -117,30 +115,29 @@ export default function VoicePage() {
   /* ------------------------------ speech aloud ---------------------------- */
 
   const stopSpeaking = useCallback(() => {
-    stopElevenLabs();
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
     setIsSpeaking(false);
   }, []);
 
   const speak = useCallback(
     (text: string) => {
-      // The shared player streams real ElevenLabs audio. Its no-key response
-      // deliberately falls back to browser speech without breaking the voice
-      // conversation, retaining the voice selector's native settings.
-      const browserVoice = pickVoice(voices, preset);
-      speakElevenLabs(
-        `voice-chat-${Date.now()}`,
-        text,
-        (state, engineError) => {
-          setIsSpeaking(state === "loading" || state === "playing");
-          if (state === "error" && engineError) setError(engineError.message);
-        },
-        { voiceName: browserVoice?.name, rate: preset.rate, pitch: preset.pitch }
-      );
+      if (typeof window === "undefined" || !window.speechSynthesis) return;
+      const synth = window.speechSynthesis;
+      synth.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      const voice = pickVoice(synth.getVoices(), preset);
+      if (voice) utterance.voice = voice;
+      utterance.rate = preset.rate;
+      utterance.pitch = preset.pitch;
+      utterance.lang = voice?.lang ?? "en-US";
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => setIsSpeaking(false);
+      synth.speak(utterance);
     },
-    [preset, voices]
+    [preset]
   );
 
   /* ---------------------------- send to worker ---------------------------- */

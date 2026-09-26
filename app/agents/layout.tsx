@@ -5,5 +5,5 @@ export default function AgentsLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <AppShell title="Dashy Agent">{children}</AppShell>;
+  return <AppShell title="Agents">{children}</AppShell>;
 }

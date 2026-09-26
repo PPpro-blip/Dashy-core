@@ -1,6 +1,6 @@
 # DashyCore v7
 
-Premium AI workspace — chat, RAG memory, D-Code and Agent Mode.
+Premium AI workspace — chat, RAG memory, and (soon) D-Code + Agent Mode.
 
 ## Stack
 
@@ -21,31 +21,6 @@ Premium AI workspace — chat, RAG memory, D-Code and Agent Mode.
 ```bash
 npm install
 npm run dev
-```
-
-Configure Supabase Auth (email OTP, Google and GitHub) and apply the D-Code
-migrations in `supabase/migrations/` (including the public-share SELECT policy).
-Email sign-in accepts a one-time code or the email link; include `{{ .Token }}`
-in the Supabase email template to display the code, and allow `/auth/callback`
-in your Supabase redirect URLs.
-
-## Sharing
-
-Open **Share** in an owned D-Code project for a modal Share Hub. Publishing
-assigns a stable `/s/<slug>` link; copying happens inside the Hub. The short
-link redirects to the canonical `/d-code/share/<slug>` viewer. Public links
-work without signing in. For a private project, only the owner can preview
-its link; other visitors receive HTTP 403 (not a login redirect). Revoking or
-regenerating a link remains available from the Hub. RLS is the primary access
-boundary. If a deployment lacks the public SELECT policy, the optional
-server-side service-role recovery lane reads **only** `is_public = true` rows;
-never expose its key to the browser.
-
-```bash
-npm run test:share          # X / WhatsApp / LinkedIn URL builders
-npm run test:share:access   # local mock: public, private, owner, short URLs
-npm run typecheck
-npm run build
 ```
 
 ## Structure
