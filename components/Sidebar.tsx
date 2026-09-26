@@ -34,11 +34,13 @@ import {
 import {
   BookOpenIcon,
   BotIcon,
+  ChartIcon,
   BrainIcon,
   CodeIcon,
   FolderIcon,
   MessageIcon,
   MicIcon,
+  ImageIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
@@ -255,6 +257,14 @@ export function Sidebar() {
         <Link href="/projects" className={navItemClass(pathname === "/projects")}>
           <FolderIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Projects</span>
+        </Link>
+        <Link href="/studio" className={navItemClass(pathname === "/studio")}>
+          <ImageIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Studio</span>
+        </Link>
+        <Link href="/analytics" className={navItemClass(pathname === "/analytics")}>
+          <ChartIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Analytics</span>
         </Link>
         <Link href="/knowledge" className={navItemClass(pathname === "/knowledge")}>
           <BookOpenIcon className="h-4 w-4 flex-shrink-0" />

@@ -55,7 +55,11 @@ import {
   SparklesIcon,
   SquareIcon,
   UserIcon,
+  VolumeIcon,
+  VolumeOffIcon,
 } from "@/components/icons";
+import { speak, stopSpeaking } from "@/lib/voice-engine";
+import { addMedia, newAssetId } from "@/lib/media-library";
 
 const ACTIONS = [
   {
@@ -530,6 +534,20 @@ export default function ChatPage() {
         Math.random() * 100000
       )}`;
 
+      // Mirror into the Studio media library so Studio + Analytics see it.
+      try {
+        addMedia({
+          id: newAssetId(),
+          url: imageUrl,
+          prompt,
+          createdAt: Date.now(),
+          shareSlug: null,
+          isPublic: false,
+        });
+      } catch {
+        // Storage unavailable — the chat image still renders.
+      }
+
       const userMessage: HistoryMessage = {
         id: newConversationId(),
         role: "user",
@@ -752,6 +770,7 @@ function MessageRow({
   onRegenerate: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const isUser = message.role === "user";
   const isAssistantEmpty = !isUser && message.content.length === 0;
   const isThisStreaming = !isUser && isStreaming;
@@ -761,6 +780,22 @@ function MessageRow({
     onCopy();
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  /**
+   * Zero-key playback: ElevenLabs when the user added a key in Settings,
+   * otherwise the embedded browser neural voice. Never errors out.
+   */
+  const handleSpeakClick = async () => {
+    if (speaking) {
+      stopSpeaking();
+      setSpeaking(false);
+      return;
+    }
+    setSpeaking(true);
+    await speak(message.content, {
+      onEnd: () => setSpeaking(false),
+    });
   };
 
   return (
@@ -853,6 +888,23 @@ function MessageRow({
                     <CheckIcon className="h-3.5 w-3.5 text-emerald-400" />
                   ) : (
                     <CopyIcon className="h-3.5 w-3.5" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSpeakClick()}
+                  title={speaking ? "Stop playback" : "Play response aloud"}
+                  aria-label={speaking ? "Stop playback" : "Play response aloud"}
+                  className={`rounded-md p-1.5 transition-colors hover:bg-white/[0.06] ${
+                    speaking
+                      ? "text-cyan-400"
+                      : "text-zinc-500 hover:text-zinc-200"
+                  }`}
+                >
+                  {speaking ? (
+                    <VolumeOffIcon className="h-3.5 w-3.5" />
+                  ) : (
+                    <VolumeIcon className="h-3.5 w-3.5" />
                   )}
                 </button>
                 <button
