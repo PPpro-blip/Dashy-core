@@ -21,6 +21,7 @@ type ProjectRow = TimestampRow;
 type ConversationRow = TimestampRow & { id: string };
 type MessageRow = TimestampRow;
 
+/** Every metric degrades to 0 when its table is missing or unreadable. */
 interface LiveAnalytics {
   projectTotal: number;
   conversationTotal: number;
@@ -32,7 +33,25 @@ interface LiveAnalytics {
   messageDates: string[];
   studioDates: string[];
   shareDates: string[];
+  /** Tables whose queries failed — surfaced as a muted hint, never a crash. */
+  degraded: string[];
+  signedIn: boolean;
 }
+
+const EMPTY_ANALYTICS: LiveAnalytics = {
+  projectTotal: 0,
+  conversationTotal: 0,
+  messageTotal: 0,
+  studioTotal: 0,
+  shareTotal: 0,
+  projectDates: [],
+  conversationDates: [],
+  messageDates: [],
+  studioDates: [],
+  shareDates: [],
+  degraded: [],
+  signedIn: false,
+};
 
 interface DayBucket {
   key: string;
@@ -65,16 +84,37 @@ function dates(rows: TimestampRow[] | null): string[] {
 }
 
 async function loadLiveAnalytics(): Promise<LiveAnalytics> {
-  const supabase = createClient();
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-  if (userError) throw new Error(userError.message);
-  if (!user) throw new Error("Sign in to view your analytics.");
+  // Studio media is local-only, so it is always available even offline.
+  const studioItems = listStudioMedia();
+  const studioDates = studioItems
+    .map((item) => item.createdAt)
+    .filter((value) => !Number.isNaN(Date.parse(value)));
+  const localOnly = (signedIn: boolean, degraded: string[]): LiveAnalytics => ({
+    ...EMPTY_ANALYTICS,
+    signedIn,
+    degraded,
+    studioTotal: studioItems.length,
+    studioDates,
+  });
+
+  let supabase: ReturnType<typeof createClient>;
+  try {
+    supabase = createClient();
+  } catch {
+    return localOnly(false, ["supabase"]);
+  }
+
+  let user: { id: string } | null = null;
+  try {
+    const result = await supabase.auth.getUser();
+    user = result.data.user ?? null;
+  } catch {
+    user = null;
+  }
+  if (!user) return localOnly(false, []);
 
   const windowStart = dateRangeStart(30).toISOString();
-  const studioItems = listStudioMedia();
+  const degraded: string[] = [];
 
   const [
     projectCountResult,
@@ -122,17 +162,19 @@ async function loadLiveAnalytics(): Promise<LiveAnalytics> {
       .gte("created_at", windowStart),
   ]);
 
-  const firstError = [
-    projectCountResult.error,
-    projectTimelineResult.error,
-    conversationCountResult.error,
-    conversationTimelineResult.error,
-    publicProjectCountResult.error,
-    publicProjectsResult.error,
-    publicAssetCountResult.error,
-    publicAssetsResult.error,
-  ].find(Boolean);
-  if (firstError) throw new Error(firstError.message);
+  // Schema safety: a missing table (schema-cache miss), an RLS refusal or a
+  // renamed column must never crash the dashboard — the metric reads 0.
+  const noteIfFailed = (table: string, error: { message: string } | null) => {
+    if (error && !degraded.includes(table)) degraded.push(table);
+  };
+  noteIfFailed("dcode_projects", projectCountResult.error);
+  noteIfFailed("dcode_projects", projectTimelineResult.error);
+  noteIfFailed("conversations", conversationCountResult.error);
+  noteIfFailed("conversations", conversationTimelineResult.error);
+  noteIfFailed("dcode_projects", publicProjectCountResult.error);
+  noteIfFailed("dcode_projects", publicProjectsResult.error);
+  noteIfFailed("shared_assets", publicAssetCountResult.error);
+  noteIfFailed("shared_assets", publicAssetsResult.error);
 
   const conversations = (conversationTimelineResult.data ?? []) as ConversationRow[];
 
@@ -150,8 +192,8 @@ async function loadLiveAnalytics(): Promise<LiveAnalytics> {
       .eq("conversations.user_id", user.id)
       .gte("created_at", windowStart),
   ]);
-  if (messageCountResult.error) throw new Error(messageCountResult.error.message);
-  if (messageTimelineResult.error) throw new Error(messageTimelineResult.error.message);
+  noteIfFailed("messages", messageCountResult.error);
+  noteIfFailed("messages", messageTimelineResult.error);
   const messageCount = messageCountResult.count ?? 0;
   const messageRows = (messageTimelineResult.data ?? []) as MessageRow[];
 
@@ -170,8 +212,10 @@ async function loadLiveAnalytics(): Promise<LiveAnalytics> {
     projectDates: dates(projectRows),
     conversationDates: dates(conversations),
     messageDates: dates(messageRows),
-    studioDates: studioItems.map((item) => item.createdAt).filter((value) => !Number.isNaN(Date.parse(value))),
+    studioDates,
     shareDates: [...dates(publicProjectRows), ...dates(publicAssetRows)],
+    degraded,
+    signedIn: true,
   };
 }
 
@@ -286,16 +330,14 @@ export default function AnalyticsPage() {
   const [analytics, setAnalytics] = useState<LiveAnalytics | null>(null);
   const [range, setRange] = useState<Range>(7);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    setLoadError(null);
     try {
       setAnalytics(await loadLiveAnalytics());
-    } catch (error) {
-      setAnalytics(null);
-      setLoadError(error instanceof Error ? error.message : "Could not load live analytics.");
+    } catch {
+      // Last-resort guard: the dashboard shows honest zeros, never a crash.
+      setAnalytics(EMPTY_ANALYTICS);
     } finally {
       setLoading(false);
     }
@@ -332,12 +374,6 @@ export default function AnalyticsPage() {
 
       {loading && !analytics ? (
         <div className="flex min-h-72 items-center justify-center gap-2 text-sm text-zinc-500"><LoaderIcon className="h-4 w-4 animate-spin text-cyan-400" />Loading live analytics…</div>
-      ) : loadError ? (
-        <section className="mt-8 rounded-2xl border border-red-400/20 bg-red-500/[0.06] p-6">
-          <h2 className="text-base font-medium text-red-200">Live analytics could not be loaded</h2>
-          <p className="mt-2 text-sm leading-relaxed text-red-200/70">{loadError}</p>
-          <p className="mt-3 text-xs text-zinc-500">No fallback or sample metrics are shown. Check that the current Supabase migrations have been applied, then refresh.</p>
-        </section>
       ) : analytics ? (
         <>
           <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
@@ -370,6 +406,29 @@ export default function AnalyticsPage() {
               <div className="flex items-center justify-between gap-4"><div><h2 className="text-sm font-semibold text-zinc-100">Public sharing is active</h2><p className="mt-1 text-sm text-zinc-500">{analytics.shareTotal} real public {analytics.shareTotal === 1 ? "record" : "records"} found in your workspace.</p></div><Link href="/studio" className="text-sm font-medium text-cyan-300 hover:text-cyan-200">Manage Studio shares →</Link></div>
             )}
           </section>
+
+          {analytics.projectTotal === 0 &&
+          analytics.conversationTotal === 0 &&
+          analytics.messageTotal === 0 &&
+          analytics.studioTotal === 0 ? (
+            <section className="mt-6 rounded-2xl border border-white/[0.07] bg-white/[0.02] p-6 text-center">
+              <p className="text-sm text-zinc-300">Your workspace is brand new.</p>
+              <p className="mt-1 text-xs text-zinc-500">No projects yet — create one in D-Code, or generate your first image in Dashy Studio.</p>
+              <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                <Link href="/d-code" className="rounded-xl bg-cyan-500 px-4 py-2 text-xs font-semibold text-[#06202a] hover:bg-cyan-400">Open D-Code</Link>
+                <Link href="/studio" className="rounded-xl border border-white/[0.08] px-4 py-2 text-xs font-medium text-zinc-200 hover:bg-white/[0.06]">Open Studio</Link>
+              </div>
+            </section>
+          ) : null}
+
+          {!analytics.signedIn ? (
+            <p className="mt-4 text-center text-xs text-zinc-600">Showing local Studio activity only — sign in to include your cloud workspace records.</p>
+          ) : analytics.degraded.length > 0 ? (
+            <p className="mt-4 text-center text-xs text-zinc-600">
+              Some cloud metrics read zero because {analytics.degraded.join(", ")}{" "}
+              {analytics.degraded.length === 1 ? "is" : "are"} not reachable in this Supabase project yet. Everything else is live.
+            </p>
+          ) : null}
         </>
       ) : null}
     </div>
