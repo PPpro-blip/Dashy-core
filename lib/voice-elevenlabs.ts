@@ -38,7 +38,6 @@ export const VOICE_PRESETS: VoicePreset[] = [
 ];
 /** ElevenLabs Rachel is the stable default when the caller sends no voice id. */
 export const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
-const KEY_REQUIRED_MESSAGE = "ElevenLabs API Key required in Settings";
 
 /* ------------------------------------------------------------------------ */
 /* Storage                                                                   */
@@ -221,6 +220,43 @@ async function errorFromResponse(response: Response): Promise<VoiceEngineError> 
   return new VoiceEngineError(message, response.status);
 }
 
+/**
+ * Zero-key engine: ranks the browser's built-in voices so every user gets a
+ * premium neural voice (Google US English, Microsoft *Natural*, Apple neural)
+ * without configuring anything.
+ */
+const PREMIUM_VOICE_PATTERNS: Array<{ pattern: RegExp; score: number }> = [
+  { pattern: /google us english/i, score: 100 },
+  { pattern: /microsoft [a-z]+[^,]*natural/i, score: 95 },
+  { pattern: /natural|neural/i, score: 85 },
+  { pattern: /google uk english female/i, score: 80 },
+  { pattern: /google/i, score: 70 },
+  { pattern: /samantha|siri|ava|allison|premium|enhanced/i, score: 65 },
+  { pattern: /microsoft/i, score: 40 },
+];
+
+export function pickPremiumVoice(
+  voices: SpeechSynthesisVoice[]
+): SpeechSynthesisVoice | null {
+  if (voices.length === 0) return null;
+  const score = (voice: SpeechSynthesisVoice): number => {
+    const lang = (voice.lang || "").toLowerCase();
+    let total = 0;
+    if (lang.startsWith("en")) total += 30;
+    if (lang === "en-us") total += 10;
+    if (voice.localService) total += 2;
+    if (voice.default) total += 1;
+    for (const { pattern, score: bonus } of PREMIUM_VOICE_PATTERNS) {
+      if (pattern.test(voice.name)) {
+        total += bonus;
+        break;
+      }
+    }
+    return total;
+  };
+  return [...voices].sort((a, b) => score(b) - score(a))[0] ?? null;
+}
+
 function speakWithBrowserFallback(
   playback: ActivePlayback,
   text: string,
@@ -232,22 +268,44 @@ function speakWithBrowserFallback(
   }
   const synth = window.speechSynthesis;
   synth.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  const selectedVoice = fallback?.voiceName
-    ? synth.getVoices().find((voice) => voice.name === fallback.voiceName)
-    : null;
-  if (selectedVoice) utterance.voice = selectedVoice;
-  utterance.lang = selectedVoice?.lang || "en-US";
-  if (fallback?.rate) utterance.rate = fallback.rate;
-  if (fallback?.pitch) utterance.pitch = fallback.pitch;
-  utterance.onstart = () => {
-    if (!playback.done) playback.onState("playing");
+
+  const start = (voices: SpeechSynthesisVoice[]) => {
+    if (playback.done) return;
+    const utterance = new SpeechSynthesisUtterance(text);
+    const namedVoice = fallback?.voiceName
+      ? voices.find((voice) => voice.name === fallback.voiceName)
+      : null;
+    // No saved preference → auto-select the best built-in neural voice.
+    const selectedVoice = namedVoice ?? pickPremiumVoice(voices);
+    if (selectedVoice) utterance.voice = selectedVoice;
+    utterance.lang = selectedVoice?.lang || "en-US";
+    if (fallback?.rate) utterance.rate = fallback.rate;
+    if (fallback?.pitch) utterance.pitch = fallback.pitch;
+    utterance.onstart = () => {
+      if (!playback.done) playback.onState("playing");
+    };
+    utterance.onend = () => finish(playback, "idle");
+    utterance.onerror = () => {
+      if (!playback.done) finish(playback, "error", new VoiceEngineError("Browser speech could not play this response.", 0));
+    };
+    synth.speak(utterance);
   };
-  utterance.onend = () => finish(playback, "idle");
-  utterance.onerror = () => {
-    if (!playback.done) finish(playback, "error", new VoiceEngineError("Browser speech could not play this response.", 0));
+
+  // Chromium fills getVoices() asynchronously on a cold start.
+  const available = synth.getVoices();
+  if (available.length > 0) {
+    start(available);
+    return;
+  }
+  let started = false;
+  const onVoices = () => {
+    if (started) return;
+    started = true;
+    synth.removeEventListener("voiceschanged", onVoices);
+    start(synth.getVoices());
   };
-  synth.speak(utterance);
+  synth.addEventListener("voiceschanged", onVoices);
+  window.setTimeout(onVoices, 1200);
 }
 
 /**
@@ -340,9 +398,10 @@ export function speak(
         finish(playback, "error", new VoiceEngineError("Your browser blocked autoplay — tap the speaker again.", 0));
         return;
       }
-      if (error instanceof VoiceEngineError && error.message === KEY_REQUIRED_MESSAGE) {
-        // The route deliberately reports this cleanly; keep Voice usable with
-        // the native browser speech engine instead of leaving the user silent.
+      // Zero-key guarantee: no key, an invalid/exhausted key, or an upstream
+      // outage must never show the user an error. The embedded browser neural
+      // engine takes over silently whenever it is available.
+      if (typeof window !== "undefined" && window.speechSynthesis) {
         speakWithBrowserFallback(playback, clean, browserFallback);
         return;
       }
