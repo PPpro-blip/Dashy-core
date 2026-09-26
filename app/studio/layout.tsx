@@ -5,5 +5,5 @@ export default function StudioLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <AppShell title="Dashy Studio">{children}</AppShell>;
+  return <AppShell title="Studio">{children}</AppShell>;
 }

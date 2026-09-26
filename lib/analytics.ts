@@ -1,116 +1,86 @@
 /**
- * DashyCore v7 — schema-safe analytics counters.
+ * Live analytics helpers shared by the route and dashboard.
  *
- * The dashboard must NEVER surface a red error box. Supabase projects in the
- * wild are missing tables, have RLS locked down, or hit a stale schema cache
- * ("Could not find the table 'public.x' in the schema cache"). Every counter
- * here therefore resolves to a plain number: real count on success, `0` on
- * any failure, with the reason kept for an optional muted hint.
+ * Every series is timestamp-based real activity. Empty histories remain
+ * empty rather than being filled with fabricated activity.
  */
 
-import { createClient } from "@/lib/supabase/client";
-import { countMedia } from "@/lib/media-library";
+export type SeriesSource = "live" | "unavailable";
 
-export interface CountResult {
-  /** Real row count, or 0 when the query could not run. */
-  count: number;
-  /** True when the number came back from the database. */
-  ok: boolean;
-  /** Present only when `ok` is false — never rendered as an error box. */
-  reason?: string;
+export interface AnalyticsPayload {
+  generatedAt: string;
+  days: number;
+  projects: { source: SeriesSource; createdAt: string[]; total: number };
+  shares: { source: SeriesSource; at: string[]; publicTotal: number };
+  conversations: { source: SeriesSource; createdAt: string[]; total: number };
+  messages: { source: SeriesSource; createdAt: string[]; total: number };
+  studio: { source: "local"; createdAt: string[]; total: number };
+  errors: string[];
 }
 
-const ZERO: CountResult = { count: 0, ok: false, reason: "unavailable" };
+export interface DayBucket {
+  start: number;
+  label: string;
+  longLabel: string;
+}
 
-/**
- * Counts rows of a table without ever throwing.
- * `filters` is applied as a series of equality filters.
- */
-export async function safeCount(
-  table: string,
-  filters: Record<string, string | number | boolean> = {}
-): Promise<CountResult> {
-  try {
-    const supabase = createClient();
-    let query = supabase.from(table).select("*", { count: "exact", head: true });
-    for (const [column, value] of Object.entries(filters)) {
-      query = query.eq(column, value);
-    }
-    const { count, error } = await query;
-    if (error) return { count: 0, ok: false, reason: error.message };
-    return { count: count ?? 0, ok: true };
-  } catch (error) {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function lastDays(count: number, now: Date = new Date()): DayBucket[] {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Array.from({ length: count }, (_, index) => {
+    const daysAgo = count - index - 1;
+    const day = new Date(today.getFullYear(), today.getMonth(), today.getDate() - daysAgo);
     return {
-      count: 0,
-      ok: false,
-      reason: error instanceof Error ? error.message : "unavailable",
+      start: day.getTime(),
+      label: daysAgo === 0 ? "Today" : day.toLocaleDateString(undefined, { weekday: "short" }),
+      longLabel: day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }),
     };
-  }
+  });
 }
 
-export interface AnalyticsSnapshot {
-  studioAssets: CountResult;
-  dcodeProjects: CountResult;
-  shareLinks: CountResult;
-  conversations: CountResult;
-  messages: CountResult;
-  documents: CountResult;
-  /** True when at least one DB counter answered successfully. */
-  databaseReachable: boolean;
+/** Buckets real timestamps in the viewer's local timezone (DST-safe). */
+export function bucketCounts(values: Array<string | number>, buckets: DayBucket[]): number[] {
+  const counts = new Array<number>(buckets.length).fill(0);
+  if (buckets.length === 0) return counts;
+  const first = buckets[0].start;
+  const end = buckets[buckets.length - 1].start + DAY_MS;
+  values.forEach((value) => {
+    const timestamp = typeof value === "number" ? value : Date.parse(value);
+    if (!Number.isFinite(timestamp) || timestamp < first || timestamp >= end) return;
+    for (let index = buckets.length - 1; index >= 0; index -= 1) {
+      if (timestamp >= buckets[index].start) {
+        counts[index] += 1;
+        return;
+      }
+    }
+  });
+  return counts;
 }
 
-/** Local Studio assets are read from localStorage — always succeeds. */
-function studioAssetsCount(): CountResult {
+export const sum = (values: number[]): number => values.reduce((total, value) => total + value, 0);
+
+/**
+ * Reads actual ready Studio media from the browser library. Supports the
+ * established `Tile` schema (`url`, numeric createdAt, status=ready) and the
+ * lightweight Studio share schema (`imageUrl`, ISO createdAt).
+ */
+export const STUDIO_LIBRARY_KEY = "dashy.media.library";
+export function readStudioGenerations(): number[] {
+  if (typeof window === "undefined") return [];
   try {
-    return { count: countMedia(), ok: true };
+    const raw = window.localStorage.getItem(STUDIO_LIBRARY_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const item = entry as { status?: unknown; url?: unknown; imageUrl?: unknown; createdAt?: unknown; type?: unknown };
+      if (item.type === "video" || item.status === "generating" || item.status === "loading") return [];
+      if (typeof item.url !== "string" && typeof item.imageUrl !== "string") return [];
+      const date = typeof item.createdAt === "number" ? item.createdAt : typeof item.createdAt === "string" ? Date.parse(item.createdAt) : NaN;
+      return Number.isFinite(date) ? [date] : [];
+    });
   } catch {
-    return ZERO;
+    return [];
   }
-}
-
-/**
- * Loads every dashboard counter in parallel. Resolves with honest numbers
- * (zeros where a table is missing) and never rejects.
- */
-export async function loadAnalyticsSnapshot(): Promise<AnalyticsSnapshot> {
-  const [dcodeProjects, shareLinks, conversations, messages, documents] =
-    await Promise.all([
-      safeCount("dcode_projects"),
-      safeCount("shared_assets"),
-      safeCount("conversations"),
-      safeCount("messages"),
-      safeCount("documents"),
-    ]);
-
-  return {
-    studioAssets: studioAssetsCount(),
-    dcodeProjects,
-    shareLinks,
-    conversations,
-    messages,
-    documents,
-    databaseReachable: [
-      dcodeProjects,
-      shareLinks,
-      conversations,
-      messages,
-      documents,
-    ].some((result) => result.ok),
-  };
-}
-
-/**
- * Counts public D-Code share links too, so "share links" reflects both the
- * Studio Share Hub and shared D-Code projects. Never throws.
- */
-export async function countAllShareLinks(): Promise<CountResult> {
-  const [studio, dcode] = await Promise.all([
-    safeCount("shared_assets", { is_public: true }),
-    safeCount("dcode_projects", { is_public: true }),
-  ]);
-  return {
-    count: studio.count + dcode.count,
-    ok: studio.ok || dcode.ok,
-    reason: studio.ok || dcode.ok ? undefined : studio.reason ?? dcode.reason,
-  };
 }

@@ -42,6 +42,11 @@ export interface DCodeTerminalProps {
   onClose: () => void;
   /** Applied to the drawer root so the workspace can size it (30%). */
   className?: string;
+  /**
+   * Embedded mode: hides the terminal's own tab header (the workspace's
+   * bottom panel already renders Terminal / Output / Problems tabs).
+   */
+  bare?: boolean;
 }
 
 type LineKind =
@@ -116,6 +121,7 @@ export function DCodeTerminal({
   onOpenFile,
   onClose,
   className = "",
+  bare = false,
 }: DCodeTerminalProps) {
   const [lines, setLines] = useState<TermLine[]>([
     {
@@ -511,6 +517,10 @@ export function DCodeTerminal({
         if (sub === "status" || sub === "") {
           const branch = "main";
           emit(`On branch ${branch}`, "accent");
+          emit(
+            "Note: this terminal git is a simulation — the Source Control panel commits & pushes via the real GitHub API.",
+            "muted"
+          );
           if (ahead > 0) {
             emit(
               `Your branch is ahead of 'origin/${branch}' by ${ahead} commit${
@@ -697,26 +707,28 @@ export function DCodeTerminal({
 
   return (
     <div
-      className={`flex min-h-0 flex-col overflow-hidden border-t border-white/[0.06] bg-black/90 ${className}`}
+      className={`flex h-full min-h-0 flex-col overflow-hidden ${bare ? "" : "border-t border-white/[0.06] bg-black/90 "}${className}`}
       style={{ backgroundColor: "#05070d" }}
     >
-      {/* Tab header */}
-      <div className="flex flex-shrink-0 items-center gap-2 border-b border-white/[0.06] bg-[#0a0e1a] px-3 py-1.5">
-        <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-400">
-          <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-          Terminal
-        </span>
-        <span className="font-mono text-[10px] text-zinc-600">Ctrl + `</span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close terminal"
-          title="Close terminal (Ctrl + `)"
-          className="ml-auto flex h-5 w-5 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-        >
-          <XIcon className="h-3.5 w-3.5" />
-        </button>
-      </div>
+      {/* Tab header (hidden in bare mode — the bottom panel owns the tabs) */}
+      {!bare && (
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-white/[0.06] bg-[#0a0e1a] px-3 py-1.5">
+          <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-cyan-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+            Terminal
+          </span>
+          <span className="font-mono text-[10px] text-zinc-600">Ctrl + `</span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close terminal"
+            title="Close terminal (Ctrl + `)"
+            className="ml-auto flex h-5 w-5 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+          >
+            <XIcon className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Output scroll area */}
       <div

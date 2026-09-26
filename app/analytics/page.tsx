@@ -1,29 +1,10 @@
 "use client";
 
-/**
- * DashyCore v7 — Analytics.
- *
- * Honest, schema-safe workspace metrics:
- *   - Studio assets → real count from `dashy.media.library` (localStorage)
- *   - D-Code projects / share links / chats / messages / memory docs → real
- *     Supabase counts, each wrapped so a missing table (schema-cache miss),
- *     an RLS refusal, or an offline client resolves to 0.
- *
- * There is deliberately NO error state in this UI: a failed query renders a
- * calm zero plus an action prompt, never a red crash box.
- */
-
-import { useCallback, useEffect, useMemo, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
+import { listStudioMedia, STUDIO_MEDIA_UPDATED_EVENT } from "@/lib/studio";
 import {
-  countAllShareLinks,
-  loadAnalyticsSnapshot,
-  type AnalyticsSnapshot,
-  type CountResult,
-} from "@/lib/analytics";
-import { listMedia, MEDIA_LIBRARY_EVENT } from "@/lib/media-library";
-import {
-  BookOpenIcon,
   ChartIcon,
   CodeIcon,
   ImageIcon,
@@ -33,296 +14,368 @@ import {
   ShareIcon,
 } from "@/components/icons";
 
-interface Metric {
-  id: string;
+type Range = 7 | 30;
+
+type TimestampRow = { created_at: string | null };
+type ProjectRow = TimestampRow;
+type ConversationRow = TimestampRow & { id: string };
+type MessageRow = TimestampRow;
+
+interface LiveAnalytics {
+  projectTotal: number;
+  conversationTotal: number;
+  messageTotal: number;
+  studioTotal: number;
+  shareTotal: number;
+  projectDates: string[];
+  conversationDates: string[];
+  messageDates: string[];
+  studioDates: string[];
+  shareDates: string[];
+}
+
+interface DayBucket {
+  key: string;
   label: string;
-  value: number;
-  Icon: ComponentType<{ className?: string }>;
-  accent: string;
-  /** Shown when the metric is zero — a next action, not an error. */
-  emptyHint: string;
-  href: string;
+  projects: number;
+  conversations: number;
+  messages: number;
+  studio: number;
+  shares: number;
 }
 
-const EMPTY_RESULT: CountResult = { count: 0, ok: false };
-
-const EMPTY_SNAPSHOT: AnalyticsSnapshot = {
-  studioAssets: EMPTY_RESULT,
-  dcodeProjects: EMPTY_RESULT,
-  shareLinks: EMPTY_RESULT,
-  conversations: EMPTY_RESULT,
-  messages: EMPTY_RESULT,
-  documents: EMPTY_RESULT,
-  databaseReachable: false,
-};
-
-/** Simple deterministic 7-point series derived from a total (visual only). */
-function seriesFor(total: number): number[] {
-  if (total <= 0) return [0, 0, 0, 0, 0, 0, 0];
-  const weights = [0.35, 0.5, 0.42, 0.68, 0.8, 0.72, 1];
-  return weights.map((weight) => Math.round(total * weight));
+function localDateKey(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
-function LineChart({ points, stroke }: { points: number[]; stroke: string }) {
-  const width = 320;
-  const height = 96;
-  const max = Math.max(...points, 1);
-  const step = width / Math.max(points.length - 1, 1);
-  const coords = points.map((value, index) => {
-    const x = index * step;
-    const y = height - (value / max) * (height - 12) - 6;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  });
-  const path = `M${coords.join(" L")}`;
-  const area = `${path} L${width},${height} L0,${height} Z`;
+function dateRangeStart(days: number): Date {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - (days - 1));
+  return start;
+}
+
+function dates(rows: TimestampRow[] | null): string[] {
+  return (rows ?? [])
+    .map((row) => row.created_at)
+    .filter((value): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value)));
+}
+
+async function loadLiveAnalytics(): Promise<LiveAnalytics> {
+  const supabase = createClient();
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+  if (userError) throw new Error(userError.message);
+  if (!user) throw new Error("Sign in to view your analytics.");
+
+  const windowStart = dateRangeStart(30).toISOString();
+  const studioItems = listStudioMedia();
+
+  const [
+    projectCountResult,
+    projectTimelineResult,
+    conversationCountResult,
+    conversationTimelineResult,
+    publicProjectCountResult,
+    publicProjectsResult,
+    publicAssetCountResult,
+    publicAssetsResult,
+  ] = await Promise.all([
+    supabase.from("dcode_projects").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+    supabase
+      .from("dcode_projects")
+      .select("created_at, is_public")
+      .eq("user_id", user.id)
+      .gte("created_at", windowStart),
+    supabase.from("conversations").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+    supabase
+      .from("conversations")
+      .select("id, created_at")
+      .eq("user_id", user.id)
+      .gte("created_at", windowStart),
+    supabase
+      .from("dcode_projects")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .eq("is_public", true),
+    supabase
+      .from("dcode_projects")
+      .select("created_at")
+      .eq("user_id", user.id)
+      .eq("is_public", true)
+      .gte("created_at", windowStart),
+    supabase
+      .from("shared_assets")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_id", user.id)
+      .eq("is_public", true),
+    supabase
+      .from("shared_assets")
+      .select("created_at")
+      .eq("owner_id", user.id)
+      .eq("is_public", true)
+      .gte("created_at", windowStart),
+  ]);
+
+  const firstError = [
+    projectCountResult.error,
+    projectTimelineResult.error,
+    conversationCountResult.error,
+    conversationTimelineResult.error,
+    publicProjectCountResult.error,
+    publicProjectsResult.error,
+    publicAssetCountResult.error,
+    publicAssetsResult.error,
+  ].find(Boolean);
+  if (firstError) throw new Error(firstError.message);
+
+  const conversations = (conversationTimelineResult.data ?? []) as ConversationRow[];
+
+  // The inner relation keeps the count scoped to the current owner even for
+  // accounts with more than one page of conversations. It avoids turning a
+  // partial client-side ID list into a misleading total.
+  const [messageCountResult, messageTimelineResult] = await Promise.all([
+    supabase
+      .from("messages")
+      .select("id, conversations!inner(user_id)", { count: "exact", head: true })
+      .eq("conversations.user_id", user.id),
+    supabase
+      .from("messages")
+      .select("created_at, conversations!inner(user_id)")
+      .eq("conversations.user_id", user.id)
+      .gte("created_at", windowStart),
+  ]);
+  if (messageCountResult.error) throw new Error(messageCountResult.error.message);
+  if (messageTimelineResult.error) throw new Error(messageTimelineResult.error.message);
+  const messageCount = messageCountResult.count ?? 0;
+  const messageRows = (messageTimelineResult.data ?? []) as MessageRow[];
+
+  const projectRows = (projectTimelineResult.data ?? []) as ProjectRow[];
+  const publicProjectRows = (publicProjectsResult.data ?? []) as TimestampRow[];
+  const publicAssetRows = (publicAssetsResult.data ?? []) as TimestampRow[];
+
+  return {
+    projectTotal: projectCountResult.count ?? 0,
+    conversationTotal: conversationCountResult.count ?? 0,
+    messageTotal: messageCount,
+    studioTotal: studioItems.length,
+    // These are only real public database rows—D-Code project shares plus
+    // Studio shared_assets. No client-side or dummy share count is mixed in.
+    shareTotal: (publicProjectCountResult.count ?? 0) + (publicAssetCountResult.count ?? 0),
+    projectDates: dates(projectRows),
+    conversationDates: dates(conversations),
+    messageDates: dates(messageRows),
+    studioDates: studioItems.map((item) => item.createdAt).filter((value) => !Number.isNaN(Date.parse(value))),
+    shareDates: [...dates(publicProjectRows), ...dates(publicAssetRows)],
+  };
+}
+
+function buildBuckets(analytics: LiveAnalytics, range: Range): DayBucket[] {
+  const buckets: DayBucket[] = [];
+  const byDate = new Map<string, DayBucket>();
+  const start = dateRangeStart(range);
+
+  for (let offset = 0; offset < range; offset += 1) {
+    const date = new Date(start);
+    date.setDate(start.getDate() + offset);
+    const bucket: DayBucket = {
+      key: localDateKey(date),
+      label: date.toLocaleDateString(undefined, { weekday: "short" }),
+      projects: 0,
+      conversations: 0,
+      messages: 0,
+      studio: 0,
+      shares: 0,
+    };
+    buckets.push(bucket);
+    byDate.set(bucket.key, bucket);
+  }
+
+  const add = (values: string[], field: keyof Omit<DayBucket, "key" | "label">) => {
+    values.forEach((value) => {
+      const bucket = byDate.get(localDateKey(new Date(value)));
+      if (bucket) bucket[field] += 1;
+    });
+  };
+  add(analytics.projectDates, "projects");
+  add(analytics.conversationDates, "conversations");
+  add(analytics.messageDates, "messages");
+  add(analytics.studioDates, "studio");
+  add(analytics.shareDates, "shares");
+  return buckets;
+}
+
+function LineChart({ buckets }: { buckets: DayBucket[] }) {
+  const values = buckets.map((bucket) => bucket.projects + bucket.conversations + bucket.messages + bucket.studio + bucket.shares);
+  const max = Math.max(...values, 1);
+  const width = 640;
+  const height = 180;
+  const padding = 16;
+  const step = buckets.length > 1 ? (width - padding * 2) / (buckets.length - 1) : 0;
+  const points = values
+    .map((value, index) => {
+      const x = padding + index * step;
+      const y = height - padding - (value / max) * (height - padding * 2);
+      return `${x},${y}`;
+    })
+    .join(" ");
 
   return (
-    <svg
-      viewBox={`0 0 ${width} ${height}`}
-      className="h-24 w-full"
-      preserveAspectRatio="none"
-      aria-hidden="true"
-    >
-      <defs>
-        <linearGradient id={`grad-${stroke.replace(/[^a-z0-9]/gi, "")}`} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor={stroke} stopOpacity="0.28" />
-          <stop offset="100%" stopColor={stroke} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={area} fill={`url(#grad-${stroke.replace(/[^a-z0-9]/gi, "")})`} />
-      <path
-        d={path}
-        fill="none"
-        stroke={stroke}
-        strokeWidth={2}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <div className="mt-5 overflow-x-auto">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-48 min-w-[520px] w-full" role="img" aria-label="Combined daily live activity">
+        {[0.25, 0.5, 0.75].map((position) => (
+          <line key={position} x1={padding} x2={width - padding} y1={height * position} y2={height * position} stroke="rgba(255,255,255,0.07)" strokeDasharray="4 4" />
+        ))}
+        <polyline points={points} fill="none" stroke="#22d3ee" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+        {buckets.map((bucket, index) => {
+          const value = values[index];
+          const x = padding + index * step;
+          const y = height - padding - (value / max) * (height - padding * 2);
+          return (
+            <g key={bucket.key}>
+              <title>{`${bucket.label}: ${value} recorded activity item${value === 1 ? "" : "s"}`}</title>
+              <circle cx={x} cy={y} r="4" fill="#0d1020" stroke="#67e8f9" strokeWidth="2" />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="mt-1 grid min-w-[520px]" style={{ gridTemplateColumns: `repeat(${buckets.length}, minmax(0, 1fr))` }}>
+        {buckets.map((bucket) => <span key={bucket.key} className="text-center text-[10px] text-zinc-600">{bucket.label}</span>)}
+      </div>
+    </div>
   );
 }
 
-function BarChart({ metrics }: { metrics: Metric[] }) {
-  const max = Math.max(...metrics.map((metric) => metric.value), 1);
+function ActivityBars({ buckets }: { buckets: DayBucket[] }) {
+  const fields: Array<{ field: keyof Omit<DayBucket, "key" | "label">; label: string; className: string }> = [
+    { field: "projects", label: "Projects", className: "bg-violet-400" },
+    { field: "conversations", label: "Chats", className: "bg-sky-400" },
+    { field: "messages", label: "Messages", className: "bg-cyan-300" },
+    { field: "studio", label: "Studio", className: "bg-fuchsia-400" },
+    { field: "shares", label: "Shares", className: "bg-emerald-400" },
+  ];
+  const max = Math.max(1, ...buckets.flatMap((bucket) => fields.map(({ field }) => bucket[field])));
+
   return (
-    <div className="space-y-3">
-      {metrics.map((metric) => (
-        <div key={metric.id} className="flex items-center gap-3">
-          <span className="w-32 flex-shrink-0 truncate text-xs text-zinc-400">
-            {metric.label}
-          </span>
-          <div className="h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-white/[0.05]">
-            <div
-              className="h-full rounded-full transition-all duration-700"
-              style={{
-                width: `${Math.max((metric.value / max) * 100, metric.value > 0 ? 6 : 1.5)}%`,
-                background: `linear-gradient(90deg, ${metric.accent}, ${metric.accent}66)`,
-                boxShadow: metric.value > 0 ? `0 0 14px ${metric.accent}66` : "none",
-              }}
-            />
+    <div className="mt-5 overflow-x-auto">
+      <div className="flex min-w-[600px] items-end gap-2" style={{ height: "176px" }}>
+        {buckets.map((bucket) => (
+          <div key={bucket.key} className="flex h-full min-w-0 flex-1 items-end justify-center gap-px" title={`${bucket.label}: ${fields.map(({ field, label }) => `${label} ${bucket[field]}`).join(", ")}`}>
+            {fields.map(({ field, className }) => (
+              <span key={field} className={`min-w-[3px] flex-1 rounded-t-sm ${className}`} style={{ height: `${(bucket[field] / max) * 100}%`, minHeight: bucket[field] > 0 ? "3px" : "0" }} />
+            ))}
           </div>
-          <span className="w-10 flex-shrink-0 text-right text-xs font-semibold text-zinc-200">
-            {metric.value}
-          </span>
-        </div>
-      ))}
+        ))}
+      </div>
+      <div className="mt-2 grid min-w-[600px]" style={{ gridTemplateColumns: `repeat(${buckets.length}, minmax(0, 1fr))` }}>
+        {buckets.map((bucket) => <span key={bucket.key} className="text-center text-[10px] text-zinc-600">{bucket.label}</span>)}
+      </div>
+      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+        {fields.map(({ field, label, className }) => <span key={field} className="flex items-center gap-1.5 text-[11px] text-zinc-500"><i className={`h-2 w-2 rounded-full ${className}`} />{label}</span>)}
+      </div>
     </div>
   );
 }
 
 export default function AnalyticsPage() {
-  const [snapshot, setSnapshot] = useState<AnalyticsSnapshot>(EMPTY_SNAPSHOT);
-  const [shareLinks, setShareLinks] = useState<CountResult>(EMPTY_RESULT);
-  const [localAssets, setLocalAssets] = useState(0);
+  const [analytics, setAnalytics] = useState<LiveAnalytics | null>(null);
+  const [range, setRange] = useState<Range>(7);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    // Both loaders swallow their own failures; this can never reject.
-    const [next, shares] = await Promise.all([
-      loadAnalyticsSnapshot(),
-      countAllShareLinks(),
-    ]);
-    setSnapshot(next);
-    setShareLinks(shares);
-    setLocalAssets(listMedia().length);
-    setLoading(false);
+    setLoadError(null);
+    try {
+      setAnalytics(await loadLiveAnalytics());
+    } catch (error) {
+      setAnalytics(null);
+      setLoadError(error instanceof Error ? error.message : "Could not load live analytics.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
     void refresh();
-    const sync = () => setLocalAssets(listMedia().length);
-    window.addEventListener(MEDIA_LIBRARY_EVENT, sync);
-    window.addEventListener("storage", sync);
+    const onStudioChange = () => void refresh();
+    window.addEventListener(STUDIO_MEDIA_UPDATED_EVENT, onStudioChange);
+    window.addEventListener("storage", onStudioChange);
     return () => {
-      window.removeEventListener(MEDIA_LIBRARY_EVENT, sync);
-      window.removeEventListener("storage", sync);
+      window.removeEventListener(STUDIO_MEDIA_UPDATED_EVENT, onStudioChange);
+      window.removeEventListener("storage", onStudioChange);
     };
   }, [refresh]);
 
-  const metrics = useMemo<Metric[]>(
-    () => [
-      {
-        id: "studio",
-        label: "Studio assets",
-        value: localAssets,
-        Icon: ImageIcon,
-        accent: "#22d3ee",
-        emptyHint: "No images yet — generate one in Dashy Studio!",
-        href: "/studio",
-      },
-      {
-        id: "projects",
-        label: "D-Code projects",
-        value: snapshot.dcodeProjects.count,
-        Icon: CodeIcon,
-        accent: "#a78bfa",
-        emptyHint: "No projects yet — create one in D-Code!",
-        href: "/d-code",
-      },
-      {
-        id: "shares",
-        label: "Share links",
-        value: shareLinks.count,
-        Icon: ShareIcon,
-        accent: "#34d399",
-        emptyHint: "Nothing shared yet — publish an image from Studio!",
-        href: "/studio",
-      },
-      {
-        id: "chats",
-        label: "Conversations",
-        value: snapshot.conversations.count,
-        Icon: MessageIcon,
-        accent: "#60a5fa",
-        emptyHint: "No chats yet — start one in Chat!",
-        href: "/chat",
-      },
-      {
-        id: "messages",
-        label: "Messages",
-        value: snapshot.messages.count,
-        Icon: ChartIcon,
-        accent: "#f472b6",
-        emptyHint: "No messages yet — say hello in Chat!",
-        href: "/chat",
-      },
-      {
-        id: "documents",
-        label: "Memory documents",
-        value: snapshot.documents.count,
-        Icon: BookOpenIcon,
-        accent: "#fbbf24",
-        emptyHint: "No documents yet — upload one in Knowledge!",
-        href: "/knowledge",
-      },
-    ],
-    [localAssets, shareLinks.count, snapshot]
-  );
-
-  const total = metrics.reduce((sum, metric) => sum + metric.value, 0);
+  const buckets = useMemo(() => (analytics ? buildBuckets(analytics, range) : []), [analytics, range]);
 
   return (
     <div className="mx-auto w-full max-w-6xl px-6 py-8">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-white">
-            Analytics
-          </h1>
-          <p className="mt-1 text-sm text-zinc-500">
-            Real workspace numbers — local Studio media plus your Supabase
-            tables. Missing tables simply read zero.
-          </p>
+          <div className="flex items-center gap-2 text-cyan-300"><ChartIcon className="h-4 w-4" /><span className="text-[11px] font-semibold uppercase tracking-[0.16em]">Live workspace data</span></div>
+          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white">Analytics</h1>
+          <p className="mt-1 text-sm text-zinc-500">Projects, conversations, Studio media and shares from your real activity.</p>
         </div>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          disabled={loading}
-          className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3.5 py-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.06] disabled:opacity-60"
-        >
-          {loading ? (
-            <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshIcon className="h-3.5 w-3.5" />
-          )}
-          Refresh
-        </button>
-      </div>
-
-      {/* Metric cards with glowing sparklines */}
-      <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {metrics.map((metric) => (
-          <Link
-            key={metric.id}
-            href={metric.href}
-            className="group overflow-hidden rounded-2xl border border-white/[0.07] bg-white/[0.03] p-5 backdrop-blur-xl transition-colors hover:border-white/20"
-            style={{ boxShadow: "inset 0 1px 0 0 rgba(255,255,255,0.05)" }}
-          >
-            <div className="flex items-center justify-between">
-              <span className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-400">
-                <metric.Icon className="h-4 w-4" />
-                {metric.label}
-              </span>
-            </div>
-            <p
-              className="mt-3 text-4xl font-semibold tracking-tight"
-              style={{ color: metric.accent }}
-            >
-              {loading ? "—" : metric.value}
-            </p>
-            <div className="mt-2 -mx-1">
-              <LineChart points={seriesFor(metric.value)} stroke={metric.accent} />
-            </div>
-            <p className="mt-2 text-xs text-zinc-500">
-              {metric.value === 0
-                ? metric.emptyHint
-                : "Live count · tap to open"}
-            </p>
-          </Link>
-        ))}
-      </div>
-
-      {/* Distribution bar chart */}
-      <section className="mt-8 rounded-2xl border border-white/[0.07] bg-white/[0.03] p-6 backdrop-blur-xl">
-        <div className="mb-5 flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-            Workspace distribution
-          </h2>
-          <span className="text-xs text-zinc-500">{total} total records</span>
-        </div>
-        {total === 0 ? (
-          <div className="py-10 text-center">
-            <p className="text-sm text-zinc-300">Your workspace is brand new.</p>
-            <p className="mt-1 text-xs text-zinc-500">
-              No projects yet — create one in D-Code, or generate your first
-              image in Dashy Studio.
-            </p>
-            <div className="mt-5 flex items-center justify-center gap-2">
-              <Link
-                href="/d-code"
-                className="rounded-xl bg-cyan-500 px-4 py-2 text-xs font-semibold text-[#06202a] transition-colors hover:bg-cyan-400"
-              >
-                Open D-Code
-              </Link>
-              <Link
-                href="/studio"
-                className="rounded-xl border border-white/[0.08] px-4 py-2 text-xs font-medium text-zinc-200 transition-colors hover:bg-white/[0.06]"
-              >
-                Open Studio
-              </Link>
-            </div>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border border-white/[0.08] bg-white/[0.025] p-1">
+            {([7, 30] as const).map((value) => <button key={value} type="button" onClick={() => setRange(value)} className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${range === value ? "bg-cyan-400/15 text-cyan-200" : "text-zinc-500 hover:text-zinc-200"}`}>{value} days</button>)}
           </div>
-        ) : (
-          <BarChart metrics={metrics} />
-        )}
-      </section>
+          <button type="button" onClick={() => void refresh()} disabled={loading} className="rounded-lg border border-white/[0.08] bg-white/[0.025] p-2 text-zinc-400 hover:border-cyan-400/30 hover:text-cyan-200 disabled:opacity-50" aria-label="Refresh analytics" title="Refresh analytics"><RefreshIcon className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /></button>
+        </div>
+      </div>
 
-      {!loading && !snapshot.databaseReachable ? (
-        <p className="mt-4 text-center text-xs text-zinc-600">
-          Cloud metrics are showing zero — your Supabase tables aren&apos;t
-          reachable from this session. Local Studio counts are still accurate.
-        </p>
+      {loading && !analytics ? (
+        <div className="flex min-h-72 items-center justify-center gap-2 text-sm text-zinc-500"><LoaderIcon className="h-4 w-4 animate-spin text-cyan-400" />Loading live analytics…</div>
+      ) : loadError ? (
+        <section className="mt-8 rounded-2xl border border-red-400/20 bg-red-500/[0.06] p-6">
+          <h2 className="text-base font-medium text-red-200">Live analytics could not be loaded</h2>
+          <p className="mt-2 text-sm leading-relaxed text-red-200/70">{loadError}</p>
+          <p className="mt-3 text-xs text-zinc-500">No fallback or sample metrics are shown. Check that the current Supabase migrations have been applied, then refresh.</p>
+        </section>
+      ) : analytics ? (
+        <>
+          <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+            <MetricCard icon={<CodeIcon className="h-4 w-4" />} label="D-Code projects" value={analytics.projectTotal} />
+            <MetricCard icon={<MessageIcon className="h-4 w-4" />} label="Conversations" value={analytics.conversationTotal} />
+            <MetricCard icon={<MessageIcon className="h-4 w-4" />} label="Chat turns" value={analytics.messageTotal} />
+            <MetricCard icon={<ImageIcon className="h-4 w-4" />} label="Studio media" value={analytics.studioTotal} />
+            <MetricCard icon={<ShareIcon className="h-4 w-4" />} label="Public shares" value={analytics.shareTotal} />
+          </section>
+
+          <section className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-5">
+            <div className="rounded-2xl border border-white/[0.07] bg-white/[0.02] p-5 xl:col-span-3">
+              <div className="flex items-center justify-between gap-3"><div><h2 className="text-sm font-semibold text-zinc-100">Daily activity</h2><p className="mt-1 text-xs text-zinc-500">All recorded items across the selected period.</p></div><span className="text-[11px] uppercase tracking-wider text-zinc-600">Last {range} days</span></div>
+              <LineChart buckets={buckets} />
+            </div>
+            <div className="rounded-2xl border border-white/[0.07] bg-white/[0.02] p-5 xl:col-span-2">
+              <h2 className="text-sm font-semibold text-zinc-100">Activity by source</h2>
+              <p className="mt-1 text-xs text-zinc-500">Daily timestamps grouped from live records.</p>
+              <ActivityBars buckets={buckets} />
+            </div>
+          </section>
+
+          <section className="mt-6 rounded-2xl border border-white/[0.07] bg-white/[0.02] p-5">
+            {analytics.shareTotal === 0 ? (
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div><h2 className="text-sm font-semibold text-zinc-100">0 public shares</h2><p className="mt-1 text-sm text-zinc-500">No shares yet — Share your first project!</p></div>
+                <Link href="/studio" className="inline-flex items-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#06202a] hover:bg-cyan-400"><ShareIcon className="h-4 w-4" />Open Studio</Link>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-4"><div><h2 className="text-sm font-semibold text-zinc-100">Public sharing is active</h2><p className="mt-1 text-sm text-zinc-500">{analytics.shareTotal} real public {analytics.shareTotal === 1 ? "record" : "records"} found in your workspace.</p></div><Link href="/studio" className="text-sm font-medium text-cyan-300 hover:text-cyan-200">Manage Studio shares →</Link></div>
+            )}
+          </section>
+        </>
       ) : null}
     </div>
   );
+}
+
+function MetricCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
+  return <article className="rounded-2xl border border-white/[0.07] bg-white/[0.02] p-4"><div className="flex items-center gap-2 text-zinc-500">{icon}<span className="text-[11px] font-semibold uppercase tracking-[0.1em]">{label}</span></div><p className="mt-3 text-3xl font-semibold tracking-tight text-zinc-100">{value.toLocaleString()}</p></article>;
 }
