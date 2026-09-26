@@ -19,6 +19,7 @@ import { useToast } from "@/components/Toast";
 import { DocumentsList } from "@/components/DocumentsList";
 import { MODELS, getModelById } from "@/lib/models";
 import { getStoredModel, setStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
+import { getElevenLabsKey, setElevenLabsKey } from "@/lib/elevenlabs";
 import {
   AlertIcon,
   CheckIcon,
@@ -46,6 +47,8 @@ export default function SettingsPage() {
   const [model, setModel] = useState<string>(() => getStoredModel());
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [docsReloadKey, setDocsReloadKey] = useState(0);
+  const [elevenLabsKey, setElevenLabsKeyState] = useState("");
+  const [showElevenLabsKey, setShowElevenLabsKey] = useState(false);
   const toast = useToast();
 
   useEffect(() => {
@@ -76,6 +79,10 @@ export default function SettingsPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    setElevenLabsKeyState(getElevenLabsKey());
   }, []);
 
   const activeModel = getModelById(model);
@@ -235,6 +242,63 @@ export default function SettingsPage() {
               </span>
             </div>
           </div>
+        </div>
+      </section>
+
+      {/* ---------------------------- ElevenLabs voice ------------------------- */}
+      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+              ElevenLabs voice
+            </h2>
+            <p className="mt-1 max-w-xl text-xs leading-relaxed text-zinc-500">
+              Add a personal ElevenLabs API key to use real streamed audio in Voice.
+              It stays only in this browser&apos;s localStorage and is sent to the
+              Dashy voice route only when you request speech.
+            </p>
+          </div>
+          <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+            elevenLabsKey ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-300" : "border-white/[0.08] bg-white/[0.03] text-zinc-500"
+          }`}>
+            {elevenLabsKey ? "Key saved locally" : "Browser voice fallback"}
+          </span>
+        </div>
+        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+          <label className="sr-only" htmlFor="elevenlabs-api-key">ElevenLabs API key</label>
+          <input
+            id="elevenlabs-api-key"
+            type={showElevenLabsKey ? "text" : "password"}
+            autoComplete="off"
+            spellCheck={false}
+            value={elevenLabsKey}
+            onChange={(event) => setElevenLabsKeyState(event.target.value)}
+            placeholder="xi-…"
+            className="h-10 min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-black/20 px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-cyan-400/50"
+          />
+          <button
+            type="button"
+            onClick={() => setShowElevenLabsKey((visible) => !visible)}
+            className="h-10 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-xs font-medium text-zinc-400 hover:text-zinc-200"
+          >
+            {showElevenLabsKey ? "Hide" : "Show"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setElevenLabsKey(elevenLabsKey);
+              setElevenLabsKeyState(elevenLabsKey.trim());
+              toast.success(
+                elevenLabsKey.trim() ? "ElevenLabs key saved" : "ElevenLabs key cleared",
+                elevenLabsKey.trim()
+                  ? "Real streamed voice is ready in Voice."
+                  : "Voice will use your browser speech engine."
+              );
+            }}
+            className="h-10 rounded-lg bg-cyan-500 px-4 text-xs font-semibold text-[#06202a] hover:bg-cyan-400"
+          >
+            Save key
+          </button>
         </div>
       </section>
 

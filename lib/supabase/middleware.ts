@@ -10,8 +10,8 @@ import { NextResponse, type NextRequest } from "next/server";
  *
  * Routing rules:
  *  - Unauthenticated users are redirected from protected routes to /login.
- *  - /d-code/share/<slug> stays PUBLIC (RLS allows reading is_public rows
- *    anonymously), so it is exempt from the protected-route redirect.
+ *  - /d-code/share/<slug> and /s/<slug> stay PUBLIC (RLS allows reading
+ *    is_public rows anonymously), so they are exempt from the redirect.
  *  - Authenticated users hitting /login are sent to /chat.
  */
 const PROTECTED_ROUTES = [
@@ -22,10 +22,12 @@ const PROTECTED_ROUTES = [
   "/knowledge",
   "/agents",
   "/voice",
+  "/studio",
+  "/analytics",
 ];
 
 /** Prefixes served without a session (exempt from the redirect above). */
-const PUBLIC_PREFIXES = ["/d-code/share/"];
+const PUBLIC_PREFIXES = ["/d-code/share/", "/s/"];
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
