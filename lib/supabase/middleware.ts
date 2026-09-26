@@ -125,6 +125,12 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const pathname = request.nextUrl.pathname;
+  // A Studio `s_img_*` link is looked up by the public `shared_assets` RLS
+  // policy in its page component. It is intentionally not a D-Code project
+  // slug, so never run the D-Code-only canOpenShare guard against it.
+  if (/^\/s\/s_img_[a-z0-9_-]{6,80}$/i.test(pathname)) {
+    return supabaseResponse;
+  }
   const sharePrefix = SHARE_PAGE_PREFIXES.find((prefix) => pathname.startsWith(prefix));
   if (sharePrefix) {
     const key = pathname.slice(sharePrefix.length);
