@@ -4,14 +4,14 @@
  *   - Settings storage: the user's own ElevenLabs key + preferred voice,
  *     kept in THIS browser's localStorage only. The key is relayed per
  *     request to our same-origin proxy (/api/voice/elevenlabs) as the
- *     `x-elevenlabs-key` header and never persisted server-side. When no
+ *     `x-elevenlabs-api-key` header and never persisted server-side. When no
  *     personal key is set, the server's ELEVENLABS_API_KEY is used.
  *   - speechTextFromMarkdown(): turns an assistant bubble's markdown into
  *     speakable prose (no code dumps, no URLs, no table pipes).
  *   - speak(): ONE global player. Starts playback on the first streamed MP3
  *     chunks via MediaSource where supported (Chrome/Edge/Firefox, Safari
- *     via ManagedMediaSource), else buffers to a Blob. Starting a new
- *     utterance stops the previous one.
+ *     via ManagedMediaSource), else buffers to a Blob. When the Settings and
+ *     server keys are both absent, it falls back to browser SpeechSynthesis.
  */
 
 export const ELEVENLABS_KEY_STORAGE = "dashy.elevenlabs.key";
@@ -29,14 +29,16 @@ export interface VoicePreset {
 
 /** ElevenLabs premade voices (available on every account). */
 export const VOICE_PRESETS: VoicePreset[] = [
-  { id: "JBFqnCBsd6RMkjVDRZzb", name: "George", description: "Warm British narrator" },
   { id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel", description: "Calm American, conversational" },
+  { id: "JBFqnCBsd6RMkjVDRZzb", name: "George", description: "Warm British narrator" },
   { id: "EXAVITQu4vr4xnSDxMaL", name: "Sarah", description: "Soft, confident American" },
   { id: "nPczCjzI2devNBz1zQrb", name: "Brian", description: "Deep, resonant American" },
   { id: "XB0fDUnXU5powFXDhCwa", name: "Charlotte", description: "Smooth Swedish-English" },
   { id: "9BWtsMINqrJLrRacOk9x", name: "Aria", description: "Expressive American" },
 ];
-export const DEFAULT_VOICE_ID = VOICE_PRESETS[0].id;
+/** ElevenLabs Rachel is the stable default when the caller sends no voice id. */
+export const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+const KEY_REQUIRED_MESSAGE = "ElevenLabs API Key required in Settings";
 
 /* ------------------------------------------------------------------------ */
 /* Storage                                                                   */
@@ -131,6 +133,13 @@ export function speechTextFromMarkdown(markdown: string, max = MAX_SPEECH_CHARS)
 
 export type SpeakState = "loading" | "playing" | "idle" | "error";
 
+/** Optional settings used only when native browser speech is the fallback. */
+export interface BrowserSpeechFallback {
+  voiceName?: string;
+  rate?: number;
+  pitch?: number;
+}
+
 export class VoiceEngineError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -183,6 +192,9 @@ function finish(playback: ActivePlayback, state: SpeakState, error?: VoiceEngine
   } catch {
     // ignore teardown errors
   }
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
   if (playback.objectUrl) URL.revokeObjectURL(playback.objectUrl);
   if (active === playback) active = null;
   playback.onState(state, error);
@@ -209,6 +221,35 @@ async function errorFromResponse(response: Response): Promise<VoiceEngineError> 
   return new VoiceEngineError(message, response.status);
 }
 
+function speakWithBrowserFallback(
+  playback: ActivePlayback,
+  text: string,
+  fallback?: BrowserSpeechFallback
+): void {
+  if (typeof window === "undefined" || !window.speechSynthesis) {
+    finish(playback, "error", new VoiceEngineError("Browser speech synthesis is unavailable.", 0));
+    return;
+  }
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  const selectedVoice = fallback?.voiceName
+    ? synth.getVoices().find((voice) => voice.name === fallback.voiceName)
+    : null;
+  if (selectedVoice) utterance.voice = selectedVoice;
+  utterance.lang = selectedVoice?.lang || "en-US";
+  if (fallback?.rate) utterance.rate = fallback.rate;
+  if (fallback?.pitch) utterance.pitch = fallback.pitch;
+  utterance.onstart = () => {
+    if (!playback.done) playback.onState("playing");
+  };
+  utterance.onend = () => finish(playback, "idle");
+  utterance.onerror = () => {
+    if (!playback.done) finish(playback, "error", new VoiceEngineError("Browser speech could not play this response.", 0));
+  };
+  synth.speak(utterance);
+}
+
 /**
  * Speaks `text` through the ElevenLabs proxy. MUST be called from a user
  * gesture (click) — playback is primed synchronously so autoplay policies
@@ -217,7 +258,8 @@ async function errorFromResponse(response: Response): Promise<VoiceEngineError> 
 export function speak(
   id: string,
   text: string,
-  onState: (state: SpeakState, error?: VoiceEngineError) => void
+  onState: (state: SpeakState, error?: VoiceEngineError) => void,
+  browserFallback?: BrowserSpeechFallback
 ): void {
   stopSpeaking();
   const clean = text.trim();
@@ -266,9 +308,9 @@ export function speak(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(key ? { "x-elevenlabs-key": key } : {}),
+      ...(key ? { "x-elevenlabs-api-key": key } : {}),
     },
-    body: JSON.stringify({ text: clean, voiceId: readElevenLabsVoice() }),
+    body: JSON.stringify({ text: clean, voice_id: readElevenLabsVoice() }),
     signal: playback.controller.signal,
   });
 
@@ -296,6 +338,12 @@ export function speak(
       }
       if ((error as { name?: string }).name === "NotAllowedError") {
         finish(playback, "error", new VoiceEngineError("Your browser blocked autoplay — tap the speaker again.", 0));
+        return;
+      }
+      if (error instanceof VoiceEngineError && error.message === KEY_REQUIRED_MESSAGE) {
+        // The route deliberately reports this cleanly; keep Voice usable with
+        // the native browser speech engine instead of leaving the user silent.
+        speakWithBrowserFallback(playback, clean, browserFallback);
         return;
       }
       finish(

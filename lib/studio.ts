@@ -53,16 +53,33 @@ function canUseStorage(): boolean {
   return typeof window !== "undefined";
 }
 
-function isAsset(value: unknown): value is StudioMediaAsset {
-  if (!value || typeof value !== "object") return false;
+function coerceAsset(value: unknown): StudioMediaAsset | null {
+  if (!value || typeof value !== "object") return null;
   const asset = value as Record<string, unknown>;
-  return (
-    typeof asset.id === "string" &&
-    typeof asset.title === "string" &&
-    typeof asset.prompt === "string" &&
-    typeof asset.imageUrl === "string" &&
-    typeof asset.createdAt === "string"
-  );
+  const imageUrl =
+    typeof asset.imageUrl === "string"
+      ? asset.imageUrl
+      : typeof asset.url === "string" && asset.status === "ready"
+        ? asset.url
+        : "";
+  const prompt = typeof asset.prompt === "string" ? asset.prompt : "";
+  const rawCreatedAt = asset.createdAt;
+  const createdAt =
+    typeof rawCreatedAt === "number"
+      ? new Date(rawCreatedAt).toISOString()
+      : typeof rawCreatedAt === "string" && !Number.isNaN(Date.parse(rawCreatedAt))
+        ? rawCreatedAt
+        : "";
+  const id = typeof asset.id === "string" || typeof asset.id === "number" ? String(asset.id) : "";
+  if (!id || !prompt || !imageUrl || !createdAt) return null;
+  return {
+    id,
+    title: typeof asset.title === "string" && asset.title.trim() ? asset.title : prompt.slice(0, 64),
+    prompt,
+    imageUrl,
+    createdAt,
+    shareSlug: typeof asset.shareSlug === "string" ? asset.shareSlug : null,
+  };
 }
 
 /** Read only genuinely generated Studio items; malformed old values are ignored. */
@@ -74,7 +91,8 @@ export function listStudioMedia(): StudioMediaAsset[] {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter(isAsset)
+      .map(coerceAsset)
+      .filter((asset): asset is StudioMediaAsset => asset !== null)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   } catch {
     return [];

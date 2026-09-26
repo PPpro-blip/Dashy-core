@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
+import { PublicStudioShare } from "@/components/studio/PublicShare";
 import {
   isLinkPreviewRequest,
   lookupShareProject,
@@ -63,6 +64,14 @@ export async function generateMetadata({
 export default async function ShortSharePage({ params, searchParams }: ShortSharePageProps) {
   const { slug } = await params;
   const sp = await searchParams;
+
+  // Studio shares are genuine `shared_assets` records, not an encoded image
+  // recipe. Keep D-Code's established short-share behavior for every other
+  // slug so existing project links remain canonical.
+  if (/^s_img_[a-z0-9_-]{6,80}$/i.test(slug)) {
+    return <PublicStudioShare slug={slug} />;
+  }
+
   const viewerPath = `/d-code/share/${encodeURIComponent(slug)}${toQueryString(sp)}`;
 
   if (!(await isLinkPreviewRequest())) {
