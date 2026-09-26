@@ -40,6 +40,12 @@ import {
 } from "@/lib/conversations";
 import { getModelById } from "@/lib/models";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
+import {
+  onSpeechChange,
+  speak,
+  stopSpeech,
+  stripMarkdownForSpeech,
+} from "@/lib/voice-engine";
 import { AttachmentButton } from "@/components/AttachmentButton";
 import { useToast } from "@/components/Toast";
 import {
@@ -53,6 +59,7 @@ import {
   RocketIcon,
   SendIcon,
   SparklesIcon,
+  SpeakerIcon,
   SquareIcon,
   UserIcon,
 } from "@/components/icons";
@@ -752,6 +759,7 @@ function MessageRow({
   onRegenerate: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const isUser = message.role === "user";
   const isAssistantEmpty = !isUser && message.content.length === 0;
   const isThisStreaming = !isUser && isStreaming;
@@ -761,6 +769,21 @@ function MessageRow({
     onCopy();
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  /* Zero-key voice engine — only one message speaks at a time. */
+  useEffect(() => {
+    return onSpeechChange((state) => {
+      setIsSpeaking(state.id === message.id && state.status !== "idle");
+    });
+  }, [message.id]);
+
+  const handleSpeakClick = () => {
+    if (isSpeaking) {
+      stopSpeech();
+      return;
+    }
+    void speak(stripMarkdownForSpeech(message.content), { id: message.id });
   };
 
   return (
@@ -864,6 +887,23 @@ function MessageRow({
                 >
                   <RefreshIcon className="h-3.5 w-3.5" />
                 </button>
+                {message.engine !== "img" && (
+                  <button
+                    type="button"
+                    onClick={handleSpeakClick}
+                    title={isSpeaking ? "Stop speaking" : "Read aloud — no API key required"}
+                    aria-label={isSpeaking ? "Stop speaking" : "Read response aloud"}
+                    className={`rounded-md p-1.5 transition-colors hover:bg-white/[0.06] ${
+                      isSpeaking ? "text-cyan-300" : "text-zinc-500 hover:text-zinc-200"
+                    }`}
+                  >
+                    {isSpeaking ? (
+                      <SquareIcon className="h-3.5 w-3.5" />
+                    ) : (
+                      <SpeakerIcon className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                )}
               </div>
             )}
           </div>

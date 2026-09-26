@@ -345,3 +345,83 @@ export const TerminalIcon = (p: IconProps) => (
     <line x1="12" x2="20" y1="19" y2="19" />
   </Svg>
 );
+
+/** Speaker / "read aloud" — used by the zero-key voice engine trigger. */
+export const SpeakerIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+  </Svg>
+);
+
+export const DownloadIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" x2="12" y1="15" y2="3" />
+  </Svg>
+);
+
+export const LinkIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+  </Svg>
+);
+
+export const KeyIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="7.5" cy="15.5" r="5.5" />
+    <path d="m21 2-9.6 9.6" />
+    <path d="m15.5 7.5 3 3L22 7l-3-3" />
+  </Svg>
+);
+
+export const EyeIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Svg>
+);
+
+export const EyeOffIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+    <path d="M6.61 6.61C3.35 8.52 2 12 2 12s3.5 7 10 7a9.29 9.29 0 0 0 5.11-1.61" />
+    <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+    <line x1="2" x2="22" y1="2" y2="22" />
+  </Svg>
+);
+
+export const TwitterXIcon = (p: IconProps) => (
+  <Svg {...p} filled>
+    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+  </Svg>
+);
+
+export const WhatsAppIcon = (p: IconProps) => (
+  <Svg {...p} filled>
+    <path d="M12.04 2c-5.52 0-10 4.48-10 10 0 1.77.46 3.45 1.27 4.9L2 22l5.25-1.38A9.94 9.94 0 0 0 12.04 22c5.52 0 10-4.48 10-10s-4.48-10-10-10Zm5.8 14.2c-.24.68-1.4 1.3-1.93 1.38-.5.08-1.12.11-1.8-.11-.42-.13-.96-.31-1.65-.6-2.9-1.25-4.8-4.16-4.94-4.35-.14-.19-1.18-1.57-1.18-3s.75-2.13 1.02-2.42c.27-.29.58-.36.78-.36l.55.01c.18.01.42-.07.65.5.24.58.82 2 .89 2.14.07.14.12.31.02.5-.1.19-.15.31-.29.48-.15.17-.31.38-.44.5-.15.14-.3.3-.13.59.17.29.75 1.24 1.62 2.01 1.11.99 2.05 1.3 2.34 1.44.29.14.46.12.63-.07.17-.19.72-.84.92-1.13.19-.29.38-.24.63-.14.26.1 1.63.77 1.91.91.29.14.48.22.55.34.07.12.07.68-.17 1.36Z" />
+  </Svg>
+);
+
+export const FacebookIcon = (p: IconProps) => (
+  <Svg {...p} filled>
+    <path d="M13.5 21v-7.5H16l.5-3H13.5V8.5c0-.87.24-1.46 1.49-1.46H16.5V4.35C16.23 4.31 15.3 4.22 14.22 4.22c-2.24 0-3.77 1.37-3.77 3.88V10.5H8v3h2.45V21h3.05Z" />
+  </Svg>
+);
+
+export const ToggleLeftIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="20" height="12" x="2" y="6" rx="6" />
+    <circle cx="8" cy="12" r="3" />
+  </Svg>
+);
+
+export const ToggleRightIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect width="20" height="12" x="2" y="6" rx="6" />
+    <circle cx="16" cy="12" r="3" />
+  </Svg>
+);
