@@ -1117,40 +1117,24 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     if (savingShare) return;
     setSavingShare(true);
     try {
-      // Draft without a row: save first so there is something to share.
+      // Persist a new workspace first, then bind the hub to this exact row.
       let id = latestRef.current.projectId;
       if (!id) {
         await persist("manual");
         id = latestRef.current.projectId;
-        if (!id) throw new Error("Save the project before sharing.");
       }
-      if (!isPublic) {
-        const updated = await toggleProjectPublic(id, true);
-        setIsPublic(true);
-        setShareSlug(updated.shareSlug);
-        const url = `${window.location.origin}/d-code/share/${updated.shareSlug}`;
-        await navigator.clipboard.writeText(url);
-        toast.show({
-          type: "success",
-          title: "Public link copied",
-          message: "Anyone with the link can view this project.",
-        });
-      } else if (shareSlug) {
-        await navigator.clipboard.writeText(
-          `${window.location.origin}/d-code/share/${shareSlug}`
-        );
-        toast.show({ type: "success", title: "Link copied" });
-      }
+      if (!id) throw new Error("Save the project before sharing.");
+      router.push(`/share?sourceType=dcode_project&sourceId=${encodeURIComponent(id)}`);
     } catch (error) {
       toast.show({
         type: "error",
-        title: "Sharing failed",
+        title: "Could not open Share Hub",
         message: error instanceof Error ? error.message : "Please try again.",
       });
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, savingShare, shareSlug, toast]);
+  }, [persist, router, savingShare, toast]);
 
   const handleUnshare = useCallback(async () => {
     if (!projectId || savingShare) return;

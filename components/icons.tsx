@@ -308,6 +308,13 @@ export const SquareIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const LinkIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15" />
+  </Svg>
+);
+
 export const ShareIcon = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="18" cy="5" r="3" />
