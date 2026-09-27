@@ -67,6 +67,27 @@ export interface AgentActivity {
   type: string;
   message?: string;
   tool?: string;
+  status?: string;
+}
+
+/** Statuses the activity log colours specially. */
+export type AgentActivityStatus = "running" | "done" | "error" | "skipped";
+
+/** Maps worker-specific status labels onto the activity log's stable set. */
+export function normalizeActivityStatus(
+  status: string | undefined
+): AgentActivityStatus | undefined {
+  if (!status) return undefined;
+  const value = status.trim().toLowerCase();
+  if (["running", "in_progress", "in-progress", "pending", "working"].includes(value)) {
+    return "running";
+  }
+  if (["done", "complete", "completed", "success", "ok", "finished"].includes(value)) {
+    return "done";
+  }
+  if (["error", "failed", "failure", "errored"].includes(value)) return "error";
+  if (["skipped", "skip", "ignored"].includes(value)) return "skipped";
+  return undefined;
 }
 
 export interface ChatCallbacks {
@@ -201,8 +222,9 @@ function normalizeActivity(raw: unknown): AgentActivity[] {
       const type = pickString(obj, ["type", "kind"]);
       return {
         type: type ?? "step",
-        message: pickString(obj, ["message", "text", "description"]),
+        message: pickString(obj, ["message", "text", "description", "detail"]),
         tool: pickString(obj, ["tool", "toolName", "name"]),
+        status: pickString(obj, ["status", "state", "result", "outcome"]),
       };
     })
     .filter((activity): activity is AgentActivity => activity !== null);

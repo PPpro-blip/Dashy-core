@@ -352,3 +352,107 @@ export const TerminalIcon = (p: IconProps) => (
     <line x1="12" x2="20" y1="19" y2="19" />
   </Svg>
 );
+
+/* Compatibility icons used by the Share Hub, Studio, Voice, and D-Code. */
+export const LinkIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+  </Svg>
+);
+
+export const KeyIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="7.5" cy="15.5" r="5.5" />
+    <path d="m21 2-9.6 9.6" />
+    <path d="m15.5 7.5 3 3L22 7l-3-3" />
+  </Svg>
+);
+
+export const FilesIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15.5 2H8.6c-.4 0-.8.2-1.1.5L3.5 6.6c-.3.3-.5.7-.5 1.1v12.8c0 .8.7 1.5 1.5 1.5h11c.8 0 1.5-.7 1.5-1.5v-16c0-.8-.7-1.5-1.5-1.5Z" />
+    <path d="M15.5 2v4.5H20" />
+    <path d="M8 13h7M8 17h5" />
+  </Svg>
+);
+
+export const GitBranchIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <line x1="6" x2="6" y1="3" y2="15" />
+    <circle cx="18" cy="6" r="3" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M18 9a9 9 0 0 1-9 9" />
+  </Svg>
+);
+
+export const PuzzleIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568a2.41 2.41 0 0 1 0 3.408l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.98.98 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-3.417 0l-1.568-1.568a.98.98 0 0 0-.878-.289c-.47.07-.802.48-.968.925a2.501 2.501 0 1 1-3.214-3.214c.446-.166.855-.497.925-.968a.98.98 0 0 0-.276-.837l-1.61-1.61a2.404 2.404 0 0 1 0-3.417l1.568-1.568a.98.98 0 0 0 .289-.878c-.07-.47-.48-.802-.925-.968a2.501 2.501 0 1 1 3.214-3.214c.166.446.497.855.968.925a.98.98 0 0 0 .837-.276l1.61-1.61a2.404 2.404 0 0 1 3.417 0l1.568 1.568c.23.23.556.338.878.289.47-.07.802-.48.968-.925a2.501 2.501 0 1 1 3.214 3.214c-.446.166-.855.497-.925.968Z" />
+  </Svg>
+);
+
+export const CommandIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" />
+  </Svg>
+);
+
+export const DownloadIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" x2="12" y1="15" y2="3" />
+  </Svg>
+);
+
+export const GitCommitIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="3" />
+    <line x1="3" x2="9" y1="12" y2="12" />
+    <line x1="15" x2="21" y1="12" y2="12" />
+  </Svg>
+);
+
+export const ExternalLinkIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M15 3h6v6M10 14 21 3" />
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </Svg>
+);
+
+export const EyeIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+    <circle cx="12" cy="12" r="3" />
+  </Svg>
+);
+
+export const InstagramIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2" y="2" width="20" height="20" rx="5" ry="5" />
+    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+    <line x1="17.5" y1="6.5" x2="17.51" y2="6.5" />
+  </Svg>
+);
+
+export const FacebookIcon = (p: IconProps) => (
+  <Svg {...p} filled>
+    <path d="M24 12.073C24 5.405 18.627 0 12 0S0 5.405 0 12.073C0 18.1 4.388 23.094 10.125 24v-8.437H7.078v-3.49h3.047V9.413c0-3.026 1.792-4.697 4.533-4.697 1.312 0 2.686.236 2.686.236v2.971H15.83c-1.491 0-1.956.93-1.956 1.886v2.264h3.328l-.532 3.49h-2.796V24C19.612 23.094 24 18.1 24 12.073z" />
+  </Svg>
+);
+
+export const SpeakerIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" />
+    <path d="M16 9a5 5 0 0 1 0 6M19.364 18.364a9 9 0 0 0 0-12.728" />
+  </Svg>
+);
+
+export const SpeakerOffIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" />
+    <line x1="22" x2="16" y1="9" y2="15" />
+    <line x1="16" x2="22" y1="9" y2="15" />
+  </Svg>
+);
