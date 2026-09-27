@@ -42,6 +42,7 @@ import {
   PlusIcon,
   SearchIcon,
   SettingsIcon,
+  ShareIcon,
   TrashIcon,
 } from "@/components/icons";
 
@@ -251,6 +252,11 @@ export function Sidebar() {
         >
           <CodeIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">D-Code</span>
+        </Link>
+        <Link href="/share-hub" className={navItemClass(pathname === "/share-hub")}>
+          <ShareIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Share Hub</span>
+          <span className="rounded bg-cyan-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-cyan-300">New</span>
         </Link>
         <Link href="/projects" className={navItemClass(pathname === "/projects")}>
           <FolderIcon className="h-4 w-4 flex-shrink-0" />
