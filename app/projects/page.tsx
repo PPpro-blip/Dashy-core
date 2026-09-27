@@ -29,7 +29,6 @@ import {
   PlusIcon,
   ShareIcon,
   TrashIcon,
-  ShareIcon,
 } from "@/components/icons";
 import { ShareHubModal } from "@/components/ShareHubModal";
 
