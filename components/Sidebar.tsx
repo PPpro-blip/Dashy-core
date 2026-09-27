@@ -262,6 +262,10 @@ export function Sidebar() {
           <FolderIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Projects</span>
         </Link>
+        <Link href="/share" className={navItemClass(pathname === "/share")}>
+          <ShareIcon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">Share Hub</span>
+        </Link>
         <Link href="/knowledge" className={navItemClass(pathname === "/knowledge")}>
           <BookOpenIcon className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1">Knowledge</span>

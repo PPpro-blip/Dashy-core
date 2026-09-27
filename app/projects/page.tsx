@@ -27,6 +27,7 @@ import {
   LoaderIcon,
   LockIcon,
   PlusIcon,
+  ShareIcon,
   TrashIcon,
   ShareIcon,
 } from "@/components/icons";
@@ -283,6 +284,14 @@ export default function ProjectsPage() {
                     >
                       <CodeIcon className="h-3.5 w-3.5" />
                       Open
+                    </Link>
+                    <Link
+                      href={`/share?sourceType=dcode_project&sourceId=${encodeURIComponent(project.id)}`}
+                      className="flex items-center justify-center gap-1.5 rounded-lg border border-cyan-400/20 bg-cyan-400/[0.05] px-3 py-1.5 text-xs font-medium text-cyan-200 transition-colors hover:border-cyan-400/40"
+                      aria-label={`Share ${project.title}`}
+                    >
+                      <ShareIcon className="h-3.5 w-3.5" />
+                      Share
                     </Link>
                     <button
                       type="button"
