@@ -17,12 +17,14 @@ import { checkWorkerStatus } from "@/lib/chat-client";
 import { EVENTS } from "@/lib/conversations";
 import { MODELS, getModelById } from "@/lib/models";
 import { getStoredModel, setStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
-import { CheckIcon, ChevronDownIcon } from "@/components/icons";
+import { CheckIcon, ChevronDownIcon, MenuIcon } from "@/components/icons";
 
 type WorkerStatus = "checking" | "online" | "offline";
 
 interface HeaderProps {
   sessionTitle?: string;
+  /** Mobile only — opens the navigation drawer owned by the shell. */
+  onOpenNav?: () => void;
 }
 
 function initialsFor(name: string, email: string): string {
@@ -32,7 +34,7 @@ function initialsFor(name: string, email: string): string {
   return source.slice(0, 2).toUpperCase();
 }
 
-export function Header({ sessionTitle = "DashyCore" }: HeaderProps) {
+export function Header({ sessionTitle = "DashyCore", onOpenNav }: HeaderProps) {
   const [title, setTitle] = useState(sessionTitle);
   const [model, setModel] = useState<string>(() => getStoredModel());
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -109,22 +111,34 @@ export function Header({ sessionTitle = "DashyCore" }: HeaderProps) {
   }[workerStatus];
 
   return (
-    <header className="flex h-16 flex-shrink-0 items-center gap-3 border-b border-white/[0.06] bg-navy/55 px-5 backdrop-blur-2xl">
+    <header className="sticky top-0 z-30 flex h-16 flex-shrink-0 items-center gap-2 border-b border-white/[0.06] bg-navy/80 px-3 backdrop-blur-2xl sm:gap-3 sm:px-5">
+      {/* Mobile navigation trigger */}
+      {onOpenNav && (
+        <button
+          type="button"
+          onClick={onOpenNav}
+          aria-label="Open navigation"
+          className="-ml-1 flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg text-zinc-300 transition-colors hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 md:hidden"
+        >
+          <MenuIcon className="h-5 w-5" />
+        </button>
+      )}
+
       {/* Breadcrumb + title */}
       <div className="flex min-w-0 items-center gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+        <span className="hidden text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500 lg:inline">
           Workspace
         </span>
-        <ChevronDownIcon className="h-3 w-3 -rotate-90 text-zinc-600" />
+        <ChevronDownIcon className="hidden h-3 w-3 -rotate-90 text-zinc-600 lg:inline" />
         <h2 className="truncate text-sm font-semibold tracking-tight text-zinc-100" title={title}>
           {title}
         </h2>
       </div>
 
-      <div className="ml-auto flex flex-shrink-0 items-center gap-2.5">
-        {/* AI ready pill */}
+      <div className="ml-auto flex min-w-0 flex-shrink-0 items-center gap-1.5 sm:gap-2.5">
+        {/* AI ready pill — desktop only, the model chip carries the state on phones */}
         <div
-          className="flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.1em] text-zinc-400"
+          className="hidden items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.1em] text-zinc-400 lg:flex"
           title="dashy-flow-state reachability"
         >
           <span className={`h-1.5 w-1.5 rounded-full ${pill.dot}`} />
@@ -136,13 +150,17 @@ export function Header({ sessionTitle = "DashyCore" }: HeaderProps) {
           <button
             type="button"
             onClick={() => setModelMenuOpen((open) => !open)}
-            className="flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:border-white/[0.14]"
+            aria-haspopup="listbox"
+            aria-expanded={modelMenuOpen}
+            aria-label={`Model: ${currentModel.label}`}
+            className="flex h-9 items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 text-xs font-medium text-zinc-200 transition-colors hover:border-white/[0.14] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
           >
             <span
-              className="h-1.5 w-1.5 rounded-full"
+              className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
               style={{ backgroundColor: currentModel.accent }}
             />
-            {currentModel.label}
+            <span className="hidden sm:inline">{currentModel.label}</span>
+            <span className="sm:hidden">{currentModel.short}</span>
             <ChevronDownIcon
               className={`h-3 w-3 text-zinc-500 transition-transform ${
                 modelMenuOpen ? "rotate-180" : ""
@@ -159,7 +177,11 @@ export function Header({ sessionTitle = "DashyCore" }: HeaderProps) {
                 className="fixed inset-0 z-40 cursor-default"
                 onClick={() => setModelMenuOpen(false)}
               />
-              <div className="absolute right-0 top-full z-50 mt-2 w-72 overflow-hidden rounded-xl border border-white/[0.08] bg-[#131731] p-1.5 shadow-2xl shadow-black/60">
+              <div
+                role="listbox"
+                aria-label="Select model"
+                className="absolute right-0 top-full z-50 mt-2 w-[min(18rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-white/[0.08] bg-[#131731] p-1.5 shadow-2xl shadow-black/60"
+              >
                 {MODELS.map((m) => {
                   const Icon = m.Icon;
                   const isSelected = m.id === currentModel.id;
@@ -167,6 +189,8 @@ export function Header({ sessionTitle = "DashyCore" }: HeaderProps) {
                     <button
                       key={m.id}
                       type="button"
+                      role="option"
+                      aria-selected={isSelected}
                       onClick={() => {
                         setStoredModel(m.id);
                         setModelMenuOpen(false);
@@ -208,7 +232,7 @@ export function Header({ sessionTitle = "DashyCore" }: HeaderProps) {
           href="/settings"
           title="Open settings"
           aria-label="Open settings"
-          className="ml-0.5 flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-xs font-semibold text-white transition-transform hover:scale-105"
+          className="ml-0.5 hidden h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-xs font-semibold text-white transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 sm:flex"
         >
           {avatarInitials}
         </Link>
