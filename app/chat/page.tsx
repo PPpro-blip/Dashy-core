@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, isValidElement, useRef, useState, type ReactNode } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -42,6 +43,8 @@ import { getModelById } from "@/lib/models";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import { AttachmentButton } from "@/components/AttachmentButton";
 import { useToast } from "@/components/Toast";
+import { buildImageUrl, saveStudioAsset } from "@/lib/studio";
+import { splitThinking } from "@/lib/thinking";
 import {
   ArrowUpRightIcon,
   CheckIcon,
@@ -49,6 +52,7 @@ import {
   CopyIcon,
   ImageIcon,
   LightbulbIcon,
+  MicIcon,
   RefreshIcon,
   RocketIcon,
   SendIcon,
@@ -524,11 +528,17 @@ export default function ChatPage() {
       }
 
       const engine = "img" as const;
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
-        prompt
-      )}?width=1024&height=1024&nologo=true&seed=${Math.floor(
-        Math.random() * 100000
-      )}`;
+      // Same generator Studio uses — one implementation (lib/studio).
+      const imageUrl = buildImageUrl(prompt, { width: 1024, height: 1024 });
+      // Generated images belong in the Studio library, where they can be
+      // re-opened and shared through the canonical Share Hub.
+      saveStudioAsset({
+        prompt,
+        url: imageUrl,
+        width: 1024,
+        height: 1024,
+        origin: "chat",
+      });
 
       const userMessage: HistoryMessage = {
         id: newConversationId(),
@@ -556,7 +566,7 @@ export default function ChatPage() {
 
       toast.success(
         "<IMG> engine",
-        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — it may take a moment to load.`
+        `Rendering “${prompt.slice(0, 80)}${prompt.length > 80 ? "…" : ""}” — saved to your Studio library.`
       );
     },
     [activeConversationId, input, isStreaming, messages, persistConversation, selectedModel, toast]
@@ -596,10 +606,10 @@ export default function ChatPage() {
   /* --------------------------------- render -------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col">
+    <div className="flex h-[calc(100vh-4rem)] [height:calc(100dvh-4rem)] flex-col">
       {messages.length === 0 ? (
         /* ------------------------------- HERO ------------------------------- */
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4">
+        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
           <Image
             src="/icon-512.png"
             alt="DashyCore"
@@ -609,10 +619,10 @@ export default function ChatPage() {
             className="mb-6 rounded-2xl object-contain shadow-lg shadow-cyan-500/20"
           />
 
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-100">
+          <h1 className="text-center text-xl font-bold tracking-tight text-zinc-100 sm:text-2xl">
             How can I help you <span className="text-gradient">today?</span>
           </h1>
-          <p className="mt-2 text-sm text-zinc-500">
+          <p className="mt-2 text-center text-sm text-zinc-500">
             Ask me anything, get creative, write code, or explore ideas
           </p>
 
@@ -644,7 +654,7 @@ export default function ChatPage() {
             ))}
           </div>
 
-          <p className="mt-8 text-xs text-zinc-600">
+          <p className="mt-8 hidden text-xs text-zinc-600 sm:block">
             Press{" "}
             <kbd className="rounded border border-white/[0.08] bg-white/[0.03] px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
               /
@@ -654,7 +664,7 @@ export default function ChatPage() {
         </div>
       ) : (
         /* ---------------------------- MESSAGE THREAD ------------------------ */
-        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+        <div className="flex-1 space-y-4 overflow-y-auto px-1 py-4 sm:px-4">
           {messages.map((message) => (
             <MessageRow
               key={message.id}
@@ -671,13 +681,13 @@ export default function ChatPage() {
       )}
 
       {/* --------------------- BOTTOM-ANCHORED INPUT BAR --------------------- */}
-      <div className="flex-shrink-0 border-t border-white/[0.06] bg-navy/70 p-4 backdrop-blur-2xl">
+      <div className="flex-shrink-0 border-t border-white/[0.06] bg-navy/70 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-2xl sm:p-4">
         <div className="mx-auto w-full max-w-3xl">
-          <div className="flex items-end gap-2 rounded-2xl border border-white/[0.1] bg-white/[0.045] px-3 py-2.5 shadow-inner shadow-black/10 transition-colors focus-within:border-cyan-400/60 focus-within:ring-4 focus-within:ring-cyan-400/10">
+          <div className="flex items-end gap-1.5 rounded-2xl border border-white/[0.1] bg-white/[0.045] px-2 py-2 shadow-inner shadow-black/10 transition-colors focus-within:border-cyan-400/60 focus-within:ring-4 focus-within:ring-cyan-400/10 sm:gap-2 sm:px-3 sm:py-2.5">
             <AttachmentButton
               userId={userId}
               disabled={isStreaming}
-              className="h-8 w-8 flex-shrink-0"
+              className="h-9 w-9 flex-shrink-0"
             />
             <textarea
               ref={textareaRef}
@@ -689,16 +699,25 @@ export default function ChatPage() {
               disabled={isStreaming}
               className="max-h-[200px] flex-1 resize-none bg-transparent py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
             />
+            {/* Voice lives in the composer, not in the main navigation. */}
+            <Link
+              href="/voice"
+              aria-label="Voice mode — talk to Dashy"
+              title="Voice mode"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+            >
+              <MicIcon className="h-4 w-4" />
+            </Link>
             <button
               type="button"
               onClick={() => handleGenerateImage()}
               disabled={!input.trim() || isStreaming}
               aria-label="Generate image with <IMG> Engine"
               title="Generate image with <IMG> Engine"
-              className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30"
+              className="flex h-9 flex-shrink-0 items-center gap-1 rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-2 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-30 sm:px-2.5"
             >
               <ImageIcon className="h-4 w-4" />
-              IMG
+              <span className="hidden sm:inline">IMG</span>
             </button>
             {isStreaming ? (
               <button
@@ -753,7 +772,14 @@ function MessageRow({
 }) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
-  const isAssistantEmpty = !isUser && message.content.length === 0;
+  /**
+   * Hidden reasoning (<think>…</think>) is never the answer: it is stripped
+   * out and reported as a clean status line instead.
+   */
+  const { visible: visibleContent, isThinking } = isUser
+    ? { visible: message.content, isThinking: false }
+    : splitThinking(message.content);
+  const isAssistantEmpty = !isUser && visibleContent.trim().length === 0 && !isThinking;
   const isThisStreaming = !isUser && isStreaming;
   const modelLabel = message.model ? getModelById(message.model).label : null;
 
@@ -764,7 +790,7 @@ function MessageRow({
   };
 
   return (
-    <div className={`group flex w-full gap-3 px-4 py-4 ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`group flex w-full gap-2 px-2 py-4 sm:gap-3 sm:px-4 ${isUser ? "justify-end" : "justify-start"}`}>
       {/* Assistant avatar */}
       {!isUser && (
         <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-violet-500">
@@ -772,7 +798,7 @@ function MessageRow({
         </div>
       )}
 
-      <div className={`max-w-[85%] min-w-0 space-y-2 ${isUser ? "flex flex-col items-end" : ""}`}>
+      <div className={`min-w-0 max-w-[88%] space-y-2 sm:max-w-[85%] ${isUser ? "flex flex-col items-end" : ""}`}>
         {/* Model / engine badge */}
         {!isUser && (modelLabel || message.engine === "img") && (
           <div className="flex items-center gap-2">
@@ -788,11 +814,15 @@ function MessageRow({
           </div>
         )}
 
-        {/* Streaming status line (worker statuses when available) */}
-        {!isUser && isThisStreaming && statuses.length > 0 && (
+        {/* High-level status only — never the raw reasoning itself. */}
+        {!isUser && isThisStreaming && (isThinking || statuses.length > 0) && (
           <div className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
             <span className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-zinc-600 border-t-cyan-400" />
-            <span className="text-xs text-zinc-500">{statuses[statuses.length - 1]}</span>
+            <span className="text-xs text-zinc-500">
+              {isThinking
+                ? "Thinking…"
+                : statuses[statuses.length - 1]}
+            </span>
           </div>
         )}
 
@@ -801,7 +831,7 @@ function MessageRow({
           <div className="rounded-2xl rounded-tr-sm border border-cyan-400/15 bg-cyan-500/10 px-4 py-3 text-sm leading-relaxed text-zinc-100">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
-        ) : isAssistantEmpty ? (
+        ) : isAssistantEmpty || (isThinking && !visibleContent.trim()) ? (
           <div className="rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
             <div className="flex min-h-[20px] items-center gap-1.5 py-0.5">
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400" />
@@ -832,7 +862,7 @@ function MessageRow({
                   ),
                 }}
               >
-                {message.content}
+                {visibleContent}
               </Markdown>
               {isThisStreaming && (
                 <span className="stream-cursor ml-0.5 inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-cyan-400/80" />

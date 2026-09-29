@@ -1,13 +1,13 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { Sidebar } from "@/components/Sidebar";
-import { Header } from "@/components/Header";
+import { WorkspaceShell } from "@/components/WorkspaceShell";
 
 /**
  * DashyCore v7 — shared authenticated app layout.
  *
- * Server-side session guard (unauthenticated → /login) + sidebar + header,
- * identical to the chat and settings layouts. Route layouts stay thin.
+ * Server half: the session guard (unauthenticated → /login). Everything
+ * responsive lives in <WorkspaceShell>. Every authenticated route group
+ * uses this one shell, so navigation can never diverge per section.
  */
 export async function AppShell({
   title,
@@ -25,13 +25,5 @@ export async function AppShell({
     redirect("/login");
   }
 
-  return (
-    <div className="flex min-h-screen bg-navy">
-      <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Header sessionTitle={title} />
-        <main className="flex-1 overflow-auto">{children}</main>
-      </div>
-    </div>
-  );
+  return <WorkspaceShell title={title}>{children}</WorkspaceShell>;
 }

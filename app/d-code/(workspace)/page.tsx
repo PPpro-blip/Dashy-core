@@ -68,7 +68,7 @@ export default function NewDCodePage() {
 
   if (!draft) {
     return (
-      <div className="flex h-[calc(100vh-4rem)] items-center justify-center gap-2 text-zinc-500">
+      <div className="flex h-[calc(100vh-4rem)] [height:calc(100dvh-4rem)] items-center justify-center gap-2 text-zinc-500">
         <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-700 border-t-cyan-400" />
         <span className="text-sm">Preparing your workspace…</span>
       </div>

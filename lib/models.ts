@@ -12,6 +12,8 @@ export interface DashyModel {
   id: string;
   /** Display name shown in the UI (old peak DASH- style). */
   label: string;
+  /** Compact label for tight surfaces (mobile header chip). */
+  short: string;
   description: string;
   /** Accent color used for icons / dots. */
   accent: string;
@@ -23,6 +25,7 @@ export const MODELS: DashyModel[] = [
   {
     id: "dashy-complexity",
     label: "DASH-Complexity",
+    short: "Complex",
     description: "Best for reasoning, coding, and large context tasks.",
     accent: "#a78bfa",
     Icon: BrainIcon,
@@ -30,6 +33,7 @@ export const MODELS: DashyModel[] = [
   {
     id: "dashy-allround",
     label: "DASH-Allround",
+    short: "Allround",
     description: "Balanced general assistant for everyday tasks.",
     accent: "#22d3ee",
     badge: "Default",
@@ -38,6 +42,7 @@ export const MODELS: DashyModel[] = [
   {
     id: "dashy-superfast",
     label: "DASH-Superfast",
+    short: "Fast",
     description: "Instant answers with the lowest latency.",
     accent: "#34d399",
     Icon: ZapIcon,
