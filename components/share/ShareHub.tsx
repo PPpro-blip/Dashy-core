@@ -1,170 +1,258 @@
 "use client";
 
 /**
- * DashyCore v7 — ShareHub
+ * DashyCore v7 — THE Share Hub (single canonical implementation).
  *
- * The main share surface (modal sheet on desktop, full-screen friendly on
- * mobile). Layout, top to bottom:
+ * One full-page surface at /share. Every entry point in the workspace —
+ * global nav, D-Code editor, project cards, Studio assets — lands here; a
+ * `?sourceType=…&sourceId=…` query pre-selects that exact source, and
+ * changing it is an explicit, deliberate action.
  *
- *   1. Big centered project preview card — thumb, title, tags/description,
- *      public URL row with Copy + QR
- *   2. PRIMARY action — a giant "Share now" button:
- *        · navigator.share() when available  → one-tap OS share sheet
- *        · else the LAST-USED app composer (dashy.share.prefs), prefilled
- *        · else it points the user at the app grid below
- *   3. Owner-only privacy controls (make public / private)
- *   4. Meta export — Instagram + Facebook cards, Standard (copy caption +
- *      Meta web share) or Direct API Pro (Graph API with the user's own token
- *      from Settings → Meta Share; see components/share/MetaExportCards)
- *   5. Clean per-app grid (composers keep full customization)
+ * Sections, in order:
+ *   01 SOURCE            what is being shared (D-Code project / Studio image)
+ *   02 PLATFORMS         compact switcher — X · LinkedIn · Instagram ·
+ *                        Facebook · WhatsApp; only the active platform's
+ *                        detail controls are visible below
+ *   03 MASTER CAPTION    one caption + tags, the starting point for variants
+ *   04 MEDIA             attach a project image / the Studio image
+ *   05 PLATFORM VARIANTS the active platform's copy, budget-aware
+ *   06 PREVIEW           the active platform's post, as composed
+ *   07 PUBLISH           the real public link (Supabase-backed) + honest
+ *                        per-platform actions
  *
- * Honest by design: composers deep-link or copy — nothing fakes a post, and
- * Direct API Pro publishes only after an explicit two-step confirm.
+ * Honest by design:
+ *   · "Published" appears ONLY after the backend confirmed a public link
+ *     (dcode_projects.is_public / shared_assets row) or a Meta Direct API
+ *     publish succeeded (MetaExportCards handles its own confirmation).
+ *   · Handoff platforms say "Open <platform>" — opening a composer is never
+ *     reported as a post.
+ *   · The provider abstraction (lib/share-providers) stays capability-first
+ *     so OAuth direct publishing can land later without a redesign.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { DCodeFile } from "@/lib/dcode";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { getProject, listProjects, toggleProjectPublic, type DCodeProject } from "@/lib/dcode";
+import {
+  listStudioMedia,
+  saveStudioMedia,
+  shareStudioMedia,
+  studioShareUrl,
+  type StudioMediaAsset,
+} from "@/lib/studio";
+import {
+  SHARE_PROVIDERS,
+  modeLabel,
+  providerById,
+  type ShareProviderId,
+} from "@/lib/share-providers";
 import {
   buildLinkedInUrl,
+  buildShortShareUrl,
   buildWhatsAppUrl,
   buildXUrl,
   collectProjectImages,
+  composeBody,
   makeDefaultDraft,
-  SHARE_APPS,
-  SHARE_APP_MAP,
-  tagSlug,
-  type ShareAppId,
+  renderTags,
+  type ProjectImage,
   type ShareDraft,
 } from "@/lib/share-intents";
 import { applyPrefsToDraft, getSharePrefs, saveSharePrefs } from "@/lib/share-prefs";
 import { copyText } from "@/lib/clipboard";
-import { ShareComposer } from "@/components/share/ShareComposer";
 import { MetaExportCards } from "@/components/share/MetaExportCards";
 import { ShareQr } from "@/components/share/ShareQr";
 import { useToast } from "@/components/Toast";
 import {
+  AlertIcon,
+  ArrowUpRightIcon,
   CheckIcon,
+  CodeIcon,
   CopyIcon,
   GlobeIcon,
+  ImageIcon,
   LinkIcon,
   LoaderIcon,
   LockIcon,
   PenIcon,
   RefreshIcon,
   ShareIcon,
+  SparklesIcon,
   TrashIcon,
-  XIcon,
 } from "@/components/icons";
 
-/**
- * Owner-only privacy controls surfaced inside the Hub. Omitted for plain
- * visitors (they must never see make public/private) — when absent the Hub
- * renders exactly as before.
- */
-export interface ShareHubPrivacy {
-  isPublic: boolean;
-  busy: boolean;
-  onToggle: (next: boolean) => void;
+/* ---------------------------------------------------------------------- */
+/* Source model                                                            */
+/* ---------------------------------------------------------------------- */
+
+type HubSource =
+  | { type: "dcode_project"; project: DCodeProject }
+  | { type: "studio_asset"; asset: StudioMediaAsset };
+
+function sourceTitle(source: HubSource): string {
+  return source.type === "dcode_project"
+    ? source.project.title.trim() || "Untitled project"
+    : source.asset.title.trim() || "Untitled Studio image";
 }
 
-/**
- * Owner-only link management surfaced inside the Hub. Omitted for plain
- * visitors — regenerating/revoking is an owner action (RLS enforces it
- * server-side regardless).
- */
-export interface ShareHubManagement {
-  /** Which management action is in flight (disables the row). */
-  busy: "regenerate" | "revoke" | null;
-  /** False while the project is private with no slug to manage. */
-  canManage: boolean;
-  /** Mint a fresh slug — the project stays public under the new link. */
-  onRegenerate: () => void;
-  /** Go private + wipe the slug — the current link can never work again. */
-  onRevoke: () => void;
+/** The live public URL — null until the backend has confirmed one. */
+function sourceShareUrl(source: HubSource, origin: string): string | null {
+  if (source.type === "dcode_project") {
+    const { isPublic, shareSlug } = source.project;
+    return isPublic && shareSlug ? buildShortShareUrl(origin, shareSlug) : null;
+  }
+  return source.asset.shareSlug ? studioShareUrl(source.asset.shareSlug) : null;
 }
 
-/**
- * Standalone media share (e.g. a Dashy Studio image). When present the Hub
- * shares this image instead of a D-Code project: it becomes the preview,
- * the composers' image and the Meta export image, and `shareUrl` should be
- * a page whose og:image is this media (Studio uses /m/<slug>).
- */
-export interface ShareHubMedia {
-  /** Image URL for in-UI previews (same-origin proxied path is fine). */
-  imageUrl: string;
-  /** Absolute, publicly reachable image URL (Instagram Direct API Pro). */
-  publicImageUrl?: string;
+const PLATFORM_IDS: ShareProviderId[] = ["x", "linkedin", "instagram", "facebook", "whatsapp"];
+
+function SectionHeading({
+  step,
+  title,
+  hint,
+  id,
+}: {
+  step: string;
   title: string;
-  caption?: string;
-  tags?: string[];
-  /** File name used for downloads / composer labels. */
-  fileName?: string;
+  hint?: string;
+  id?: string;
+}) {
+  return (
+    <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-400/80">
+        {step}
+      </p>
+      <h2 id={id} className="text-sm font-semibold text-white">{title}</h2>
+      {hint && <p className="text-[11px] text-zinc-500">{hint}</p>}
+    </div>
+  );
 }
 
-interface ShareHubProps {
-  onClose: () => void;
-  project: { id: string; title: string; files: DCodeFile[] } | null;
-  shareUrl: string | null;
-  privacy?: ShareHubPrivacy;
-  management?: ShareHubManagement;
-  media?: ShareHubMedia;
-}
+/* ---------------------------------------------------------------------- */
+/* Hub                                                                     */
+/* ---------------------------------------------------------------------- */
 
-export function ShareHub({ onClose, project, shareUrl, privacy, management, media }: ShareHubProps) {
+export function ShareHub() {
+  const router = useRouter();
+  const params = useSearchParams();
   const toast = useToast();
-  const [selectedApp, setSelectedApp] = useState<ShareAppId | null>(null);
+
+  const requestedType = params.get("sourceType");
+  const requestedId = params.get("sourceId");
+
+  const [origin, setOrigin] = useState("");
+  const [loading, setLoading] = useState(Boolean(requestedId));
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [source, setSource] = useState<HubSource | null>(null);
+  /** Explicit action only — a pre-selected source never falls back silently. */
+  const [pickerOpen, setPickerOpen] = useState(!requestedId);
+  const [projects, setProjects] = useState<DCodeProject[]>([]);
+  const [studioAssets, setStudioAssets] = useState<StudioMediaAsset[]>([]);
+
+  const [active, setActive] = useState<ShareProviderId>("x");
+  const [draft, setDraft] = useState<ShareDraft>(() =>
+    applyPrefsToDraft(makeDefaultDraft("", "", []), getSharePrefs())
+  );
+  const [variants, setVariants] = useState<Partial<Record<ShareProviderId, string>>>({});
+  const [publishBusy, setPublishBusy] = useState<"publish" | "unpublish" | "regenerate" | null>(null);
   const [copying, setCopying] = useState(false);
   const [copyResult, setCopyResult] = useState<"copied" | "failed" | null>(null);
-  const [sharingNow, setSharingNow] = useState(false);
   const [showQr, setShowQr] = useState(false);
-  /** Two-step confirm for the destructive revoke action. */
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
-  const gridRef = useRef<HTMLDivElement>(null);
+  const variantsRef = useRef<HTMLDivElement>(null);
 
-  const imageOptions = useMemo(
-    () =>
-      media
-        ? [{ name: media.fileName ?? "dashy-studio.jpg", dataUrl: media.imageUrl }]
-        : collectProjectImages(project?.files ?? []),
-    [media, project?.files]
-  );
-  const subjectLabel = media ? "image" : "project";
+  useEffect(() => setOrigin(window.location.origin), []);
 
-  // Last-used destination + caption/tags (dashy.share.prefs). Seeds the
-  // draft so "Share now" opens the last-used composer prefilled.
-  const prefs = useMemo(() => getSharePrefs(), []);
-  const lastApp =
-    prefs.destination && SHARE_APP_MAP[prefs.destination]
-      ? SHARE_APP_MAP[prefs.destination]
-      : null;
+  /* ----------------------------- source load ---------------------------- */
 
-  // The hub remounts on each open (conditional render in the workspace), so
-  // this initializer gives us fresh smart defaults every time it opens.
-  const [draft, setDraft] = useState<ShareDraft>(() => {
-    const base = applyPrefsToDraft(
-      makeDefaultDraft(
-        media?.title ?? project?.title ?? "Untitled project",
-        shareUrl ?? "",
-        imageOptions
-      ),
-      prefs
+  const seedDraft = useCallback((next: HubSource) => {
+    const title = sourceTitle(next);
+    const url = sourceShareUrl(next, window.location.origin) ?? "";
+    const images: ProjectImage[] =
+      next.type === "dcode_project"
+        ? collectProjectImages(next.project.files)
+        : [{ name: "studio-image.jpg", dataUrl: next.asset.imageUrl }];
+    const base = applyPrefsToDraft(makeDefaultDraft(title, url, images), getSharePrefs());
+    setDraft(
+      next.type === "studio_asset"
+        ? {
+            ...base,
+            caption: next.asset.prompt || "Made with Dashy Studio ⚡",
+            tags: ["DashyCore", "DashyStudio", "AIArt"],
+          }
+        : base
     );
-    // Media shares get media-flavoured copy (remembered D-Code captions
-    // like "Built with D-Code" would be wrong under a Studio image).
-    return media
-      ? {
-          ...base,
-          caption: media.caption ?? "Made with Dashy Studio ⚡",
-          tags: media.tags ?? ["DashyCore", "DashyStudio", "AIArt"],
-        }
-      : base;
-  });
+    setVariants({});
+    setCopyResult(null);
+    setShowQr(false);
+  }, []);
 
+  const adoptSource = useCallback(
+    (next: HubSource, syncUrl: boolean) => {
+      setSource(next);
+      setPickerOpen(false);
+      seedDraft(next);
+      if (syncUrl) {
+        const id = next.type === "dcode_project" ? next.project.id : next.asset.id;
+        router.replace(
+          `/share?sourceType=${next.type}&sourceId=${encodeURIComponent(id)}`,
+          { scroll: false }
+        );
+      }
+    },
+    [router, seedDraft]
+  );
+
+  /* Resolve the requested source exactly — never a stale or sibling item. */
   useEffect(() => {
-    if (!confirmingRevoke) return;
-    const timer = window.setTimeout(() => setConfirmingRevoke(false), 3000);
-    return () => window.clearTimeout(timer);
-  }, [confirmingRevoke]);
+    let cancelled = false;
+    async function resolve() {
+      setLoadError(null);
+      if (!requestedId) return;
+      setLoading(true);
+      try {
+        if (requestedType === "studio_asset") {
+          const asset = listStudioMedia().find((item) => item.id === requestedId);
+          if (!asset) {
+            throw new Error(
+              "This Studio image is not in your library on this device."
+            );
+          }
+          if (!cancelled) adoptSource({ type: "studio_asset", asset }, false);
+          return;
+        }
+        // Default (incl. legacy links without sourceType): a D-Code project.
+        const project = await getProject(requestedId);
+        if (!project) {
+          throw new Error("This project is unavailable or you no longer have access to it.");
+        }
+        if (!cancelled) adoptSource({ type: "dcode_project", project }, false);
+      } catch (error) {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : "Could not load this source.");
+          setPickerOpen(true);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void resolve();
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally keyed on the query only — the hub re-resolves per URL.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedType, requestedId]);
+
+  /* Picker data — loaded lazily, shown only on explicit request. */
+  useEffect(() => {
+    if (!pickerOpen) return;
+    setStudioAssets(listStudioMedia());
+    listProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, [pickerOpen]);
 
   useEffect(() => {
     if (!copyResult) return;
@@ -172,504 +260,791 @@ export function ShareHub({ onClose, project, shareUrl, privacy, management, medi
     return () => window.clearTimeout(timer);
   }, [copyResult]);
 
-  // Keep the composer's permalink in sync with the canonical share URL —
-  // e.g. the owner hits "Make public" while the hub is open and the freshly
-  // assigned slug must flow into copy/QR/intents immediately.
+  useEffect(() => {
+    if (!confirmingRevoke) return;
+    const timer = window.setTimeout(() => setConfirmingRevoke(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [confirmingRevoke]);
+
+  /* ------------------------------- derived ------------------------------ */
+
+  const shareUrl = source && origin ? sourceShareUrl(source, origin) : null;
+  const published = Boolean(shareUrl);
+
+  /* Keep the draft's permalink in sync once the backend assigns one. */
   useEffect(() => {
     if (!shareUrl) return;
-    setCopyResult(null);
-    setDraft((current) =>
-      current.url === shareUrl ? current : { ...current, url: shareUrl }
-    );
+    setDraft((current) => (current.url === shareUrl ? current : { ...current, url: shareUrl }));
   }, [shareUrl]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const provider = providerById(active);
+  const masterComposed = useMemo(
+    () =>
+      active === "instagram"
+        ? [draft.caption.trim(), renderTags(draft.tags)].filter(Boolean).join("\n")
+        : composeBody(draft.caption, draft.tags, ""),
+    [active, draft.caption, draft.tags]
+  );
+  const variantText = variants[active] ?? masterComposed;
+  const overLimit =
+    provider.textLimit !== undefined && variantText.length > provider.textLimit;
 
-  if (selectedApp) {
-    return (
-      <ShareComposer
-        app={SHARE_APP_MAP[selectedApp]}
-        draft={draft}
-        onChange={setDraft}
-        imageOptions={imageOptions}
-        onBack={() => setSelectedApp(null)}
-        onClose={onClose}
-        onConfirm={(appId, confirmedDraft) => {
-          // Remember the last destination + caption + tags — the next
-          // "Share now" (desktop, no OS sheet) prefers this composer.
-          saveSharePrefs({
-            destination: appId,
-            caption: confirmedDraft.caption,
-            tags: confirmedDraft.tags,
-          });
-        }}
-      />
-    );
-  }
+  const imageOptions: ProjectImage[] = useMemo(() => {
+    if (!source) return [];
+    return source.type === "dcode_project"
+      ? collectProjectImages(source.project.files)
+      : [{ name: "studio-image.jpg", dataUrl: source.asset.imageUrl }];
+  }, [source]);
 
-  const url = draft.url;
-  const canDeviceShare =
-    typeof navigator !== "undefined" && typeof navigator.share === "function";
+  /** Draft whose caption is the active platform's final text (tags baked in). */
+  const activeDraft: ShareDraft = useMemo(
+    () => ({ ...draft, caption: variantText, tags: [], url: shareUrl ?? draft.url }),
+    [draft, variantText, shareUrl]
+  );
 
-  const handleCopyLink = async () => {
-    setCopying(true);
-    setCopyResult(null);
+  const studioPublicImageUrl =
+    source?.type === "studio_asset" && origin
+      ? new URL(source.asset.imageUrl, origin).toString()
+      : undefined;
+
+  /* ------------------------------- actions ------------------------------ */
+
+  const handlePublish = useCallback(async () => {
+    if (!source || publishBusy) return;
+    setPublishBusy("publish");
     try {
-      setCopyResult((await copyText(url)) ? "copied" : "failed");
+      if (source.type === "dcode_project") {
+        const updated = await toggleProjectPublic(source.project.id, true);
+        setSource({ type: "dcode_project", project: updated });
+        toast.show({
+          type: "success",
+          title: "Published",
+          message: "Anyone with the link can now view this project.",
+        });
+      } else {
+        const shared = await shareStudioMedia(source.asset);
+        const nextAsset = { ...source.asset, shareSlug: shared.slug };
+        setSource({ type: "studio_asset", asset: nextAsset });
+        // Mirror the slug into the local library so Library shows it too.
+        saveStudioMedia(
+          listStudioMedia().map((item) =>
+            item.id === nextAsset.id ? { ...item, shareSlug: shared.slug } : item
+          )
+        );
+        toast.show({
+          type: "success",
+          title: "Published",
+          message: "Anyone with the link can view this Studio image and its prompt.",
+        });
+      }
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Publishing failed",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setPublishBusy(null);
+    }
+  }, [source, publishBusy, toast]);
+
+  const handleUnpublish = useCallback(async () => {
+    if (!source || source.type !== "dcode_project" || publishBusy) return;
+    setPublishBusy("unpublish");
+    try {
+      const updated = await toggleProjectPublic(source.project.id, false);
+      setSource({ type: "dcode_project", project: updated });
+      setShowQr(false);
+      toast.show({
+        type: "info",
+        title: "Link revoked",
+        message: "The project is private again — the old link no longer works.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not revoke",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setPublishBusy(null);
+      setConfirmingRevoke(false);
+    }
+  }, [source, publishBusy, toast]);
+
+  const handleRegenerate = useCallback(async () => {
+    if (!source || source.type !== "dcode_project" || publishBusy) return;
+    setPublishBusy("regenerate");
+    try {
+      const updated = await toggleProjectPublic(source.project.id, true);
+      setSource({ type: "dcode_project", project: updated });
+      toast.show({
+        type: "success",
+        title: "New link minted",
+        message: "The previous link stopped working; the project stays public.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not regenerate",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setPublishBusy(null);
+    }
+  }, [source, publishBusy, toast]);
+
+  const handleCopyLink = useCallback(async () => {
+    if (!shareUrl) return;
+    setCopying(true);
+    try {
+      setCopyResult((await copyText(shareUrl)) ? "copied" : "failed");
     } finally {
       setCopying(false);
     }
-  };
+  }, [shareUrl]);
 
-  /**
-   * PRIMARY one-tap action:
-   *   1. navigator.share (mobile + supported desktop) → OS share sheet
-   *   2. last-used app composer, prefilled with the remembered draft
-   *   3. no preference yet → spotlight the app grid to pick one
-   */
-  const handleShareNow = async () => {
-    if (canDeviceShare) {
-      setSharingNow(true);
-      try {
-        await navigator.share({
-          title: draft.title,
-          text: [draft.caption.trim(), draft.tags.map(tagSlug).filter(Boolean).join(" ")]
-            .filter(Boolean)
-            .join("\n\n"),
-          url,
+  const canDeviceShare =
+    typeof navigator !== "undefined" && typeof navigator.share === "function";
+
+  const handleDeviceShare = useCallback(async () => {
+    if (!shareUrl) return;
+    try {
+      await navigator.share({
+        title: draft.title,
+        text: [draft.caption.trim(), renderTags(draft.tags)].filter(Boolean).join("\n\n"),
+        url: shareUrl,
+      });
+    } catch (error) {
+      if ((error as { name?: string }).name !== "AbortError") {
+        toast.show({
+          type: "error",
+          title: "Device share failed",
+          message: error instanceof Error ? error.message : "Please try again.",
         });
-      } catch (error) {
-        if ((error as { name?: string }).name !== "AbortError") {
-          toast.show({
-            type: "error",
-            title: "Device share failed",
-            message: error instanceof Error ? error.message : "Please try again.",
-          });
-        }
-      } finally {
-        setSharingNow(false);
       }
-      return;
     }
-    if (lastApp) {
-      setSelectedApp(lastApp.id);
-      return;
-    }
-    // First time on desktop: guide to the grid (one intentional pick).
-    gridRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    toast.show({
-      type: "info",
-      title: "Pick where to share",
-      message:
-        "Choose an app below — your choice is remembered for one-tap sharing next time.",
-    });
-  };
+  }, [shareUrl, draft, toast]);
 
-  /**
-   * QUICK social export — direct share triggers for X / LinkedIn / WhatsApp.
-   * Opens the app's share intent immediately, prefilled with the formatted
-   * draft text; link previews come from the share page's OG tags.
-   */
-  const handleQuickShare = (appId: "x" | "linkedin" | "whatsapp") => {
-    if (!url || typeof window === "undefined") return;
-    const builders = {
+  /** Handoff: opens the platform composer prefilled. Never claims a post. */
+  const handleOpenPlatform = useCallback(() => {
+    if (!shareUrl) return;
+    const builders: Partial<Record<ShareProviderId, (d: ShareDraft) => string>> = {
       x: buildXUrl,
       linkedin: buildLinkedInUrl,
       whatsapp: buildWhatsAppUrl,
-    } as const;
-    saveSharePrefs({
-      destination: appId,
-      caption: draft.caption,
-      tags: draft.tags,
+    };
+    const build = builders[active];
+    if (!build) return;
+    saveSharePrefs({ destination: active, caption: draft.caption, tags: draft.tags });
+    window.open(build(activeDraft), "_blank", "noopener,noreferrer");
+    toast.show({
+      type: "info",
+      title: `Opened ${provider.name}`,
+      message: "Finish and confirm your post there — Dashy never posts for you.",
     });
-    window.open(builders[appId](draft), "_blank", "noopener,noreferrer");
-  };
+  }, [shareUrl, active, activeDraft, draft, provider.name, toast]);
 
-  const shareNowLabel = canDeviceShare
-    ? "Share now"
-    : lastApp
-    ? `Share now · ${lastApp.name}`
-    : "Share now";
+  /* ------------------------------ rendering ------------------------------ */
+
+  if (loading) {
+    return (
+      <div className="flex h-[60vh] items-center justify-center gap-2 text-sm text-zinc-500">
+        <LoaderIcon className="h-4 w-4 animate-spin text-cyan-400" />
+        Loading your share source…
+      </div>
+    );
+  }
 
   return (
-    <>
-      {/* Scrim */}
-      <button
-        type="button"
-        aria-label="Close share hub"
-        className="fixed inset-0 z-[70] cursor-default bg-black/70 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
-      {/* Dialog */}
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Share this ${subjectLabel}`}
-        className="fixed left-1/2 top-1/2 z-[80] flex max-h-[92vh] w-[min(40rem,calc(100vw-1.5rem))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0d1220] shadow-2xl shadow-black/80"
-      >
-        {/* Header */}
-        <div className="flex items-center gap-3 border-b border-white/[0.06] px-5 py-4">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-500/15 text-cyan-300">
-            <ShareIcon className="h-5 w-5" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-semibold text-white">Share this {subjectLabel}</h2>
-            <p className="truncate text-[11px] text-zinc-500">{media?.title ?? project?.title}</p>
+    <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:px-6">
+      {/* Page header */}
+      <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-400/80">
+            <ShareIcon className="h-3.5 w-3.5" /> Publishing cockpit
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-          >
-            <XIcon className="h-4 w-4" />
-          </button>
+          <h1 className="mt-1.5 text-2xl font-semibold tracking-[-0.03em] text-white sm:text-3xl">
+            Share Hub
+          </h1>
         </div>
+        <p className="flex items-center gap-1.5 rounded-xl border border-emerald-400/15 bg-emerald-400/[0.05] px-3 py-2 text-[11px] text-emerald-300">
+          <LockIcon className="h-3.5 w-3.5" /> Nothing publishes without your confirmation
+        </p>
+      </div>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
-          {/* Big centered preview card */}
-          <div className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.02] transition-colors hover:border-cyan-400/25">
-            <div className="flex flex-col items-center px-5 pb-4 pt-6 text-center">
-              <div
-                className={`relative overflow-hidden rounded-2xl border border-white/[0.08] bg-black/30 shadow-lg shadow-black/40 ${
-                  media ? "h-44 w-44 shadow-cyan-500/10 sm:h-52 sm:w-52" : "h-20 w-20"
-                }`}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={draft.imageDataUrl ?? "/icon-512.png"}
-                  alt="Share preview"
-                  className="absolute inset-0 h-full w-full object-cover"
-                />
+      {loadError && (
+        <div
+          role="alert"
+          className="mb-5 flex items-center gap-2 rounded-xl border border-red-400/20 bg-red-500/[0.08] px-4 py-3 text-sm text-red-200"
+        >
+          <AlertIcon className="h-4 w-4 flex-shrink-0" /> {loadError}
+        </div>
+      )}
+
+      <div className="space-y-6">
+        {/* 01 — SOURCE */}
+        <section aria-labelledby="share-source" className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+          <SectionHeading id="share-source" step="01 · Source" title="What you're sharing" />
+          {pickerOpen || !source ? (
+            <div>
+              <p className="text-xs text-zinc-500">
+                Choose something to share. Only real sources in your workspace are listed.
+              </p>
+              <div className="mt-4 space-y-4">
+                <div>
+                  <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                    D-Code projects
+                  </p>
+                  {projects.length === 0 ? (
+                    <p className="rounded-xl border border-dashed border-white/[0.1] p-4 text-center text-xs text-zinc-500">
+                      No D-Code projects yet — create one from D-Code or Projects.
+                    </p>
+                  ) : (
+                    <ul className="grid gap-2 sm:grid-cols-2">
+                      {projects.map((project) => (
+                        <li key={project.id}>
+                          <button
+                            type="button"
+                            onClick={() => adoptSource({ type: "dcode_project", project }, true)}
+                            className="flex w-full items-center gap-3 rounded-xl border border-white/[0.08] bg-black/20 p-3 text-left transition-colors hover:border-cyan-400/35 hover:bg-cyan-400/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                          >
+                            <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-cyan-400/10 text-cyan-300">
+                              <CodeIcon className="h-4 w-4" />
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm text-zinc-100">
+                                {project.title.trim() || "Untitled project"}
+                              </span>
+                              <span className="mt-0.5 block text-[11px] text-zinc-500">
+                                {project.files.length} {project.files.length === 1 ? "file" : "files"} · {project.language}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                    Studio images
+                  </p>
+                  {studioAssets.length === 0 ? (
+                    <p className="rounded-xl border border-dashed border-white/[0.1] p-4 text-center text-xs text-zinc-500">
+                      Your Studio library is empty on this device —{" "}
+                      <Link href="/studio" className="text-cyan-300 hover:text-cyan-200">
+                        generate an image
+                      </Link>{" "}
+                      first.
+                    </p>
+                  ) : (
+                    <ul className="grid gap-2 sm:grid-cols-2">
+                      {studioAssets.slice(0, 8).map((asset) => (
+                        <li key={asset.id}>
+                          <button
+                            type="button"
+                            onClick={() => adoptSource({ type: "studio_asset", asset }, true)}
+                            className="flex w-full items-center gap-3 rounded-xl border border-white/[0.08] bg-black/20 p-3 text-left transition-colors hover:border-cyan-400/35 hover:bg-cyan-400/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                          >
+                            <span className="relative h-9 w-9 flex-shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-black/40">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={asset.imageUrl}
+                                alt=""
+                                className="absolute inset-0 h-full w-full object-cover"
+                              />
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm text-zinc-100">{asset.title}</span>
+                              <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
+                                {asset.prompt}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
-              <p className="mt-3 max-w-full truncate px-2 text-base font-semibold text-white">
-                {draft.title || (media ? "Dashy Studio image" : "Untitled project")}
-              </p>
-              <p className="mt-1 line-clamp-2 max-w-sm text-xs leading-relaxed text-zinc-400">
-                {draft.caption || "Built with DashyCore D-Code ⚡"}
-              </p>
-              {draft.tags.length > 0 && (
-                <div className="mt-2.5 flex flex-wrap justify-center gap-1.5">
-                  {draft.tags.slice(0, 6).map((tag) => (
-                    <span
-                      key={tag}
-                      className="rounded-lg border border-cyan-400/20 bg-cyan-400/[0.08] px-2 py-0.5 text-[10px] font-medium text-cyan-300"
+              {source && (
+                <button
+                  type="button"
+                  onClick={() => setPickerOpen(false)}
+                  className="mt-4 text-xs text-zinc-400 hover:text-zinc-200"
+                >
+                  Keep sharing “{sourceTitle(source)}”
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                {source.type === "studio_asset" ? (
+                  <span className="relative h-11 w-11 flex-shrink-0 overflow-hidden rounded-xl border border-white/[0.08] bg-black/40">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={source.asset.imageUrl}
+                      alt=""
+                      className="absolute inset-0 h-full w-full object-cover"
+                    />
+                  </span>
+                ) : (
+                  <span className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-cyan-400/10 text-cyan-300">
+                    <CodeIcon className="h-5 w-5" />
+                  </span>
+                )}
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-white">{sourceTitle(source)}</p>
+                  <p className="mt-0.5 text-[11px] text-zinc-500">
+                    {source.type === "dcode_project"
+                      ? `D-Code project · ${source.project.files.length} ${
+                          source.project.files.length === 1 ? "file" : "files"
+                        } · ${source.project.language}`
+                      : "Dashy Studio image"}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-shrink-0 items-center gap-2">
+                <Link
+                  href={
+                    source.type === "dcode_project"
+                      ? `/d-code/${source.project.id}`
+                      : "/studio/library"
+                  }
+                  className="flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.1] bg-black/20 px-3 text-xs font-medium text-zinc-300 transition-colors hover:border-cyan-400/30 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                >
+                  <PenIcon className="h-3.5 w-3.5" />
+                  {source.type === "dcode_project" ? "Open in D-Code" : "Open in Studio"}
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setPickerOpen(true)}
+                  className="flex h-9 items-center rounded-lg border border-white/[0.1] bg-black/20 px-3 text-xs font-medium text-zinc-300 transition-colors hover:border-cyan-400/30 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                >
+                  Change source
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {source && !pickerOpen && (
+          <>
+            {/* 02 — PLATFORMS */}
+            <section aria-labelledby="share-platforms" className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+              <SectionHeading
+                id="share-platforms"
+                step="02 · Platforms"
+                title="Where it goes"
+                hint="Only the selected platform's controls are shown below."
+              />
+              <div role="tablist" aria-label="Platform" className="flex flex-wrap gap-1.5">
+                {PLATFORM_IDS.map((id) => {
+                  const p = providerById(id);
+                  const selected = active === id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      onClick={() => setActive(id)}
+                      className={`flex h-10 items-center gap-2 rounded-xl border px-3.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
+                        selected
+                          ? "border-cyan-400/45 bg-cyan-400/[0.1] text-cyan-200"
+                          : "border-white/[0.08] bg-white/[0.02] text-zinc-400 hover:border-white/20 hover:text-zinc-200"
+                      }`}
                     >
-                      {tagSlug(tag) || tag}
-                    </span>
-                  ))}
+                      <span style={{ color: p.accent }}>{p.icon}</span>
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-3 flex items-center gap-1.5 text-[11px] text-zinc-500">
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${
+                    provider.mode === "direct"
+                      ? "border-emerald-400/20 bg-emerald-400/10 text-emerald-300"
+                      : provider.mode === "handoff"
+                        ? "border-amber-400/20 bg-amber-400/10 text-amber-300"
+                        : "border-white/10 bg-white/[0.04] text-zinc-400"
+                  }`}
+                >
+                  {modeLabel(provider.mode)}
+                </span>
+                {provider.warning ?? provider.description}
+              </p>
+            </section>
+
+            {/* 03 — MASTER CAPTION */}
+            <section aria-labelledby="share-caption" className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+              <SectionHeading
+                id="share-caption"
+                step="03 · Master caption"
+                title="One draft, every platform"
+                hint="Platform variants below start from this."
+              />
+              <label className="block text-xs font-medium text-zinc-400">
+                Caption
+                <textarea
+                  value={draft.caption}
+                  onChange={(event) => setDraft((d) => ({ ...d, caption: event.target.value }))}
+                  rows={3}
+                  placeholder="Tell your audience what you made…"
+                  className="mt-2 w-full resize-y rounded-xl border border-white/[0.08] bg-black/20 p-3 text-sm leading-relaxed text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
+                />
+              </label>
+              <label className="mt-4 block text-xs font-medium text-zinc-400">
+                Tags
+                <input
+                  value={draft.tags.join(" ")}
+                  onChange={(event) =>
+                    setDraft((d) => ({
+                      ...d,
+                      tags: event.target.value.split(/[\s,]+/).filter(Boolean),
+                    }))
+                  }
+                  placeholder="DashyCore DCode AI"
+                  className="mt-2 w-full rounded-xl border border-white/[0.08] bg-black/20 px-3 py-2.5 text-sm text-zinc-100 outline-none transition-colors focus:border-cyan-400/40"
+                />
+              </label>
+              {draft.tags.length > 0 && (
+                <p className="mt-2 truncate text-[11px] text-cyan-400/80">{renderTags(draft.tags)}</p>
+              )}
+            </section>
+
+            {/* 04 — MEDIA */}
+            <section aria-labelledby="share-media" className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+              <SectionHeading id="share-media" step="04 · Media" title="Attached image" />
+              {imageOptions.length === 0 ? (
+                <div className="flex items-center gap-3 rounded-xl border border-dashed border-white/[0.12] bg-black/10 px-4 py-3.5">
+                  <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/[0.03] text-zinc-600">
+                    <ImageIcon className="h-4 w-4" />
+                  </span>
+                  <div>
+                    <p className="text-xs font-medium text-zinc-300">No media in this source</p>
+                    <p className="mt-0.5 text-[11px] text-zinc-500">
+                      Link previews will use the page's Open Graph image instead.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {imageOptions.map((image) => {
+                    const selected = draft.imageName === image.name;
+                    return (
+                      <button
+                        key={image.name}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() =>
+                          setDraft((d) =>
+                            selected
+                              ? { ...d, imageName: null, imageDataUrl: null }
+                              : { ...d, imageName: image.name, imageDataUrl: image.dataUrl }
+                          )
+                        }
+                        className={`group relative h-20 w-20 overflow-hidden rounded-xl border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
+                          selected ? "border-cyan-400/60" : "border-white/[0.1] hover:border-white/25"
+                        }`}
+                        title={selected ? `Detach ${image.name}` : `Attach ${image.name}`}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={image.dataUrl} alt={image.name} className="absolute inset-0 h-full w-full object-cover" />
+                        {selected && (
+                          <span className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400 text-[#06202a]">
+                            <CheckIcon className="h-3 w-3" />
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
-            </div>
+            </section>
 
-            {/* Public URL row: link + Copy + QR */}
-            <div className="flex items-center gap-2 border-t border-white/[0.06] bg-black/20 px-4 py-3">
-              <GlobeIcon className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400/70" />
-              <input
-                aria-label="Share link"
-                readOnly
-                value={url}
-                placeholder="Assigning share link…"
-                onFocus={(event) => event.currentTarget.select()}
-                className="min-w-0 flex-1 truncate bg-transparent font-mono text-[11px] text-zinc-400 outline-none placeholder:text-zinc-500"
-              />
-              <button
-                type="button"
-                onClick={() => void handleCopyLink()}
-                disabled={!url || copying}
-                title="Copy the share link"
-                className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20 disabled:opacity-40"
-              >
-                {copying ? (
-                  <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
-                ) : copyResult === "copied" ? (
-                  <CheckIcon className="h-3.5 w-3.5" />
-                ) : (
-                  <CopyIcon className="h-3.5 w-3.5" />
-                )}
-                {copyResult === "copied" ? "Copied" : "Copy"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowQr((v) => !v)}
-                aria-expanded={showQr}
-                title={showQr ? "Hide QR code" : "Show QR code"}
-                className={`flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors ${
-                  showQr
-                    ? "border-cyan-400/40 bg-cyan-400/15 text-cyan-200"
-                    : "border-white/[0.1] bg-white/[0.03] text-zinc-300 hover:border-cyan-400/40 hover:text-cyan-300"
-                }`}
-              >
-                <LinkIcon className="h-3.5 w-3.5" />
-                QR
-              </button>
-            </div>
-            {copyResult && (
-              <p
-                role="status"
-                className={`border-t border-white/[0.06] px-4 py-2 text-[11px] ${
-                  copyResult === "copied" ? "text-cyan-300" : "text-amber-300"
-                }`}
-              >
-                {copyResult === "failed"
-                  ? "Copy failed. Select the link above to copy it manually."
-                  : privacy && !privacy.isPublic
-                  ? "Copied. Visitors cannot open this link until you make it public."
-                  : "Link copied — ready to share."}
-              </p>
-            )}
-
-            {showQr && (
-              <div className="flex flex-col items-center border-t border-white/[0.06] px-4 py-4">
-                <ShareQr value={url} />
-                <p className="mt-2 text-[11px] text-zinc-500">
-                  Scan to open this public {subjectLabel}
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* Owner action — jump back into the editor for this project. */}
-          {privacy && project && (
-            <a
-              href={`/d-code/${project.id}`}
-              className="flex w-full items-center justify-center gap-2 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-6 py-3 text-sm font-semibold text-zinc-200 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+            {/* 05 — PLATFORM VARIANTS */}
+            <section
+              ref={variantsRef}
+              aria-labelledby="share-variants"
+              className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5"
             >
-              <PenIcon className="h-4 w-4" />
-              Edit in D-Code
-            </a>
-          )}
-
-          {/* PRIMARY action — one-tap share */}
-          <button
-            type="button"
-            onClick={() => void handleShareNow()}
-            disabled={sharingNow || !url}
-            className="group flex w-full flex-col items-center justify-center gap-1 rounded-2xl bg-gradient-to-b from-cyan-400 to-cyan-500 px-6 py-4 text-[#06202a] shadow-lg shadow-cyan-500/25 transition-all hover:from-cyan-300 hover:to-cyan-400 hover:shadow-cyan-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <span className="flex items-center gap-2 text-base font-bold">
-              {sharingNow ? (
-                <LoaderIcon className="h-5 w-5 animate-spin" />
-              ) : (
-                <ShareIcon className="h-5 w-5" />
-              )}
-              {shareNowLabel}
-            </span>
-            <span className="text-[11px] font-medium opacity-75">
-              {canDeviceShare
-                ? "Opens your device's share sheet"
-                : lastApp
-                ? `Opens your ${lastApp.name} composer, prefilled`
-                : "Pick an app below — remembered for next time"}
-            </span>
-          </button>
-
-          {/* Quick social export — one tap opens the app intent directly. */}
-          <div>
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-              Quick share
-            </p>
-            <div className="grid grid-cols-3 gap-2">
-              {(["x", "linkedin", "whatsapp"] as const).map((appId) => {
-                const app = SHARE_APP_MAP[appId];
-                return (
-                  <button
-                    key={appId}
-                    type="button"
-                    onClick={() => handleQuickShare(appId)}
-                    disabled={!url}
-                    title={`Open ${app.name} with this draft prefilled`}
-                    className="flex min-h-[3.5rem] flex-col items-center justify-center gap-1 rounded-2xl border p-2 transition-all hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-40"
-                    style={{
-                      borderColor: `${app.accent}55`,
-                      backgroundColor: `${app.badge}14`,
-                      color: app.accent,
-                    }}
-                  >
-                    <span className="text-[12px] font-bold">{app.name}</span>
-                    <span className="text-[9px] font-semibold uppercase tracking-wide opacity-70">
-                      Direct
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Meta export — Instagram + Facebook, Standard or Direct API Pro. */}
-          <MetaExportCards
-            draft={draft}
-            onCustomize={(appId) => setSelectedApp(appId)}
-            publicImageUrl={media?.publicImageUrl}
-          />
-
-          {/* Owner privacy controls — hidden for plain visitors, who never
-              see this prop at all. A private project still renders the full
-              hub for its owner; this row is how they publish/revoke. */}
-          {privacy && (
-            <div
-              className={`flex items-center gap-3 rounded-2xl border px-3.5 py-3 ${
-                privacy.isPublic
-                  ? "border-cyan-400/20 bg-cyan-400/[0.06]"
-                  : "border-amber-400/25 bg-amber-400/[0.07]"
-              }`}
-            >
-              <span
-                className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg ${
-                  privacy.isPublic
-                    ? "bg-cyan-400/15 text-cyan-300"
-                    : "bg-amber-400/15 text-amber-300"
-                }`}
-              >
-                {privacy.isPublic ? (
-                  <GlobeIcon className="h-3.5 w-3.5" />
-                ) : (
-                  <LockIcon className="h-3.5 w-3.5" />
-                )}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-[11px] font-semibold text-zinc-100">
-                  {privacy.isPublic
-                    ? "Public — anyone with the link can view"
-                    : "Private — only you can open this link"}
-                </p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">
-                  {privacy.isPublic
-                    ? "Making it private revokes visitor access instantly; your Share Hub keeps working."
-                    : "Everyone else sees “link is private”. Make it public to activate this link."}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => privacy.onToggle(!privacy.isPublic)}
-                disabled={privacy.busy}
-                className={`flex flex-shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition-all disabled:opacity-50 ${
-                  privacy.isPublic
-                    ? "border border-white/[0.1] bg-white/[0.03] text-zinc-300 hover:border-zinc-600 hover:text-white"
-                    : "bg-cyan-500 text-[#06202a] shadow-lg shadow-cyan-500/20 hover:bg-cyan-400"
-                }`}
-              >
-                {privacy.busy ? (
-                  <LoaderIcon className="h-3 w-3 animate-spin" />
-                ) : privacy.isPublic ? (
-                  <LockIcon className="h-3 w-3" />
-                ) : (
-                  <GlobeIcon className="h-3 w-3" />
-                )}
-                {privacy.isPublic ? "Make private" : "Make public"}
-              </button>
-            </div>
-          )}
-
-          {management && (
-            <div>
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-                Manage link
-              </p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={management.onRegenerate}
-                  disabled={management.busy !== null || !management.canManage}
-                  title="Generate a new link — the old one stops working"
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5 text-xs font-medium text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {management.busy === "regenerate" ? (
-                    <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <RefreshIcon className="h-3.5 w-3.5" />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <SectionHeading id="share-variants" step="05 · Platform variant" title={`${provider.name} copy`} />
+                <div className="flex items-center gap-3">
+                  {variants[active] !== undefined && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVariants((all) => {
+                          const next = { ...all };
+                          delete next[active];
+                          return next;
+                        })
+                      }
+                      className="text-[11px] text-zinc-500 hover:text-zinc-200"
+                    >
+                      Reset to master
+                    </button>
                   )}
-                  Regenerate slug
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (confirmingRevoke) {
-                      management.onRevoke();
-                      setConfirmingRevoke(false);
-                    } else {
-                      setConfirmingRevoke(true);
-                    }
-                  }}
-                  disabled={management.busy !== null || !management.canManage}
-                  title="Take the project private and permanently kill this link"
-                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                    confirmingRevoke
-                      ? "border-red-400/50 bg-red-500/15 text-red-200"
-                      : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:border-red-400/40 hover:text-red-300"
-                  }`}
-                >
-                  {management.busy === "revoke" ? (
-                    <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <TrashIcon className="h-3.5 w-3.5" />
-                  )}
-                  {confirmingRevoke ? "Click again to revoke" : "Revoke link"}
-                </button>
-              </div>
-              <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-600">
-                Regenerating keeps the project public under a new link.
-                Revoking makes it private and the current link can never work
-                again.
-              </p>
-            </div>
-          )}
-
-          {/* App grid — each tile opens that app's composer (full
-              customization: title, caption, tags, image picker). */}
-          <div ref={gridRef}>
-            <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-              Share to…
-            </p>
-            <div className="grid grid-cols-3 gap-2 sm:grid-cols-3">
-              {SHARE_APPS.map((app) => (
-                <button
-                  key={app.id}
-                  type="button"
-                  onClick={() => setSelectedApp(app.id)}
-                  className={`group flex min-h-[4.5rem] flex-col items-center justify-center gap-1.5 rounded-2xl border bg-white/[0.02] p-2 transition-all hover:border-cyan-400/40 hover:bg-white/[0.05] hover:shadow-lg hover:shadow-cyan-500/[0.07] ${
-                    prefs.destination === app.id
-                      ? "border-cyan-400/35"
-                      : "border-white/[0.08]"
-                  }`}
-                >
                   <span
-                    className="flex h-9 w-9 items-center justify-center rounded-xl text-sm font-bold"
-                    style={{
-                      backgroundColor: `${app.badge}26`,
-                      color: app.accent,
-                      boxShadow: `0 0 0 1px ${app.accent}55`,
-                    }}
+                    aria-live="polite"
+                    className={`text-[11px] ${overLimit ? "font-semibold text-red-300" : "text-zinc-600"}`}
                   >
-                    {app.name.charAt(0)}
+                    {variantText.length}
+                    {provider.textLimit ? ` / ${provider.textLimit}` : " chars"}
                   </span>
-                  <span className="max-w-full truncate text-[11px] font-medium text-zinc-300 group-hover:text-white">
-                    {app.name}
+                </div>
+              </div>
+              <textarea
+                value={variantText}
+                onChange={(event) => setVariants((all) => ({ ...all, [active]: event.target.value }))}
+                rows={4}
+                aria-label={`${provider.name} copy`}
+                className={`w-full resize-y rounded-xl border bg-black/20 p-3 text-sm leading-relaxed text-zinc-100 outline-none transition-colors ${
+                  overLimit ? "border-red-400/50 focus:border-red-400/70" : "border-white/[0.08] focus:border-cyan-400/40"
+                }`}
+              />
+              {overLimit && (
+                <p role="alert" className="mt-1.5 text-[11px] text-red-300">
+                  Over {provider.name}'s {provider.textLimit}-character limit — trim before opening the composer.
+                </p>
+              )}
+            </section>
+
+            {/* 06 — PREVIEW */}
+            <section aria-labelledby="share-preview" className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+              <SectionHeading id="share-preview" step="06 · Preview" title={`As it appears on ${provider.name}`} />
+              <div className="rounded-xl border border-white/[0.08] bg-black/25 p-4">
+                <div className="mb-3 flex items-center gap-2.5">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-400/15 text-xs font-bold text-cyan-300">
+                    D
                   </span>
-                  {prefs.destination === app.id && (
-                    <span className="text-[9px] font-semibold uppercase tracking-wide text-cyan-400/80">
-                      Last used
-                    </span>
+                  <div>
+                    <p className="text-xs font-medium text-zinc-200">DashyCore</p>
+                    <p className="text-[10px] text-zinc-600">Draft · {provider.name}</p>
+                  </div>
+                </div>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">
+                  {variantText || "Your post preview appears here."}
+                </p>
+                {draft.imageDataUrl && (
+                  <div className="relative mt-3 h-40 w-full max-w-xs overflow-hidden rounded-lg border border-white/[0.08]">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={draft.imageDataUrl} alt="Attached media preview" className="absolute inset-0 h-full w-full object-cover" />
+                  </div>
+                )}
+                <p className="mt-3 flex items-center gap-1.5 border-t border-white/[0.06] pt-2.5 text-[10px] uppercase tracking-wider text-zinc-600">
+                  <LinkIcon className="h-3 w-3" />
+                  {published ? "Public link attached" : "No public link yet — publish below"}
+                  <span className="ml-auto normal-case tracking-normal">Preview only · nothing has been posted</span>
+                </p>
+              </div>
+            </section>
+
+            {/* 07 — PUBLISH */}
+            <section aria-labelledby="share-publish" className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+              <SectionHeading
+                id="share-publish"
+                step="07 · Publish"
+                title="Real link, honest actions"
+                hint="Published means the backend confirmed it — nothing less."
+              />
+
+              {/* Link status card */}
+              <div
+                className={`rounded-xl border ${
+                  published ? "border-cyan-400/25 bg-cyan-400/[0.05]" : "border-amber-400/25 bg-amber-400/[0.05]"
+                }`}
+              >
+                <div className="flex items-center gap-3 px-4 py-3">
+                  <span
+                    className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg ${
+                      published ? "bg-cyan-400/15 text-cyan-300" : "bg-amber-400/15 text-amber-300"
+                    }`}
+                  >
+                    {published ? <GlobeIcon className="h-4 w-4" /> : <LockIcon className="h-4 w-4" />}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-zinc-100">
+                      {published
+                        ? "Published — public link is live"
+                        : source.type === "dcode_project"
+                          ? "Not published — the project is private"
+                          : "Not published — this image has no public link yet"}
+                    </p>
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">
+                      {published
+                        ? "Anyone with the link can view it. Copy it or hand it to a platform below."
+                        : "Create the public link first — platform posts need a URL that actually works."}
+                    </p>
+                  </div>
+                  {!published && (
+                    <button
+                      type="button"
+                      onClick={() => void handlePublish()}
+                      disabled={publishBusy !== null}
+                      className="flex h-9 flex-shrink-0 items-center gap-1.5 rounded-lg bg-cyan-500 px-3 text-xs font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-colors hover:bg-cyan-400 disabled:opacity-50"
+                    >
+                      {publishBusy === "publish" ? (
+                        <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <GlobeIcon className="h-3.5 w-3.5" />
+                      )}
+                      Publish link
+                    </button>
                   )}
-                </button>
-              ))}
-            </div>
-            <p className="mt-3 flex items-center gap-1.5 text-[11px] leading-relaxed text-zinc-600">
-              <LinkIcon className="h-3.5 w-3.5 flex-shrink-0" />
-              Tapping an app opens a composer to refine title, caption &amp;
-              image first — composers never post for you (only Direct API Pro
-              does, after you confirm).
-            </p>
-          </div>
-        </div>
+                </div>
+
+                {published && shareUrl && (
+                  <>
+                    <div className="flex items-center gap-2 border-t border-white/[0.06] bg-black/20 px-4 py-3">
+                      <input
+                        aria-label="Public share link"
+                        readOnly
+                        value={shareUrl}
+                        onFocus={(event) => event.currentTarget.select()}
+                        className="min-w-0 flex-1 truncate bg-transparent font-mono text-[11px] text-zinc-400 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyLink()}
+                        disabled={copying}
+                        className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20 disabled:opacity-40"
+                      >
+                        {copying ? (
+                          <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                        ) : copyResult === "copied" ? (
+                          <CheckIcon className="h-3.5 w-3.5" />
+                        ) : (
+                          <CopyIcon className="h-3.5 w-3.5" />
+                        )}
+                        {copyResult === "copied" ? "Copied" : "Copy"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowQr((v) => !v)}
+                        aria-expanded={showQr}
+                        className={`flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-semibold transition-colors ${
+                          showQr
+                            ? "border-cyan-400/40 bg-cyan-400/15 text-cyan-200"
+                            : "border-white/[0.1] bg-white/[0.03] text-zinc-300 hover:border-cyan-400/40 hover:text-cyan-300"
+                        }`}
+                      >
+                        QR
+                      </button>
+                      {canDeviceShare && (
+                        <button
+                          type="button"
+                          onClick={() => void handleDeviceShare()}
+                          title="Open your device's share sheet"
+                          className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-white/[0.1] bg-white/[0.03] px-2.5 text-[11px] font-semibold text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                        >
+                          <ShareIcon className="h-3.5 w-3.5" />
+                          Device
+                        </button>
+                      )}
+                    </div>
+                    {copyResult === "failed" && (
+                      <p role="status" className="border-t border-white/[0.06] px-4 py-2 text-[11px] text-amber-300">
+                        Copy failed. Select the link above to copy it manually.
+                      </p>
+                    )}
+                    {showQr && (
+                      <div className="flex flex-col items-center border-t border-white/[0.06] px-4 py-4">
+                        <ShareQr value={shareUrl} />
+                        <p className="mt-2 text-[11px] text-zinc-500">Scan to open the public page</p>
+                      </div>
+                    )}
+                    {source.type === "dcode_project" && (
+                      <div className="flex gap-2 border-t border-white/[0.06] px-4 py-3">
+                        <button
+                          type="button"
+                          onClick={() => void handleRegenerate()}
+                          disabled={publishBusy !== null}
+                          title="Mint a fresh link — the old one stops working"
+                          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[11px] font-medium text-zinc-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-40"
+                        >
+                          {publishBusy === "regenerate" ? (
+                            <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshIcon className="h-3.5 w-3.5" />
+                          )}
+                          Regenerate link
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (confirmingRevoke) void handleUnpublish();
+                            else setConfirmingRevoke(true);
+                          }}
+                          disabled={publishBusy !== null}
+                          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-[11px] font-medium transition-colors disabled:opacity-40 ${
+                            confirmingRevoke
+                              ? "border-red-400/50 bg-red-500/15 text-red-200"
+                              : "border-white/[0.08] bg-white/[0.03] text-zinc-300 hover:border-red-400/40 hover:text-red-300"
+                          }`}
+                        >
+                          {publishBusy === "unpublish" ? (
+                            <LoaderIcon className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <TrashIcon className="h-3.5 w-3.5" />
+                          )}
+                          {confirmingRevoke ? "Click again to revoke" : "Revoke & make private"}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Per-platform action — honest by construction. */}
+              <div className="mt-4">
+                {active === "instagram" || active === "facebook" ? (
+                  <MetaExportCards
+                    draft={{ ...draft, url: shareUrl ?? draft.url }}
+                    onCustomize={(appId) => {
+                      setActive(appId);
+                      variantsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }}
+                    publicImageUrl={studioPublicImageUrl}
+                  />
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-black/15 px-4 py-3.5">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-zinc-100">
+                        {published ? "Ready to share" : "Waiting for the public link"}
+                      </p>
+                      <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">
+                        {published
+                          ? `Opens ${provider.name}'s composer prefilled — you confirm the post there.`
+                          : `Publish the link above, then hand off to ${provider.name}.`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleOpenPlatform}
+                      disabled={!published || overLimit}
+                      className="flex h-10 flex-shrink-0 items-center gap-2 rounded-xl bg-cyan-500 px-4 text-xs font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-colors hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <ArrowUpRightIcon className="h-3.5 w-3.5" />
+                      Open {provider.name}
+                    </button>
+                  </div>
+                )}
+                <p className="mt-3 flex items-center gap-1.5 text-[11px] leading-relaxed text-zinc-600">
+                  <SparklesIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                  Handoffs open the platform with your draft — they are never reported as published.
+                  Direct publishing stays behind explicit confirmation.
+                </p>
+              </div>
+            </section>
+          </>
+        )}
       </div>
-    </>
+    </div>
   );
 }
