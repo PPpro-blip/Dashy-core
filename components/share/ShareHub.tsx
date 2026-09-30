@@ -380,10 +380,19 @@ export function ShareHub({
           >
             Share Hub
           </h2>
-          <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
-            Compose once, hand off to each platform. DashyCore never posts on
-            your behalf.
-          </p>
+          {/* Launched from a project/asset? Say so — never leave the user
+              guessing which source the hub picked up. */}
+          {source && resolved && !showPicker ? (
+            <p className="mt-0.5 truncate text-xs leading-relaxed text-zinc-400">
+              Sharing:{" "}
+              <span className="font-medium text-zinc-200">{resolved.title}</span>
+            </p>
+          ) : (
+            <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+              Compose once, hand off to each platform. DashyCore never posts on
+              your behalf.
+            </p>
+          )}
         </div>
         {onClose && (
           <button
