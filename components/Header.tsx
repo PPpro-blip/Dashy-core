@@ -1,18 +1,20 @@
 "use client";
 
 /**
- * DashyCore v7 — workspace topbar (old peak Dashy style).
+ * DashyCore v7 — workspace topbar.
  *
- * - Left: "WORKSPACE" breadcrumb + live session title
- * - Right: subtle "AI ready" pill, DASH-* model selector, user avatar chip
+ * - Mobile: [ ☰ ] [ page title ] [ contextual controls ] — nothing more.
+ * - Left: "WORKSPACE" breadcrumb (large screens) + live session title
+ * - Right: subtle "AI ready" pill + DASH-* model selector
  * - Accepts an optional `sessionTitle` prop (layout passes "New Chat" /
  *   "Settings"); the chat page updates the title live via the
  *   `dashy:chat-title` event.
+ *
+ * Account and Settings live in the sidebar — exactly once, at the bottom —
+ * so the header never becomes a second navigation surface.
  */
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
 import { checkWorkerStatus } from "@/lib/chat-client";
 import { EVENTS } from "@/lib/conversations";
 import { MODELS, getModelById } from "@/lib/models";
@@ -27,19 +29,11 @@ interface HeaderProps {
   onOpenNav?: () => void;
 }
 
-function initialsFor(name: string, email: string): string {
-  const source = name.trim() || email.split("@")[0] || "D";
-  const parts = source.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
-  return source.slice(0, 2).toUpperCase();
-}
-
 export function Header({ sessionTitle = "DashyCore", onOpenNav }: HeaderProps) {
   const [title, setTitle] = useState(sessionTitle);
   const [model, setModel] = useState<string>(() => getStoredModel());
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>("checking");
-  const [avatarInitials, setAvatarInitials] = useState("D");
 
   /* Live chat title updates from the chat page. */
   useEffect(() => {
@@ -59,32 +53,6 @@ export function Header({ sessionTitle = "DashyCore", onOpenNav }: HeaderProps) {
     };
     window.addEventListener(MODEL_CHANGED_EVENT, onModelChanged);
     return () => window.removeEventListener(MODEL_CHANGED_EVENT, onModelChanged);
-  }, []);
-
-  /* Avatar initial for the profile chip. */
-  useEffect(() => {
-    let cancelled = false;
-    async function loadUser() {
-      try {
-        const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (cancelled || !user) return;
-        const name =
-          (user.user_metadata?.full_name as string | undefined) ||
-          (user.user_metadata?.name as string | undefined) ||
-          user.email?.split("@")[0] ||
-          "Dashy user";
-        setAvatarInitials(initialsFor(name, user.email ?? ""));
-      } catch {
-        // Keep the default initial.
-      }
-    }
-    void loadUser();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   /* Subtle AI-ready pill backed by a real reachability check. */
@@ -226,16 +194,6 @@ export function Header({ sessionTitle = "DashyCore", onOpenNav }: HeaderProps) {
             </>
           )}
         </div>
-
-        {/* User avatar chip */}
-        <Link
-          href="/settings"
-          title="Open settings"
-          aria-label="Open settings"
-          className="ml-0.5 hidden h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-xs font-semibold text-white transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 sm:flex"
-        >
-          {avatarInitials}
-        </Link>
       </div>
     </header>
   );
