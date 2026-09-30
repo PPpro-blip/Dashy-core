@@ -456,3 +456,24 @@ export const SpeakerOffIcon = (p: IconProps) => (
     <line x1="16" x2="22" y1="9" y2="15" />
   </Svg>
 );
+
+export const MenuIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 6h16M4 12h16M4 18h16" />
+  </Svg>
+);
+
+export const PanelLeftIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <path d="M9 3v18" />
+  </Svg>
+);
+
+export const DotsIcon = (p: IconProps) => (
+  <Svg {...p} filled>
+    <circle cx="5" cy="12" r="1.6" />
+    <circle cx="12" cy="12" r="1.6" />
+    <circle cx="19" cy="12" r="1.6" />
+  </Svg>
+);

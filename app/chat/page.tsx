@@ -39,6 +39,7 @@ import {
   type HistoryMessage,
 } from "@/lib/conversations";
 import { getModelById } from "@/lib/models";
+import { splitThinking } from "@/lib/thinking";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import { AttachmentButton } from "@/components/AttachmentButton";
 import { useToast } from "@/components/Toast";
@@ -49,6 +50,7 @@ import {
   CopyIcon,
   ImageIcon,
   LightbulbIcon,
+  MicIcon,
   RefreshIcon,
   RocketIcon,
   SendIcon,
@@ -715,6 +717,16 @@ export default function ChatPage() {
             />
             <button
               type="button"
+              onClick={() => router.push("/voice")}
+              disabled={isStreaming}
+              aria-label="Open voice mode"
+              title="Voice mode — talk to Dashy"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-30"
+            >
+              <MicIcon className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
               onClick={() => handleGenerateImage()}
               disabled={!input.trim() || isStreaming}
               aria-label="Generate image with <IMG> Engine"
@@ -779,7 +791,12 @@ function MessageRow({
 }) {
   const [copied, setCopied] = useState(false);
   const isUser = message.role === "user";
-  const isAssistantEmpty = !isUser && message.content.length === 0;
+  // Reasoning guard: raw <think>/<thinking> blocks are NEVER rendered — the
+  // user sees a clean high-level status instead (lib/thinking).
+  const { visible, isThinking } = isUser
+    ? { visible: message.content, isThinking: false }
+    : splitThinking(message.content);
+  const isAssistantEmpty = !isUser && visible.length === 0 && !isThinking;
   const isThisStreaming = !isUser && isStreaming;
   const modelLabel = message.model ? getModelById(message.model).label : null;
 
@@ -814,6 +831,14 @@ function MessageRow({
           </div>
         )}
 
+        {/* High-level reasoning status — the raw block itself stays hidden */}
+        {!isUser && isThinking && (
+          <div className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
+            <span className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-zinc-600 border-t-violet-400" />
+            <span className="text-xs text-zinc-500">Thinking…</span>
+          </div>
+        )}
+
         {/* Streaming status line (worker statuses when available) */}
         {!isUser && isThisStreaming && statuses.length > 0 && (
           <div className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
@@ -827,7 +852,7 @@ function MessageRow({
           <div className="rounded-2xl rounded-tr-sm border border-cyan-400/15 bg-cyan-500/10 px-4 py-3 text-sm leading-relaxed text-zinc-100">
             <p className="whitespace-pre-wrap">{message.content}</p>
           </div>
-        ) : isAssistantEmpty ? (
+        ) : isThinking && visible.length === 0 ? null : isAssistantEmpty ? (
           <div className="rounded-2xl rounded-tl-sm border border-white/[0.06] bg-white/[0.02] px-4 py-3">
             <div className="flex min-h-[20px] items-center gap-1.5 py-0.5">
               <div className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-400" />
@@ -858,7 +883,7 @@ function MessageRow({
                   ),
                 }}
               >
-                {message.content}
+                {visible}
               </Markdown>
               {isThisStreaming && (
                 <span className="stream-cursor ml-0.5 inline-block h-4 w-[7px] translate-y-[3px] rounded-[2px] bg-cyan-400/80" />
@@ -870,7 +895,7 @@ function MessageRow({
               <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-[#0d1020]/95 p-0.5 opacity-0 shadow-lg shadow-black/40 transition-opacity group-hover:opacity-100">
                 <button
                   type="button"
-                  onClick={() => onSpeak(message.content)}
+                  onClick={() => onSpeak(visible)}
                   title="Play neural voice"
                   aria-label="Play neural voice"
                   className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-cyan-400/10 hover:text-cyan-300"

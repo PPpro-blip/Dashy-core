@@ -17,6 +17,8 @@ import { createClient } from "@/lib/supabase/client";
 import { SignOutButton } from "@/components/SignOutButton";
 import { useToast } from "@/components/Toast";
 import { DocumentsList } from "@/components/DocumentsList";
+import { ElevenLabsSettings } from "@/components/voice/ElevenLabsSettings";
+import { MetaTokenSettings } from "@/components/share/MetaTokenSettings";
 import { MODELS, getModelById } from "@/lib/models";
 import { getStoredModel, setStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import {
@@ -46,17 +48,7 @@ export default function SettingsPage() {
   const [model, setModel] = useState<string>(() => getStoredModel());
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [docsReloadKey, setDocsReloadKey] = useState(0);
-  const [elevenLabsKey, setElevenLabsKey] = useState("");
   const toast = useToast();
-
-  useEffect(() => {
-    try { setElevenLabsKey(window.localStorage.getItem("dashycore:elevenlabs-key") ?? ""); } catch { /* storage optional */ }
-  }, []);
-
-  const saveElevenLabsKey = (value: string) => {
-    setElevenLabsKey(value);
-    try { window.localStorage.setItem("dashycore:elevenlabs-key", value); } catch { /* best effort */ }
-  };
 
   useEffect(() => {
     let cancelled = false;
@@ -248,23 +240,22 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* ----------------------------- Voice upgrade --------------------------- */}
+      {/* ----------------------------- Voice upgrade ---------------------------
+          The designed ElevenLabs panel (lib/voice-elevenlabs storage keys) —
+          the previous inline field wrote to a key nothing else read. */}
       <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">Voice</h2>
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="text-sm font-medium text-zinc-200">ElevenLabs key</p>
-            <p className="mt-0.5 text-xs text-zinc-500">Optional Upgrade for Custom Voices</p>
-          </div>
-          <input
-            type="password"
-            value={elevenLabsKey}
-            onChange={(event) => saveElevenLabsKey(event.target.value)}
-            placeholder="Optional — keyless neural voice is enabled"
-            aria-label="ElevenLabs API key, optional upgrade for custom voices"
-            className="w-full rounded-lg border border-white/[0.08] bg-black/20 px-3 py-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-cyan-400/50 sm:max-w-xs"
-          />
-        </div>
+        <ElevenLabsSettings />
+      </section>
+
+      {/* ------------------------------ Meta Share -----------------------------
+          Stores the user's own Meta Graph token for the Share Hub's
+          Direct API Pro publishing (Instagram / Facebook). */}
+      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+          Meta Share · Direct API Pro
+        </h2>
+        <MetaTokenSettings />
       </section>
 
       {/* ------------------------------- Memory ------------------------------- */}

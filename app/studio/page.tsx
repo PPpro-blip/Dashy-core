@@ -19,9 +19,9 @@
  *     `pending` / `loading`) in `dashy.media.library` to `error` so they can
  *     be retried or cleared instead of hanging forever.
  *
- * SHARE: every ready Media Library card persists its proxied image, prompt,
- * owner and unique `s_img_*` slug in Supabase before the Share Hub opens.
- * The copied /s/<slug> link therefore works in an incognito browser.
+ * SHARE: every ready card links to THE canonical Share Hub (/share) with
+ * that exact asset pre-selected. Publishing the `s_img_*` public link is an
+ * explicit action inside the hub (Supabase-backed, works in incognito).
  *
  * Video tab is intentionally honest: real AI video needs paid API keys, so it
  * shows a glassmorphism banner pointing at Settings / Image Mode.
@@ -29,10 +29,20 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { proxyPromptUrlFor } from "@/lib/img-engine";
 import { copyText } from "@/lib/clipboard";
-import { shareStudioMedia, studioShareUrl, STUDIO_MEDIA_UPDATED_EVENT, type StudioMediaAsset } from "@/lib/studio";
-import { ShareHub, type ShareHubMedia } from "@/components/share/ShareHub";
+import {
+  ASPECT_OPTIONS,
+  aspectForTile,
+  buildDirectUrl,
+  downloadTileImage,
+  loadLibrary,
+  saveLibrary,
+  type AspectKey,
+  type Tile,
+} from "@/lib/studio-tiles";
+import { StudioTabs } from "@/components/studio/StudioTabs";
 import { useToast } from "@/components/Toast";
 import {
   SparklesIcon,
@@ -46,36 +56,11 @@ import {
   ShareIcon,
 } from "@/components/icons";
 
-export interface Tile {
-  id: string;
-  prompt: string;
-  url?: string;
-  status: "generating" | "ready" | "error";
-  createdAt: number;
-  /** Generation width/height in px — baked into the direct Pollinations URL. */
-  width: number;
-  height: number;
-  seed?: string | number;
-  /** True when the displayed URL is a same-origin /api/img-proxy render. */
-  viaProxy?: boolean;
-}
-
 /** Hard 50-second ceiling per Turbo generation: the proxy-first lane
  * waits up to 45s upstream, leaving a 5s+ window for the direct buster. */
 const STUDIO_TIMEOUT_MS = 50_000;
 
-/** localStorage-backed Media Library (survives reloads). */
-const LIBRARY_KEY = "dashy.media.library";
-const LIBRARY_LIMIT = 60;
-
 type StudioMode = "image" | "video";
-
-const ASPECT_OPTIONS = {
-  "1:1": { width: 1024, height: 1024 },
-  "16:9": { width: 1280, height: 720 },
-  "9:16": { width: 720, height: 1280 },
-} as const;
-type AspectKey = keyof typeof ASPECT_OPTIONS;
 
 const PRESET_PROMPTS = [
   "Futuristic cyberpunk workstation glowing in neon blue and violet",
@@ -85,115 +70,8 @@ const PRESET_PROMPTS = [
   "Minimalist obsidian logo emblem with metallic cyan reflections",
 ];
 
-/**
- * Fast single-model Turbo URL. The endpoint answers with raw image bytes
- * (JPEG/PNG), never JSON — perfect for a plain browser `Image()` preload.
- */
-function buildDirectUrl(
-  prompt: string,
-  seed: number,
-  width: number,
-  height: number
-): string {
-  return `https://image.pollinations.ai/prompt/${encodeURIComponent(
-    prompt
-  )}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=turbo`;
-}
-
-/**
- * Restores one stored entry into a Tile. Tolerates legacy media-library
- * shapes from older Studio builds (string ids, video assets, missing
- * dimensions, legacy `loading` status).
- *
- * SANITIZER: only a stored `ready` status with a usable URL restores as
- * ready. Anything stuck in `generating` / `pending` / `loading` (or without
- * a URL) becomes a retryable `error` tile so legacy hung jobs never hang the
- * library again.
- */
-function normalizeStoredTile(entry: unknown): Tile | null {
-  if (!entry || typeof entry !== "object") return null;
-  const item = entry as Record<string, unknown>;
-  // Older libraries also stored video assets — images only here.
-  if (item.type === "video") return null;
-  const prompt = typeof item.prompt === "string" ? item.prompt.trim() : "";
-  if (!prompt) return null;
-
-  const storedUrl = typeof item.url === "string" ? item.url : "";
-  const storedStatus = typeof item.status === "string" ? item.status : "";
-  const ready = Boolean(storedUrl) && storedStatus === "ready";
-  const url = ready ? storedUrl : undefined;
-
-  return {
-    id:
-      typeof item.id === "string" || typeof item.id === "number"
-        ? String(item.id)
-        : `${typeof item.createdAt === "number" ? item.createdAt : Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2, 8)}`,
-    prompt,
-    url,
-    status: ready ? "ready" : "error",
-    createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(),
-    width:
-      typeof item.width === "number" && item.width > 0 ? item.width : 1024,
-    height:
-      typeof item.height === "number" && item.height > 0 ? item.height : 1024,
-    seed:
-      typeof item.seed === "number" || typeof item.seed === "string"
-        ? item.seed
-        : undefined,
-    viaProxy: ready ? url!.startsWith("/api/img-proxy") : undefined,
-  };
-}
-
-/** Loads the Media Library from localStorage (best effort, sanitized). */
-function loadLibrary(): Tile[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(LIBRARY_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const tiles: Tile[] = [];
-    for (const entry of parsed) {
-      const tile = normalizeStoredTile(entry);
-      if (tile) tiles.push(tile);
-    }
-    return tiles.slice(0, LIBRARY_LIMIT);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Persists finished tiles (ready/error). Optimistic `generating` tiles stay
- * transient — a refresh mid-generation simply drops them, and the mount
- * sanitizer converts any legacy stuck entries to `error`.
- */
-function saveLibrary(tiles: Tile[]): void {
-  if (typeof window === "undefined") return;
-  try {
-    const persistable = tiles
-      .filter((tile) => tile.status !== "generating")
-      .slice(0, LIBRARY_LIMIT);
-    window.localStorage.setItem(LIBRARY_KEY, JSON.stringify(persistable));
-    window.dispatchEvent(new CustomEvent(STUDIO_MEDIA_UPDATED_EVENT));
-  } catch {
-    // Storage quota exceeded — best effort.
-  }
-}
-
-/** Maps a tile back to its aspect key (remix preserves the tile's shape). */
-function aspectForTile(tile: Tile): AspectKey {
-  for (const [key, size] of Object.entries(ASPECT_OPTIONS) as Array<
-    [AspectKey, { width: number; height: number }]
-  >) {
-    if (size.width === tile.width && size.height === tile.height) return key;
-  }
-  return "1:1";
-}
-
 export default function StudioPage() {
+  const router = useRouter();
   const [mode, setMode] = useState<StudioMode>("image");
   const [prompt, setPrompt] = useState("");
   const [aspect, setAspect] = useState<AspectKey>("1:1");
@@ -201,9 +79,6 @@ export default function StudioPage() {
   const [hydrated, setHydrated] = useState(false);
   const [busy, setBusy] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [sharingId, setSharingId] = useState<string | null>(null);
-  /** A Share Hub only opens after Supabase has persisted the public slug. */
-  const [share, setShare] = useState<{ id: string; url: string; media: ShareHubMedia } | null>(null);
   const toast = useToast();
 
   // Keep track of active image objects and timers for cleanup on unmount
@@ -384,10 +259,6 @@ export default function StudioPage() {
     setTiles((current) => current.filter((tile) => tile.status !== "error"));
   };
 
-  const clearAll = () => {
-    setTiles([]);
-  };
-
   const copyPrompt = (id: string, text: string) => {
     // copyText() has a textarea fallback — a denied clipboard permission can
     // never throw an unhandled rejection here.
@@ -398,56 +269,15 @@ export default function StudioPage() {
     });
   };
 
-  const downloadImage = (url: string, promptText: string) => {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dashy-studio-${promptText.slice(0, 24).replace(/[^a-z0-9]/gi, "-").toLowerCase() || "image"}.png`;
-    a.target = "_blank";
-    a.rel = "noreferrer";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  };
-
   const failedCount = tiles.filter((t) => t.status === "error").length;
 
   /**
-   * Persist a generated proxied image as a real public asset before opening
-   * Share Hub. The copied `/s/s_img_*` URL is database-backed, so it works
-   * in an incognito browser rather than being a local encoded render recipe.
+   * Opens THE canonical Share Hub with this exact asset pre-selected.
+   * Publishing the public /s/<slug> link is an explicit action in the hub.
    */
-  const openShare = async (tile: Tile) => {
-    if (tile.status !== "ready" || !tile.url || sharingId) return;
-    setSharingId(tile.id);
-    try {
-      const absoluteImageUrl = new URL(tile.url, window.location.origin).toString();
-      const asset: StudioMediaAsset = {
-        id: tile.id,
-        title: tile.prompt.replace(/\s+/g, " ").trim().slice(0, 200) || "Untitled Studio image",
-        prompt: tile.prompt,
-        imageUrl: absoluteImageUrl,
-        createdAt: new Date(tile.createdAt).toISOString(),
-      };
-      const shared = await shareStudioMedia(asset);
-      const url = studioShareUrl(shared.slug);
-      const media: ShareHubMedia = {
-        imageUrl: tile.url,
-        publicImageUrl: absoluteImageUrl,
-        title: shared.title,
-        caption: shared.prompt,
-        fileName: `dashy-studio-${tile.id}.jpg`,
-      };
-      await copyText(url);
-      setShare({ id: tile.id, url, media });
-      toast.success("Public link copied", "Anyone with the link can view this Studio image and its prompt.");
-    } catch (error) {
-      toast.error(
-        "Sharing failed",
-        error instanceof Error ? error.message : "Could not create a public Studio share."
-      );
-    } finally {
-      setSharingId(null);
-    }
+  const openShare = (tile: Tile) => {
+    if (tile.status !== "ready" || !tile.url) return;
+    router.push(`/share?sourceType=studio_asset&sourceId=${encodeURIComponent(tile.id)}`);
   };
 
   return (
@@ -483,6 +313,9 @@ export default function StudioPage() {
             </div>
           </div>
         </header>
+
+        {/* Generate | Library — real routes shared with the sidebar */}
+        <StudioTabs />
 
         {/* Image / Video mode tabs */}
         <div
@@ -639,12 +472,12 @@ export default function StudioPage() {
               </div>
             </section>
 
-            {/* Gallery Controls */}
+            {/* Gallery Controls — latest results only; the Library tab has everything */}
             {tiles.length > 0 && (
               <div className="flex flex-wrap items-center justify-between gap-4 pt-2">
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-                    Media Library
+                    Latest results
                   </h2>
                   <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-xs text-zinc-400">
                     {tiles.length}
@@ -662,13 +495,13 @@ export default function StudioPage() {
                       Clear Failed ({failedCount})
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={clearAll}
-                    className="text-xs text-zinc-500 transition hover:text-zinc-300"
+                  <Link
+                    href="/studio/library"
+                    className="flex items-center gap-1 text-xs font-medium text-cyan-300 transition hover:text-cyan-200"
                   >
-                    Clear All
-                  </button>
+                    Open Library
+                    <ArrowUpRightIcon className="h-3 w-3" />
+                  </Link>
                 </div>
               </div>
             )}
@@ -686,7 +519,7 @@ export default function StudioPage() {
               </div>
             ) : (
               <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-                {tiles.map((tile) => (
+                {tiles.slice(0, 6).map((tile) => (
                   <article
                     key={tile.id}
                     className="group relative flex flex-col overflow-hidden rounded-3xl border border-white/[0.08] bg-white/[0.025] shadow-xl shadow-black/30 transition-all hover:border-cyan-400/30 hover:bg-white/[0.04]"
@@ -707,8 +540,7 @@ export default function StudioPage() {
                             <div className="flex justify-end gap-2">
                               <button
                                 type="button"
-                                onClick={() => void openShare(tile)}
-                                disabled={sharingId === tile.id}
+                                onClick={() => openShare(tile)}
                                 title="Share image"
                                 aria-label="Share image"
                                 className="flex h-8 w-8 items-center justify-center rounded-xl bg-black/60 text-white backdrop-blur-md transition hover:bg-violet-500 hover:text-white"
@@ -725,7 +557,7 @@ export default function StudioPage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => downloadImage(tile.url!, tile.prompt)}
+                                onClick={() => downloadTileImage(tile.url!, tile.prompt)}
                                 title="Download image"
                                 className="flex h-8 w-8 items-center justify-center rounded-xl bg-black/60 text-white backdrop-blur-md transition hover:bg-cyan-500 hover:text-black"
                               >
@@ -798,8 +630,7 @@ export default function StudioPage() {
                       {tile.status === "ready" && tile.url && (
                         <button
                           type="button"
-                          onClick={() => void openShare(tile)}
-                          disabled={sharingId === tile.id}
+                          onClick={() => openShare(tile)}
                           title="Share image"
                           aria-label="Share image"
                           className="ml-2 flex h-7 flex-shrink-0 items-center gap-1 rounded-lg border border-cyan-400/25 bg-cyan-400/[0.08] px-2 text-[11px] font-semibold text-cyan-300 shadow-[0_0_12px_-4px] shadow-cyan-400/40 transition hover:border-violet-400/50 hover:bg-violet-500/15 hover:text-violet-200"
@@ -829,15 +660,6 @@ export default function StudioPage() {
         )}
       </div>
 
-      {share && (
-        <ShareHub
-          key={share.id}
-          onClose={() => setShare(null)}
-          project={null}
-          shareUrl={share.url}
-          media={share.media}
-        />
-      )}
     </div>
   );
 }
