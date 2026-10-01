@@ -18,7 +18,7 @@ export default function KnowledgePage() {
   const [reloadKey, setReloadKey] = useState(0);
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
+    <div className="mx-auto w-full max-w-3xl px-6 py-8">
       <h1 className="text-2xl font-semibold tracking-tight text-white">Knowledge</h1>
       <p className="mt-1 text-sm text-zinc-500">
         Everything Dashy has learned from your documents — chunked, embedded
@@ -26,7 +26,7 @@ export default function KnowledgePage() {
       </p>
 
       {/* Upload — the same real flow as the chat composer attachment. */}
-      <section className="mt-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 sm:p-6">
+      <section className="mt-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
           Add to memory
         </h2>

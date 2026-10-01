@@ -56,7 +56,6 @@ import {
 import { DCodeTerminal } from "@/components/dcode/DCodeTerminal";
 import { MonacoEditor } from "@/components/dcode/MonacoEditor";
 import { useToast } from "@/components/Toast";
-import { useOptionalShareHub } from "@/components/share/ShareHubProvider";
 import {
   BracesIcon,
   CheckIcon,
@@ -70,7 +69,6 @@ import {
   LoaderIcon,
   PaperclipIcon,
   PenIcon,
-  PanelLeftIcon,
   PlusIcon,
   ShareIcon,
   TerminalIcon,
@@ -452,10 +450,6 @@ function BinaryAssetPreview({ file }: { file: DCodeFile }) {
 export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorkspaceProps) {
   const router = useRouter();
   const toast = useToast();
-  /** Null on the public share viewer, which renders outside the app shell. */
-  const shareHub = useOptionalShareHub();
-  /** Mobile: the file tree is a slide-over instead of a permanent column. */
-  const [treeOpen, setTreeOpen] = useState(false);
 
   /* ------------------------------ core state ----------------------------- */
 
@@ -1114,30 +1108,23 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
 
   /* --------------------------------- share -------------------------------- */
 
-  /**
-   * The ONE share entry point for a project: opens the canonical Share Hub
-   * with THIS project already selected. A scratch draft is persisted first
-   * so there is a real row (and a real owner) to share.
-   */
+  const shareUrl = useMemo(() => {
+    if (!shareSlug || typeof window === "undefined") return null;
+    return `${window.location.origin}/d-code/share/${shareSlug}`;
+  }, [shareSlug]);
+
   const handleShare = useCallback(async () => {
-    if (savingShare || !shareHub) return;
+    if (savingShare) return;
     setSavingShare(true);
     try {
+      // Persist a new workspace first, then bind the hub to this exact row.
       let id = latestRef.current.projectId;
       if (!id) {
         await persist("manual");
         id = latestRef.current.projectId;
-        if (!id) throw new Error("Save the project before sharing.");
       }
-      shareHub.open({
-        kind: "dcode-project",
-        id,
-        title: latestRef.current.title,
-        language: latestRef.current.files[0]?.language ?? "plaintext",
-        fileCount: latestRef.current.files.length,
-        isPublic,
-        shareSlug,
-      });
+      if (!id) throw new Error("Save the project before sharing.");
+      router.push(`/share?sourceType=dcode_project&sourceId=${encodeURIComponent(id)}`);
     } catch (error) {
       toast.show({
         type: "error",
@@ -1147,7 +1134,29 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
     } finally {
       setSavingShare(false);
     }
-  }, [isPublic, persist, savingShare, shareHub, shareSlug, toast]);
+  }, [persist, router, savingShare, toast]);
+
+  const handleUnshare = useCallback(async () => {
+    if (!projectId || savingShare) return;
+    setSavingShare(true);
+    try {
+      await toggleProjectPublic(projectId, false);
+      setIsPublic(false);
+      toast.show({
+        type: "info",
+        title: "Project is private",
+        message: "The share link no longer works.",
+      });
+    } catch (error) {
+      toast.show({
+        type: "error",
+        title: "Could not update sharing",
+        message: error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      setSavingShare(false);
+    }
+  }, [projectId, savingShare, toast]);
 
   /* --------------------------------- github ------------------------------- */
 
@@ -1345,22 +1354,11 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   /* --------------------------------- render ------------------------------- */
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] [height:calc(100dvh-4rem)] flex-col overflow-hidden">
-      {/* Top bar: file tree toggle (mobile) + title + status + ONE share action */}
-      <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] bg-navy/60 px-3 py-2 sm:gap-3 sm:px-4 sm:py-2.5">
-        {files.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setTreeOpen(true)}
-            aria-label="Show files"
-            className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.02] text-zinc-400 transition-colors hover:text-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 lg:hidden"
-          >
-            <PanelLeftIcon className="h-4 w-4" />
-          </button>
-        )}
-
+    <div className="flex h-[calc(100vh-4rem)] flex-col overflow-hidden">
+      {/* Top bar: editable title + save status + share */}
+      <div className="flex flex-shrink-0 items-center gap-3 border-b border-white/[0.06] bg-navy/60 px-4 py-2.5">
         {readOnly ? (
-          <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-white">{title}</h1>
+          <h1 className="min-w-0 truncate text-sm font-semibold text-white">{title}</h1>
         ) : (
           <input
             type="text"
@@ -1369,12 +1367,12 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             placeholder="Project title"
             aria-label="Project title"
             spellCheck={false}
-            className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm font-semibold text-white outline-none transition-colors hover:border-white/[0.08] hover:bg-white/[0.03] focus:border-cyan-400/40 focus:bg-white/[0.03] sm:max-w-xs sm:flex-none"
+            className="min-w-0 max-w-xs flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-sm font-semibold text-white outline-none transition-colors hover:border-white/[0.08] hover:bg-white/[0.03] focus:border-cyan-400/40 focus:bg-white/[0.03]"
           />
         )}
 
-        <div className="ml-auto flex flex-shrink-0 items-center gap-1.5 sm:gap-2">
-          <span className="hidden items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 sm:flex">
+        <div className="ml-auto flex items-center gap-2">
+          <span className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400">
             {statusLabel()}
           </span>
 
@@ -1384,7 +1382,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
               onClick={() => void persist("manual")}
               disabled={saveState === "saving"}
               title="Save this project to your workspace (⌘S)"
-              className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/20 disabled:opacity-50"
             >
               Save
             </button>
@@ -1402,60 +1400,62 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 onClick={() => setTerminalOpen((open) => !open)}
                 title="Toggle terminal (Ctrl + `)"
                 aria-label="Toggle terminal"
-                className={`flex min-h-[36px] items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium transition-colors ${
+                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
                   terminalOpen
                     ? "border-cyan-400/40 bg-cyan-400/10 text-cyan-300"
                     : "border-white/[0.08] bg-white/[0.02] text-zinc-400 hover:border-cyan-400/40 hover:text-cyan-300"
                 }`}
               >
                 <TerminalIcon className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Terminal</span>
+                Terminal
               </button>
               <button
                 type="button"
                 onClick={openGitHubModal}
                 title="Connect GitHub — import or link a repository"
                 aria-label="Connect GitHub"
-                className="flex min-h-[36px] items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+                className="flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
               >
                 <GithubIcon
                   className={`h-3.5 w-3.5 ${
                     githubConnected ? "text-cyan-300" : "text-zinc-500"
                   }`}
                 />
-                <span className="hidden md:inline">GitHub</span>
+                Connect GitHub
               </button>
-
-              {/* Visibility is information here; it is changed in the Share Hub. */}
-              <span
-                className={`hidden min-h-[36px] items-center gap-1.5 rounded-lg border px-2.5 text-[11px] font-medium md:flex ${
-                  isPublic
-                    ? "border-cyan-400/25 bg-cyan-400/10 text-cyan-300"
-                    : "border-white/[0.08] bg-white/[0.02] text-zinc-500"
-                }`}
-              >
-                {isPublic ? (
-                  <GlobeIcon className="h-3 w-3" />
-                ) : (
-                  <LockIcon className="h-3 w-3" />
-                )}
-                {isPublic ? "Public" : "Private"}
-              </span>
-
+              {isPublic && (
+                <button
+                  type="button"
+                  onClick={() => void handleUnshare()}
+                  disabled={savingShare}
+                  title="Make private (revokes the share link)"
+                  aria-label="Make private"
+                  className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200 disabled:opacity-50"
+                >
+                  {savingShare ? (
+                    <LoaderIcon className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <LockIcon className="h-3 w-3" />
+                  )}
+                  Make private
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => void handleShare()}
                 disabled={savingShare}
-                title="Share — opens the Share Hub for this project"
-                aria-label="Share project"
-                className="flex min-h-[36px] items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
+                title={isPublic ? "Copy public link" : "Share — make public & copy link"}
+                aria-label={isPublic ? "Copy public link" : "Share project"}
+                className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-2.5 py-1.5 text-[11px] font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 disabled:opacity-50"
               >
                 {savingShare ? (
                   <LoaderIcon className="h-3 w-3 animate-spin" />
+                ) : isPublic ? (
+                  <GlobeIcon className="h-3 w-3" />
                 ) : (
                   <ShareIcon className="h-3 w-3" />
                 )}
-                Share
+                {isPublic ? "Copy link" : "Share"}
               </button>
             </>
           )}
@@ -1467,22 +1467,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
             otherwise it fills the whole remaining column. */}
         <div className={`flex min-h-0 ${terminalOpen ? "flex-[7]" : "flex-1"}`}>
         {/* File tree */}
-        {/* Backdrop for the mobile/tablet file-tree slide-over */}
-        {treeOpen && (
-          <button
-            type="button"
-            aria-label="Close files"
-            onClick={() => setTreeOpen(false)}
-            className="fixed inset-0 z-40 cursor-default bg-black/60 backdrop-blur-sm lg:hidden"
-          />
-        )}
-        <aside
-          className={`min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/95 lg:flex lg:bg-navy/40 ${
-            treeOpen
-              ? "fixed inset-y-0 left-0 z-50 flex w-64 shadow-2xl shadow-black/60 lg:static lg:z-auto lg:w-52 lg:shadow-none"
-              : "hidden"
-          }`}
-        >
+        <aside className="flex min-h-0 w-52 flex-shrink-0 flex-col border-r border-white/[0.06] bg-navy/40">
           <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
             Files
           </p>
@@ -1530,10 +1515,7 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                     <>
                       <button
                         type="button"
-                        onClick={() => {
-                          handleSelectFile(file.id);
-                          setTreeOpen(false);
-                        }}
+                        onClick={() => handleSelectFile(file.id)}
                         className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
                           isActive
                             ? "bg-cyan-500/10 text-cyan-300"

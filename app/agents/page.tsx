@@ -17,7 +17,6 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
 import { createClient } from "@/lib/supabase/client";
-import { splitThinking } from "@/lib/thinking";
 import {
   ChatClientError,
   sendChatMessage,
@@ -129,7 +128,7 @@ export default function AgentsPage() {
   );
 
   return (
-    <div className="mx-auto flex h-[calc(100vh-4rem)] w-full max-w-3xl flex-col px-4 py-4 [height:calc(100dvh-4rem)] sm:px-6 sm:py-6">
+    <div className="mx-auto flex h-[calc(100vh-4rem)] w-full max-w-3xl flex-col px-6 py-6">
       {/* Hero */}
       <div className="flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -148,7 +147,7 @@ export default function AgentsPage() {
       </div>
 
       {/* Conversation */}
-      <div className="mt-4 min-h-0 flex-1 space-y-4 overflow-y-auto rounded-2xl border border-white/[0.06] bg-white/[0.02] px-3 py-4 sm:mt-6 sm:px-4 sm:py-5">
+      <div className="mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-5">
         {turns.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center px-6 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-cyan-500/10">
@@ -266,7 +265,7 @@ function AgentTurnRow({ turn }: { turn: AgentTurn }) {
                 ),
               }}
             >
-              {splitThinking(turn.content).visible}
+              {turn.content}
             </Markdown>
           </div>
         </div>

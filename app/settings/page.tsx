@@ -17,6 +17,8 @@ import { createClient } from "@/lib/supabase/client";
 import { SignOutButton } from "@/components/SignOutButton";
 import { useToast } from "@/components/Toast";
 import { DocumentsList } from "@/components/DocumentsList";
+import { ElevenLabsSettings } from "@/components/voice/ElevenLabsSettings";
+import { MetaTokenSettings } from "@/components/share/MetaTokenSettings";
 import { MODELS, getModelById } from "@/lib/models";
 import { getStoredModel, setStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import {
@@ -91,17 +93,14 @@ export default function SettingsPage() {
   }, []);
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
+    <div className="mx-auto w-full max-w-3xl px-6 py-8">
       <h1 className="text-2xl font-semibold tracking-tight text-white">Settings</h1>
       <p className="mt-1 text-sm text-zinc-500">
         Manage your profile, preferences, workspace memory and account.
       </p>
 
       {/* ------------------------------- Profile ------------------------------ */}
-      <section
-        id="account"
-        className="mt-8 scroll-mt-20 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 sm:p-6"
-      >
+      <section className="mt-8 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
           Profile
         </h2>
@@ -134,7 +133,7 @@ export default function SettingsPage() {
       </section>
 
       {/* ----------------------------- Preferences ---------------------------- */}
-      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 sm:p-6">
+      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
           Preferences
         </h2>
@@ -241,10 +240,28 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      {/* ----------------------------- Voice upgrade ---------------------------
+          The designed ElevenLabs panel (lib/voice-elevenlabs storage keys) —
+          the previous inline field wrote to a key nothing else read. */}
+      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">Voice</h2>
+        <ElevenLabsSettings />
+      </section>
+
+      {/* ------------------------------ Meta Share -----------------------------
+          Stores the user's own Meta Graph token for the Share Hub's
+          Direct API Pro publishing (Instagram / Facebook). */}
+      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+          Meta Share · Direct API Pro
+        </h2>
+        <MetaTokenSettings />
+      </section>
+
       {/* ------------------------------- Memory ------------------------------- */}
       <section
         id="memory"
-        className="mt-6 scroll-mt-20 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 sm:p-6"
+        className="mt-6 scroll-mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6"
       >
         <div className="flex items-center justify-between gap-4">
           <div>
@@ -271,7 +288,7 @@ export default function SettingsPage() {
       </section>
 
       {/* ----------------------------- Danger Zone ----------------------------- */}
-      <section className="mt-6 rounded-2xl border border-red-500/20 bg-white/[0.02] p-4 sm:p-6">
+      <section className="mt-6 rounded-2xl border border-red-500/20 bg-white/[0.02] p-6">
         <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-red-400/90">
           <AlertIcon className="h-4 w-4" />
           Danger Zone

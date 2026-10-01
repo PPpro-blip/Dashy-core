@@ -432,7 +432,17 @@ export async function getProject(id: string): Promise<DCodeProject | null> {
   return data ? rowToProject(data as DCodeProjectRow) : null;
 }
 
-/** Fetches a public project by its share slug (works for anonymous visitors). */
+/** True for canonical UUID text, so slugs never hit the UUID column. */
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
+
+/**
+ * Fetches a project by share slug. RLS admits public rows for visitors and
+ * the owner's own private row, which lets the owner configure Share Hub.
+ */
 export async function getProjectByShareSlug(
   shareSlug: string
 ): Promise<DCodeProject | null> {
@@ -440,11 +450,57 @@ export async function getProjectByShareSlug(
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
-    .eq("share_slug", shareSlug)
-    .eq("is_public", true)
+    .eq("share_slug", shareSlug.trim().toLowerCase())
     .maybeSingle();
   if (error) throw classError(error);
   return data ? rowToProject(data as DCodeProjectRow) : null;
+}
+
+/**
+ * Resolves either a project UUID or a share slug. If a browser/RLS read is
+ * unavailable, retry through the server route, whose service-role lane is
+ * hard-filtered to public rows.
+ */
+export async function getPublicProject(
+  ref: string
+): Promise<DCodeProject | null> {
+  const key = ref.trim();
+  if (!key) return null;
+
+  let firstError: Error | null = null;
+  if (isUuid(key)) {
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("dcode_projects")
+      .select("*")
+      .eq("id", key)
+      .maybeSingle();
+    if (data) return rowToProject(data as DCodeProjectRow);
+    if (error) firstError = classError(error);
+  }
+
+  try {
+    const bySlug = await getProjectByShareSlug(key);
+    if (bySlug) return bySlug;
+  } catch (error) {
+    firstError = error instanceof Error ? error : firstError;
+  }
+
+  try {
+    const response = await fetch(`/api/share/${encodeURIComponent(key)}`, {
+      cache: "no-store",
+    });
+    if (response.ok) {
+      const row = (await response.json()) as DCodeProjectRow;
+      if (row?.id) return rowToProject(row);
+    }
+    if (response.status === 404 && !firstError) return null;
+  } catch {
+    // Network failure falls through to the original query result.
+  }
+
+  if (firstError) throw firstError;
+  return null;
 }
 
 /** Creates a project for the signed-in user and returns the stored row. */

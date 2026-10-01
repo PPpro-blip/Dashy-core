@@ -12,7 +12,7 @@ export interface DashyModel {
   id: string;
   /** Display name shown in the UI (old peak DASH- style). */
   label: string;
-  /** Compact label for tight surfaces (mobile header chip). */
+  /** Compact label for narrow viewports (header chip on phones). */
   short: string;
   description: string;
   /** Accent color used for icons / dots. */

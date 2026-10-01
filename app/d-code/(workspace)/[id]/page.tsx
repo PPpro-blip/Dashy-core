@@ -61,7 +61,7 @@ export default function DCodeProjectPage() {
 
   if (state.status === "loading") {
     return (
-      <div className="flex h-[calc(100vh-4rem)] [height:calc(100dvh-4rem)] items-center justify-center gap-2 text-zinc-500">
+      <div className="flex h-[calc(100vh-4rem)] items-center justify-center gap-2 text-zinc-500">
         <LoaderIcon className="h-4 w-4 animate-spin text-cyan-400" />
         <span className="text-sm">Loading project…</span>
       </div>

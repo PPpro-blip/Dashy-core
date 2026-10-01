@@ -21,8 +21,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { ChatClientError, sendChatMessage } from "@/lib/chat-client";
 import { getStoredModel } from "@/lib/preferences";
-import Link from "next/link";
-import { ChevronLeftIcon, MicIcon, SquareIcon } from "@/components/icons";
+import { MicIcon, SquareIcon } from "@/components/icons";
 
 type VoicePresetId = "noah" | "james" | "galileo" | "aria" | "nova";
 
@@ -302,16 +301,7 @@ export default function VoicePage() {
   const active = isListening || isSpeaking || isThinking;
 
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-4 py-6 sm:px-6 sm:py-10">
-      {/* Voice is a capability of Chat, not a separate destination. */}
-      <Link
-        href="/chat"
-        className="mb-4 inline-flex min-h-[36px] w-fit items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 text-xs font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-      >
-        <ChevronLeftIcon className="h-3.5 w-3.5" />
-        Back to chat
-      </Link>
-
+    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-6 py-10">
       <div className="flex flex-col items-center">
         {/* Orb */}
         <div className="relative flex h-44 w-44 items-center justify-center">

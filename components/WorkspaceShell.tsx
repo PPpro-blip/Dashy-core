@@ -23,7 +23,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
-import { ShareHubProvider } from "@/components/share/ShareHubProvider";
 import {
   getStoredSidebarCollapsed,
   hasStoredSidebarPreference,
@@ -144,7 +143,6 @@ export function WorkspaceShell({
   }, [drawerOpen, closeDrawer]);
 
   return (
-    <ShareHubProvider>
       <div className="flex min-h-screen w-full overflow-x-hidden bg-navy">
         {/* Docked sidebar — tablet and up. */}
         <div className="hidden md:flex">
@@ -181,6 +179,5 @@ export function WorkspaceShell({
           </main>
         </div>
       </div>
-    </ShareHubProvider>
   );
 }

@@ -9,6 +9,14 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  async redirects() {
+    return [
+      // IA consolidation: Analytics now lives inside the D-Code group.
+      { source: "/analytics", destination: "/d-code/analytics", permanent: false },
+      // IA consolidation: exactly ONE Share Hub, at /share.
+      { source: "/share-hub", destination: "/share", permanent: false },
+    ];
+  },
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,

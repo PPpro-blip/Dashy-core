@@ -1,21 +1,29 @@
 "use client";
 
 /**
- * DashyCore v7 — /share (global Share Hub entry).
+ * DashyCore v7 — /share (THE Share Hub route).
  *
- * Renders THE Share Hub (components/share/ShareHub) as a focused page with
- * no pre-selected source, so the first question is "what are you sharing?".
- * Contextual entry points render the exact same component inside a drawer.
+ * Thin route wrapper: all behaviour lives in the single canonical
+ * <ShareHub /> (components/share/ShareHub). Entry points everywhere in the
+ * workspace link here with ?sourceType=…&sourceId=… to pre-select their
+ * exact source. /share-hub redirects here (next.config.mjs).
  */
 
+import { Suspense } from "react";
 import { ShareHub } from "@/components/share/ShareHub";
+import { LoaderIcon } from "@/components/icons";
 
-export default function ShareHubPage() {
+export default function SharePage() {
   return (
-    <div className="mx-auto w-full max-w-6xl px-0 py-0 sm:px-4 sm:py-6">
-      <div className="overflow-hidden rounded-none border-0 border-white/[0.06] bg-white/[0.015] sm:rounded-2xl sm:border">
-        <ShareHub variant="page" />
-      </div>
-    </div>
+    <Suspense
+      fallback={
+        <div className="flex h-[60vh] items-center justify-center gap-2 text-sm text-zinc-500">
+          <LoaderIcon className="h-4 w-4 animate-spin text-cyan-400" />
+          Opening Share Hub…
+        </div>
+      }
+    >
+      <ShareHub />
+    </Suspense>
   );
 }
