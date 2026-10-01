@@ -4,23 +4,34 @@
  * DashyCore v7 — workspace sidebar.
  *
  * ONE navigation surface, three presentations:
- *   · desktop expanded  → icon + label, hierarchy (D-Code ▸ Editor/Projects/
- *     Analytics, Studio ▸ Generate/Library), recent chats, profile card
- *   · desktop collapsed → icon rail; every destination stays reachable and
- *     gets a tooltip on hover AND keyboard focus
+ *
+ *   · desktop expanded  → 264px: icons + labels, two quiet group headings,
+ *     D-Code / Studio as compact disclosures, recent chats, account card
+ *   · desktop collapsed → 68px icon rail; every destination stays reachable,
+ *     each icon has a tooltip on hover AND keyboard focus, and the two
+ *     groups open a small flyout menu instead of flattening into an icon wall
  *   · mobile            → the expanded layout inside a slide-over drawer
  *
- * The item list itself comes from lib/navigation so no feature can quietly
- * gain a second entry point.
+ * The item list comes from lib/navigation, so no feature can quietly gain a
+ * second entry point. Width is the only thing that animates (180ms), and the
+ * main workspace reflows with it because the shell is a plain flex row.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { SignOutButton } from "@/components/SignOutButton";
-import { PRIMARY_NAV, isNavActive, type NavChild, type NavItem } from "@/lib/navigation";
+import { RailGroup, RailTip } from "@/components/sidebar/RailFlyout";
+import { RecentChats } from "@/components/sidebar/RecentChats";
+import {
+  NAV_SECTIONS,
+  PRIMARY_NAV,
+  isNavActive,
+  type NavChild,
+  type NavItem,
+} from "@/lib/navigation";
 import {
   deleteConversationAsync,
   emitDeleteConversation,
@@ -32,12 +43,9 @@ import {
 } from "@/lib/conversations";
 import {
   ChevronDownIcon,
-  MessageIcon,
   PanelLeftIcon,
   PlusIcon,
-  SearchIcon,
   SettingsIcon,
-  TrashIcon,
   XIcon,
 } from "@/components/icons";
 
@@ -56,38 +64,22 @@ export interface SidebarProps {
   onNavigate?: () => void;
 }
 
+/** Desktop widths. Narrow enough that the workspace stays the priority. */
+const EXPANDED_WIDTH = "w-[264px]";
+const RAIL_WIDTH = "w-[68px]";
+
+const RAIL_ICON_CLASS = (active: boolean) =>
+  `flex h-10 w-10 items-center justify-center rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
+    active
+      ? "bg-cyan-500/12 text-cyan-300"
+      : "text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100"
+  }`;
+
 function initialsFor(name: string, email: string): string {
   const source = name.trim() || email.split("@")[0] || "D";
   const parts = source.split(/\s+/).filter(Boolean);
   if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
   return source.slice(0, 2).toUpperCase();
-}
-
-function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d`;
-  return new Date(ts).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-/** Tooltip shown next to collapsed icons — visible on hover AND focus. */
-function RailTooltip({ label }: { label: string }) {
-  return (
-    <span
-      role="tooltip"
-      className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-lg border border-white/[0.08] bg-[#151a33] px-2.5 py-1.5 text-xs font-medium text-zinc-100 opacity-0 shadow-xl shadow-black/50 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 peer-focus-visible:opacity-100"
-    >
-      {label}
-    </span>
-  );
 }
 
 export function Sidebar({
@@ -103,11 +95,16 @@ export function Sidebar({
 
   const [user, setUser] = useState<ProfileUser | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [search, setSearch] = useState("");
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [hash, setHash] = useState("");
   const [openGroups, setOpenGroups] = useState<string[]>([]);
-  const searchRef = useRef<HTMLInputElement>(null);
+  /** Suppresses the width transition on first paint (no boot-time slide). */
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setReady(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   /* Track the URL hash (settings#memory vs plain settings) reactively. */
   useEffect(() => {
@@ -198,148 +195,100 @@ export function Sidebar({
     };
   }, [refreshConversations]);
 
-  const handleNewChat = () => {
+  const handleNewChat = useCallback(() => {
     emitNewChat();
     if (pathname !== "/chat") router.push("/chat");
     onNavigate?.();
-  };
+  }, [onNavigate, pathname, router]);
 
-  const handleOpenConversation = (id: string) => {
-    emitOpenConversation(id);
-    if (pathname !== "/chat") router.push("/chat");
-    onNavigate?.();
-  };
+  const handleOpenConversation = useCallback(
+    (id: string) => {
+      emitOpenConversation(id);
+      if (pathname !== "/chat") router.push("/chat");
+      onNavigate?.();
+    },
+    [onNavigate, pathname, router]
+  );
 
-  const handleDeleteConversation = (id: string) => {
+  const handleDeleteConversation = useCallback((id: string) => {
     // Cloud delete (cascades messages) + local mirror cleanup, then notify.
     void deleteConversationAsync(id).finally(() => emitDeleteConversation(id));
-  };
-
-  const query = search.trim().toLowerCase();
-  const filteredConversations = query
-    ? conversations.filter((c) => c.title.toLowerCase().includes(query))
-    : conversations;
-
-  /** Collapsed rail: every leaf destination, flattened, nothing unreachable. */
-  const railItems = useMemo(() => {
-    const items: { id: string; label: string; href: string; Icon: NavItem["Icon"]; match?: string[]; exact?: boolean }[] = [];
-    for (const item of PRIMARY_NAV) {
-      if (item.children) {
-        for (const child of item.children) {
-          items.push({ ...child, label: `${item.label} · ${child.label}` });
-        }
-      } else {
-        items.push(item);
-      }
-    }
-    return items;
   }, []);
 
-  /* ------------------------------ rail mode ------------------------------ */
+  const settingsActive = pathname === "/settings" && !hash;
+  const accountLabel = user?.name ?? "Account";
 
-  if (isRail) {
-    return (
-      <nav
-        aria-label="Workspace"
-        className="sticky top-0 flex h-screen w-[68px] flex-shrink-0 flex-col items-center border-r border-white/[0.06] bg-navy/85 backdrop-blur-2xl"
+  /* ---------------------------------------------------------------------- */
+  /* Shared chrome                                                           */
+  /* ---------------------------------------------------------------------- */
+
+  const brand = (
+    <Link
+      href="/chat"
+      onClick={() => {
+        emitNewChat();
+        onNavigate?.();
+      }}
+      className="flex min-w-0 items-center gap-2.5 rounded-lg px-1 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+    >
+      <Image
+        src="/icon-512.png"
+        alt=""
+        width={26}
+        height={26}
+        priority
+        className="flex-shrink-0 rounded-lg object-contain"
+      />
+      <span className="truncate text-[15px] font-semibold tracking-[-0.02em] text-white">
+        DashyCore
+      </span>
+    </Link>
+  );
+
+  const accountCard = (
+    <div className="flex items-center gap-2 rounded-xl bg-white/[0.03] p-2">
+      <Link
+        href="/settings#account"
+        onClick={onNavigate}
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
       >
-        <div className="flex h-16 flex-shrink-0 items-center">
-          <Link
-            href="/chat"
-            onClick={() => emitNewChat()}
-            aria-label="DashyCore — new chat"
-            className="group relative flex h-9 w-9 items-center justify-center rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-          >
-            <Image
-              src="/icon-512.png"
-              alt=""
-              width={28}
-              height={28}
-              priority
-              className="rounded-lg object-contain"
-            />
-            <RailTooltip label="DashyCore" />
-          </Link>
-        </div>
+        <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-xs font-semibold text-white">
+          {user?.initials ?? "D"}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-medium text-zinc-200">
+            {user?.name ?? "Dashy user"}
+          </span>
+          <span className="block truncate text-[10px] text-zinc-500">
+            {user?.email ?? "Signed in"}
+          </span>
+        </span>
+      </Link>
+      <SignOutButton iconOnly />
+    </div>
+  );
 
-        <button
-          type="button"
-          onClick={handleNewChat}
-          aria-label="New chat"
-          className="group relative mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500 text-[#06202a] shadow-lg shadow-cyan-500/20 transition-colors hover:bg-cyan-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-        >
-          <PlusIcon className="h-4 w-4" />
-          <RailTooltip label="New chat" />
-        </button>
+  const railItems = useMemo(
+    () =>
+      PRIMARY_NAV.map((item) => ({
+        item,
+        active: isNavActive(item, pathname, hash),
+        children: (item.children ?? []).map((child) => ({
+          ...child,
+          active: isNavActive(child, pathname, hash),
+        })),
+      })),
+    [pathname, hash]
+  );
 
-        <ul className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto pb-3">
-          {railItems.map((item) => {
-            const active = isNavActive(item, pathname, hash);
-            return (
-              <li key={item.id}>
-                <Link
-                  href={item.href}
-                  onClick={onNavigate}
-                  aria-label={item.label}
-                  aria-current={active ? "page" : undefined}
-                  className={`group relative flex h-10 w-10 items-center justify-center rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
-                    active
-                      ? "bg-cyan-500/12 text-cyan-300"
-                      : "text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100"
-                  }`}
-                >
-                  <item.Icon className="h-[18px] w-[18px]" />
-                  <RailTooltip label={item.label} />
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
+  /* ---------------------------------------------------------------------- */
+  /* Rows (expanded / drawer)                                                */
+  /* ---------------------------------------------------------------------- */
 
-        <div className="flex flex-shrink-0 flex-col items-center gap-1 border-t border-white/[0.06] py-3">
-          <Link
-            href="/settings"
-            onClick={onNavigate}
-            aria-label="Settings"
-            className={`group relative flex h-10 w-10 items-center justify-center rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
-              pathname === "/settings" && !hash
-                ? "bg-cyan-500/12 text-cyan-300"
-                : "text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-100"
-            }`}
-          >
-            <SettingsIcon className="h-[18px] w-[18px]" />
-            <RailTooltip label="Settings" />
-          </Link>
-          <Link
-            href="/settings#account"
-            onClick={onNavigate}
-            aria-label={`Account — ${user?.name ?? "Dashy user"}`}
-            className="group relative flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-[11px] font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-          >
-            {user?.initials ?? "D"}
-            <RailTooltip label={user?.name ?? "Account"} />
-          </Link>
-          {onToggleCollapsed && (
-            <button
-              type="button"
-              onClick={onToggleCollapsed}
-              aria-label="Expand sidebar"
-              aria-expanded={false}
-              className="group relative flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-            >
-              <PanelLeftIcon className="h-4 w-4" />
-              <RailTooltip label="Expand sidebar" />
-            </button>
-          )}
-        </div>
-      </nav>
-    );
-  }
+  const rowHeight = isDrawer ? "min-h-[44px]" : "min-h-[38px]";
 
-  /* ---------------------------- expanded mode ---------------------------- */
-
-  const navItemClass = (active: boolean) =>
-    `flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
+  const rowClass = (active: boolean) =>
+    `flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${rowHeight} ${
       active
         ? "bg-cyan-500/10 text-cyan-300"
         : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
@@ -353,247 +302,302 @@ export function Sidebar({
           href={child.href}
           onClick={onNavigate}
           aria-current={active ? "page" : undefined}
-          className={`flex w-full items-center gap-2.5 rounded-lg py-2 pl-3 pr-3 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
+          className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${rowHeight} ${
             active
               ? "bg-cyan-500/10 text-cyan-300"
               : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-200"
           }`}
         >
           <child.Icon className="h-3.5 w-3.5 flex-shrink-0" />
-          {child.label}
+          <span className="truncate">{child.label}</span>
         </Link>
       </li>
     );
   };
 
-  return (
-    <aside
-      className={`flex h-full min-h-0 w-full flex-col bg-navy/95 backdrop-blur-2xl ${
-        isDrawer
-          ? ""
-          : "sticky top-0 h-screen w-64 flex-shrink-0 border-r border-white/[0.06] bg-navy/85"
-      }`}
-    >
-      {/* Brand */}
-      <div className="flex h-16 flex-shrink-0 items-center gap-2 px-4">
-        <Link
-          href="/chat"
-          onClick={() => {
-            emitNewChat();
-            onNavigate?.();
-          }}
-          className="flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-        >
-          <Image
-            src="/icon-512.png"
-            alt=""
-            width={28}
-            height={28}
-            priority
-            className="rounded-lg object-contain"
-          />
-          <span className="truncate text-base font-semibold tracking-[-0.03em] text-white">
-            DashyCore
-          </span>
-        </Link>
+  const renderItem = (item: NavItem) => {
+    const active = isNavActive(item, pathname, hash);
 
-        <div className="ml-auto flex items-center">
-          {isDrawer ? (
-            <button
-              type="button"
-              onClick={onNavigate}
-              aria-label="Close navigation"
-              className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-            >
-              <XIcon className="h-4 w-4" />
-            </button>
-          ) : (
-            onToggleCollapsed && (
-              <button
-                type="button"
-                onClick={onToggleCollapsed}
-                aria-label="Collapse sidebar"
-                aria-expanded
-                title="Collapse sidebar"
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-              >
-                <PanelLeftIcon className="h-4 w-4" />
-              </button>
-            )
-          )}
-        </div>
-      </div>
+    if (!item.children) {
+      return (
+        <li key={item.id}>
+          <Link
+            href={item.href ?? "/chat"}
+            onClick={onNavigate}
+            aria-current={active ? "page" : undefined}
+            className={rowClass(active)}
+          >
+            <item.Icon className="h-4 w-4 flex-shrink-0" />
+            <span className="flex-1 truncate text-left">{item.label}</span>
+          </Link>
+        </li>
+      );
+    }
 
-      {/* + New Chat */}
-      <div className="flex-shrink-0 px-3 pb-3">
+    const open = openGroups.includes(item.id);
+    return (
+      <li key={item.id}>
         <button
           type="button"
-          onClick={handleNewChat}
-          className="group flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-cyan-500 px-3 text-sm font-semibold text-[#06202a] shadow-lg shadow-cyan-500/20 transition-all hover:bg-cyan-400 hover:shadow-cyan-400/25 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+          onClick={() =>
+            setOpenGroups((prev) =>
+              prev.includes(item.id)
+                ? prev.filter((id) => id !== item.id)
+                : [...prev, item.id]
+            )
+          }
+          aria-expanded={open}
+          aria-controls={`nav-group-${item.id}`}
+          className={rowClass(active && !open)}
         >
-          <PlusIcon className="h-4 w-4 transition-transform motion-safe:group-hover:rotate-90" />
-          New Chat
-        </button>
-      </div>
-
-      {/* Navigation */}
-      <nav aria-label="Workspace" className="flex-shrink-0 px-3">
-        <ul className="space-y-0.5">
-          {PRIMARY_NAV.map((item) => {
-            const active = isNavActive(item, pathname, hash);
-            if (!item.children) {
-              return (
-                <li key={item.id}>
-                  <Link
-                    href={item.href}
-                    onClick={onNavigate}
-                    aria-current={active ? "page" : undefined}
-                    className={navItemClass(active)}
-                  >
-                    <item.Icon className="h-4 w-4 flex-shrink-0" />
-                    <span className="flex-1 truncate text-left">{item.label}</span>
-                  </Link>
-                </li>
-              );
-            }
-
-            const open = openGroups.includes(item.id);
-            return (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenGroups((prev) =>
-                      prev.includes(item.id)
-                        ? prev.filter((id) => id !== item.id)
-                        : [...prev, item.id]
-                    )
-                  }
-                  aria-expanded={open}
-                  aria-controls={`nav-group-${item.id}`}
-                  className={navItemClass(active && !open)}
-                >
-                  <item.Icon className="h-4 w-4 flex-shrink-0" />
-                  <span className="flex-1 truncate text-left">{item.label}</span>
-                  <ChevronDownIcon
-                    className={`h-3.5 w-3.5 flex-shrink-0 text-zinc-600 transition-transform ${
-                      open ? "rotate-180" : ""
-                    }`}
-                  />
-                </button>
-                {open && (
-                  <ul
-                    id={`nav-group-${item.id}`}
-                    className="ml-[1.35rem] space-y-0.5 border-l border-white/[0.07] pl-2"
-                  >
-                    {item.children.map(renderChild)}
-                  </ul>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      </nav>
-
-      {/* Recent chats */}
-      <div className="mt-3 min-h-0 flex-1 overflow-y-auto border-t border-white/[0.06] px-3 pt-3">
-        <div className="mb-2 flex items-center gap-2">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-            Recent chats
-          </p>
-        </div>
-
-        <div className="relative mb-2">
-          <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
-          <input
-            ref={searchRef}
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search chats…"
-            aria-label="Search chats"
-            className="h-9 w-full rounded-lg border border-white/[0.06] bg-white/[0.03] pl-8 pr-3 text-sm text-zinc-200 placeholder-zinc-500 transition-colors focus:border-cyan-400/40 focus:outline-none"
+          <item.Icon className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1 truncate text-left">{item.label}</span>
+          <ChevronDownIcon
+            className={`h-3.5 w-3.5 flex-shrink-0 text-zinc-600 transition-transform duration-150 ${
+              open ? "rotate-180" : ""
+            }`}
           />
-        </div>
-
-        {filteredConversations.length === 0 ? (
-          <div className="px-2 py-8 text-center">
-            <MessageIcon className="mx-auto mb-2 h-8 w-8 text-zinc-700" />
-            <p className="text-xs text-zinc-500">
-              {query ? "No matching chats" : "No chats yet"}
-            </p>
-          </div>
-        ) : (
-          <ul className="space-y-0.5 pb-3">
-            {filteredConversations.slice(0, 14).map((conversation) => {
-              const isActive =
-                activeConversationId === conversation.id && pathname === "/chat";
-              return (
-                <li key={conversation.id} className="group relative">
-                  <button
-                    type="button"
-                    onClick={() => handleOpenConversation(conversation.id)}
-                    className={`flex w-full items-center gap-2 rounded-xl py-2.5 pl-2.5 pr-9 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
-                      isActive
-                        ? "bg-cyan-500/10 text-cyan-300"
-                        : "text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-100"
-                    }`}
-                  >
-                    <MessageIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{conversation.title}</span>
-                      <span className="block text-[10px] text-zinc-600">
-                        {relativeTime(conversation.updatedAt)}
-                      </span>
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Delete conversation: ${conversation.title}`}
-                    onClick={() => handleDeleteConversation(conversation.id)}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-md bg-[#0d1020]/90 p-1.5 text-zinc-500 opacity-0 transition-opacity hover:text-red-400 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 group-hover:opacity-100 md:p-1"
-                  >
-                    <TrashIcon className="h-3 w-3" />
-                  </button>
-                </li>
-              );
-            })}
+        </button>
+        {open && (
+          <ul
+            id={`nav-group-${item.id}`}
+            className="ml-[1.4rem] mt-0.5 space-y-0.5 border-l border-white/[0.07] pl-2"
+          >
+            {item.children.map(renderChild)}
           </ul>
         )}
-      </div>
+      </li>
+    );
+  };
 
-      {/* Settings + account */}
-      <div className="flex-shrink-0 border-t border-white/[0.06] p-3">
-        <Link
-          href="/settings"
-          onClick={onNavigate}
-          aria-current={pathname === "/settings" && !hash ? "page" : undefined}
-          className={`${navItemClass(pathname === "/settings" && !hash)} mb-2`}
-        >
-          <SettingsIcon className="h-4 w-4 flex-shrink-0" />
-          <span className="flex-1 truncate text-left">Settings</span>
-        </Link>
+  /* ---------------------------------------------------------------------- */
+  /* Shell                                                                   */
+  /* ---------------------------------------------------------------------- */
 
-        <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] p-2">
-          <Link
-            href="/settings#account"
-            onClick={onNavigate}
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+  /**
+   * The <aside> owns the animated width; the inner column is pinned to the
+   * TARGET width so icons never drift sideways while the panel resizes —
+   * the box simply closes around them (and `overflow-hidden` clips the
+   * labels on the way in). Tooltips/flyouts escape that clip via portals.
+   */
+  const asideClass = [
+    "flex min-h-0 flex-col overflow-hidden bg-navy/95 backdrop-blur-2xl",
+    isDrawer
+      ? "h-full w-full"
+      : `sticky top-0 h-screen flex-shrink-0 border-r border-white/[0.06] bg-navy/85 ${
+          isRail ? RAIL_WIDTH : EXPANDED_WIDTH
+        }`,
+    !isDrawer && ready
+      ? "transition-[width] duration-200 ease-out motion-reduce:transition-none"
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const innerClass = `flex h-full min-h-0 flex-col ${
+    isDrawer ? "w-full" : isRail ? RAIL_WIDTH : EXPANDED_WIDTH
+  }`;
+
+  return (
+    <aside className={asideClass} data-state={isRail ? "collapsed" : "expanded"}>
+      <div className={innerClass}>
+        {/* ------------------------------ brand ----------------------------- */}
+        {isRail ? (
+          <div className="flex h-16 flex-shrink-0 items-center justify-center">
+            {onToggleCollapsed ? (
+              <RailTip label="Expand sidebar">
+                <button
+                  type="button"
+                  onClick={onToggleCollapsed}
+                  aria-label="Expand sidebar"
+                  aria-expanded={false}
+                  className="group relative flex h-10 w-10 items-center justify-center rounded-xl text-zinc-300 transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                >
+                  <Image
+                    src="/icon-512.png"
+                    alt=""
+                    width={26}
+                    height={26}
+                    priority
+                    className="rounded-lg object-contain transition-opacity duration-150 group-hover:opacity-0 group-focus-visible:opacity-0 [@media(hover:none)]:opacity-0"
+                  />
+                  {/* Pointer devices keep the brand mark and reveal the
+                      control on hover; touch devices, which have no hover,
+                      always show the explicit expand affordance. */}
+                  <PanelLeftIcon className="absolute h-[18px] w-[18px] opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />
+                </button>
+              </RailTip>
+            ) : (
+              <Image
+                src="/icon-512.png"
+                alt="DashyCore"
+                width={26}
+                height={26}
+                priority
+                className="rounded-lg object-contain"
+              />
+            )}
+          </div>
+        ) : (
+          <div className="flex h-16 flex-shrink-0 items-center gap-2 px-3">
+            {brand}
+            <div className="ml-auto flex items-center">
+              {isDrawer ? (
+                <button
+                  type="button"
+                  onClick={onNavigate}
+                  aria-label="Close navigation"
+                  className="flex h-10 w-10 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                >
+                  <XIcon className="h-4 w-4" />
+                </button>
+              ) : (
+                onToggleCollapsed && (
+                  <button
+                    type="button"
+                    onClick={onToggleCollapsed}
+                    aria-label="Collapse sidebar"
+                    aria-expanded
+                    title="Collapse sidebar"
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                  >
+                    <PanelLeftIcon className="h-4 w-4" />
+                  </button>
+                )
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ---------------------------- new chat ---------------------------- */}
+        {isRail ? (
+          <div className="flex flex-shrink-0 justify-center pb-2">
+            <RailTip label="New chat">
+              <button
+                type="button"
+                onClick={handleNewChat}
+                aria-label="New chat"
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-400/25 bg-cyan-500/10 text-cyan-200 transition-colors hover:border-cyan-400/40 hover:bg-cyan-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+              >
+                <PlusIcon className="h-4 w-4" />
+              </button>
+            </RailTip>
+          </div>
+        ) : (
+          <div className="flex-shrink-0 px-3 pb-2">
+            <button
+              type="button"
+              onClick={handleNewChat}
+              className={`group flex w-full items-center gap-2.5 rounded-xl border border-cyan-400/25 bg-cyan-500/10 px-3 text-[13px] font-semibold text-cyan-200 transition-colors hover:border-cyan-400/40 hover:bg-cyan-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 ${
+                isDrawer ? "min-h-[44px]" : "min-h-[40px]"
+              }`}
+            >
+              <PlusIcon className="h-4 w-4 flex-shrink-0 transition-transform duration-150 motion-safe:group-hover:rotate-90" />
+              New Chat
+            </button>
+          </div>
+        )}
+
+        {/* --------------------------- navigation --------------------------- */}
+        {isRail ? (
+          <nav
+            aria-label="Workspace"
+            className="min-h-0 shrink overflow-y-auto py-1"
           >
-            <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-xs font-semibold text-white">
-              {user?.initials ?? "D"}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs font-medium text-zinc-200">
-                {user?.name ?? "Dashy user"}
-              </span>
-              <span className="block truncate text-[10px] text-zinc-500">
-                {user?.email ?? "Loading…"}
-              </span>
-            </span>
-          </Link>
-          <SignOutButton iconOnly />
-        </div>
+            <ul className="flex flex-col items-center gap-1">
+              {railItems.map(({ item, active, children }) => (
+                <li key={item.id}>
+                  {item.children ? (
+                    <RailGroup
+                      label={item.label}
+                      Icon={item.Icon}
+                      active={active}
+                      items={children}
+                      onNavigate={onNavigate}
+                    />
+                  ) : (
+                    <RailTip label={item.label}>
+                      <Link
+                        href={item.href ?? "/chat"}
+                        onClick={onNavigate}
+                        aria-label={item.label}
+                        aria-current={active ? "page" : undefined}
+                        className={RAIL_ICON_CLASS(active)}
+                      >
+                        <item.Icon className="h-[18px] w-[18px]" />
+                      </Link>
+                    </RailTip>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </nav>
+        ) : (
+          <nav aria-label="Workspace" className="min-h-0 shrink overflow-y-auto px-3">
+            {NAV_SECTIONS.map((section, index) => (
+              <div key={section.id} className={index === 0 ? "" : "mt-3"}>
+                {section.label && (
+                  <p className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-600">
+                    {section.label}
+                  </p>
+                )}
+                <ul className="space-y-0.5">{section.items.map(renderItem)}</ul>
+              </div>
+            ))}
+          </nav>
+        )}
+
+        {/* -------------------------- recent chats -------------------------- */}
+        {isRail ? (
+          <div className="flex-1" />
+        ) : (
+          <RecentChats
+            conversations={conversations}
+            activeId={pathname === "/chat" ? activeConversationId : null}
+            onOpen={handleOpenConversation}
+            onDelete={handleDeleteConversation}
+          />
+        )}
+
+        {/* ----------------------- settings + account ----------------------- */}
+        {isRail ? (
+          <div className="flex flex-shrink-0 flex-col items-center gap-1 border-t border-white/[0.06] py-3">
+            <RailTip label="Settings">
+              <Link
+                href="/settings"
+                onClick={onNavigate}
+                aria-label="Settings"
+                aria-current={settingsActive ? "page" : undefined}
+                className={RAIL_ICON_CLASS(settingsActive)}
+              >
+                <SettingsIcon className="h-[18px] w-[18px]" />
+              </Link>
+            </RailTip>
+            <RailTip label={accountLabel}>
+              <Link
+                href="/settings#account"
+                onClick={onNavigate}
+                aria-label={`Account — ${user?.name ?? "Dashy user"}`}
+                className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500 to-violet-500 text-[11px] font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+              >
+                {user?.initials ?? "D"}
+              </Link>
+            </RailTip>
+          </div>
+        ) : (
+          <div className="flex-shrink-0 border-t border-white/[0.06] p-3">
+            <Link
+              href="/settings"
+              onClick={onNavigate}
+              aria-current={settingsActive ? "page" : undefined}
+              className={`${rowClass(settingsActive)} mb-1`}
+            >
+              <SettingsIcon className="h-4 w-4 flex-shrink-0" />
+              <span className="flex-1 truncate text-left">Settings</span>
+            </Link>
+            {accountCard}
+          </div>
+        )}
       </div>
     </aside>
   );
