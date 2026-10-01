@@ -281,10 +281,10 @@ export default function StudioPage() {
   };
 
   return (
-    <div className="min-h-full bg-[#080b14] px-4 py-8 text-white sm:px-6 md:px-12">
-      <div className="mx-auto max-w-6xl space-y-8">
-        {/* Header */}
-        <header className="flex flex-wrap items-end justify-between gap-5 border-b border-white/[0.06] pb-8">
+    <div className="min-h-full bg-[#080b14] px-4 py-5 text-white sm:px-6 sm:py-6 md:px-12 lg:py-8">
+      <div className="mx-auto max-w-6xl">
+        {/* Compact identity header: the creative workspace remains the focus. */}
+        <header className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.06] pb-4 sm:pb-5">
           <div>
             <div className="mb-2 flex items-center gap-2">
               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-cyan-500/20 text-cyan-300">
@@ -294,7 +294,7 @@ export default function StudioPage() {
                 Dashy Studio
               </p>
             </div>
-            <h1 className="text-3xl font-bold tracking-tight text-white md:text-4xl lg:text-5xl">
+            <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-4xl">
               Make something visual.
             </h1>
             <p className="mt-2.5 max-w-xl text-sm leading-relaxed text-zinc-400">
@@ -302,7 +302,7 @@ export default function StudioPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.07] px-4 py-3 shadow-lg shadow-cyan-950/30 backdrop-blur-md">
+          <div className="flex items-center gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.07] px-3 py-2 shadow-lg shadow-cyan-950/30 backdrop-blur-md sm:px-4">
             <span className="relative flex h-2.5 w-2.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75" />
               <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-cyan-300 shadow-[0_0_12px] shadow-cyan-300" />
@@ -314,36 +314,39 @@ export default function StudioPage() {
           </div>
         </header>
 
-        {/* Generate | Library — real routes shared with the sidebar */}
-        <StudioTabs />
+        {/* The route and mode controls form one compact tool switcher. */}
+        <div className="mt-4 flex flex-col items-start gap-3">
+          {/* Generate | Library — real routes shared with the sidebar */}
+          <StudioTabs />
 
-        {/* Image / Video mode tabs */}
-        <div
-          role="tablist"
-          aria-label="Studio mode"
-          className="flex w-fit gap-1 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-1 backdrop-blur-md"
-        >
-          {(["image", "video"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="tab"
-              aria-selected={mode === m}
-              onClick={() => setMode(m)}
-              className={`rounded-xl px-5 py-2 text-sm font-semibold capitalize transition-all ${
-                mode === m
-                  ? "bg-cyan-400/15 text-cyan-200 shadow-lg shadow-cyan-950/40"
-                  : "text-zinc-500 hover:text-zinc-200"
-              }`}
-            >
-              {m === "image" ? "Image Mode" : "Video Mode"}
-            </button>
-          ))}
+          {/* Image / Video mode tabs */}
+          <div
+            role="tablist"
+            aria-label="Studio mode"
+            className="flex w-fit gap-1 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-1 backdrop-blur-md"
+          >
+            {(["image", "video"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                role="tab"
+                aria-selected={mode === m}
+                onClick={() => setMode(m)}
+                className={`rounded-xl px-5 py-2 text-sm font-semibold capitalize transition-all ${
+                  mode === m
+                    ? "bg-cyan-400/15 text-cyan-200 shadow-lg shadow-cyan-950/40"
+                    : "text-zinc-500 hover:text-zinc-200"
+                }`}
+              >
+                {m === "image" ? "Image Mode" : "Video Mode"}
+              </button>
+            ))}
+          </div>
         </div>
 
         {mode === "video" ? (
           /* Honest Video Mode — real AI video needs paid provider keys. */
-          <section className="relative overflow-hidden rounded-3xl border border-white/[0.09] bg-white/[0.035] p-8 shadow-2xl shadow-black/40 backdrop-blur-xl md:p-12">
+          <section className="relative mt-3 overflow-hidden rounded-3xl border border-white/[0.09] bg-white/[0.035] p-6 shadow-2xl shadow-black/40 backdrop-blur-xl sm:p-8 md:p-10">
             <div className="pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-fuchsia-500/10 blur-3xl" />
             <div className="pointer-events-none absolute -bottom-20 -left-20 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
             <div className="relative z-10 mx-auto flex max-w-xl flex-col items-center text-center">
@@ -377,7 +380,7 @@ export default function StudioPage() {
         ) : (
           <>
             {/* Prompt Input Box */}
-            <section className="relative overflow-hidden rounded-3xl border border-white/[0.09] bg-white/[0.035] p-4 shadow-2xl shadow-black/40 backdrop-blur-xl md:p-6">
+            <section className="relative mt-3 overflow-hidden rounded-3xl border border-white/[0.09] bg-white/[0.035] p-4 shadow-2xl shadow-black/40 backdrop-blur-xl md:p-6">
               <div className="pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
               <div className="pointer-events-none absolute -bottom-20 -left-20 h-56 w-56 rounded-full bg-violet-500/10 blur-3xl" />
 
@@ -474,7 +477,7 @@ export default function StudioPage() {
 
             {/* Gallery Controls — latest results only; the Library tab has everything */}
             {tiles.length > 0 && (
-              <div className="flex flex-wrap items-center justify-between gap-4 pt-2">
+              <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
                     Latest results
@@ -506,19 +509,9 @@ export default function StudioPage() {
               </div>
             )}
 
-            {/* Tiles Grid */}
-            {tiles.length === 0 ? (
-              <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-white/[0.08] bg-white/[0.015] py-20 text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.03] text-zinc-600">
-                  <ImageIcon className="h-8 w-8" />
-                </div>
-                <h3 className="text-lg font-semibold text-zinc-300">No images generated yet</h3>
-                <p className="mt-1.5 max-w-md text-xs leading-relaxed text-zinc-500">
-                  Type a prompt above and press Generate. Turbo images load natively in your browser with a 30-second safety window, and every finished asset is saved to your media library.
-                </p>
-              </div>
-            ) : (
-              <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {/* Results only take up space after a generation exists. */}
+            {tiles.length > 0 && (
+              <section className="mt-4 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
                 {tiles.slice(0, 6).map((tile) => (
                   <article
                     key={tile.id}

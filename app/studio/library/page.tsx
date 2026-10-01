@@ -93,9 +93,9 @@ export default function StudioLibraryPage() {
   const failedCount = tiles.filter((tile) => tile.status === "error").length;
 
   return (
-    <div className="min-h-full bg-[#080b14] px-4 py-8 text-white sm:px-6 md:px-12">
-      <div className="mx-auto max-w-6xl space-y-8">
-        <header className="flex flex-wrap items-end justify-between gap-5 border-b border-white/[0.06] pb-8">
+    <div className="min-h-full bg-[#080b14] px-4 py-5 text-white sm:px-6 sm:py-6 md:px-12 lg:py-8">
+      <div className="mx-auto max-w-6xl">
+        <header className="flex flex-wrap items-end justify-between gap-4 border-b border-white/[0.06] pb-4 sm:pb-5">
           <div>
             <div className="mb-2 flex items-center gap-2">
               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-cyan-500/20 text-cyan-300">
@@ -105,7 +105,7 @@ export default function StudioLibraryPage() {
                 Dashy Studio
               </p>
             </div>
-            <h1 className="text-3xl font-bold tracking-tight text-white md:text-4xl">
+            <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-4xl">
               Media Library
             </h1>
             <p className="mt-2.5 max-w-xl text-sm leading-relaxed text-zinc-400">
@@ -126,10 +126,12 @@ export default function StudioLibraryPage() {
           )}
         </header>
 
-        <StudioTabs />
+        <div className="mt-4">
+          <StudioTabs />
+        </div>
 
         {!hydrated ? null : ready.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-white/[0.08] bg-white/[0.015] py-20 text-center">
+          <div className="mt-6 flex flex-col items-center justify-center rounded-3xl border border-dashed border-white/[0.08] bg-white/[0.015] py-12 text-center sm:py-16">
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/[0.08] bg-white/[0.03] text-zinc-600">
               <ImageIcon className="h-8 w-8" />
             </div>
@@ -147,7 +149,7 @@ export default function StudioLibraryPage() {
             </Link>
           </div>
         ) : (
-          <section className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          <section className="mt-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {ready.map((tile) => (
               <article
                 key={tile.id}
