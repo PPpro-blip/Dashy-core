@@ -9,10 +9,17 @@
  *   768–1023 docked sidebar, collapsed by default (tablet gets a real layout,
  *            not a squeezed desktop) — still expandable
  *   <768px   no docked sidebar; a hamburger opens a slide-over drawer with a
- *            backdrop, Escape-to-close and close-on-navigate
+ *            backdrop, Escape-to-close, focus trapping and close-on-navigate
+ *
+ * The sidebar is a flex sibling of the main column, so collapsing it hands
+ * the reclaimed width straight to the workspace — no gap, no overlap, no
+ * horizontal scrollbar.
+ *
+ * The Share Hub is mounted here exactly once so every feature can open THE
+ * same hub without a second implementation.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
@@ -22,6 +29,13 @@ import {
   setStoredSidebarCollapsed,
   SIDEBAR_CHANGED_EVENT,
 } from "@/lib/preferences";
+
+/** Read the stored preference before paint on the client, after it on SSR. */
+const useIsomorphicLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function WorkspaceShell({
   title,
@@ -37,7 +51,7 @@ export function WorkspaceShell({
   const triggerRef = useRef<HTMLElement | null>(null);
 
   /* Restore the stored preference; tablets start collapsed by default. */
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (hasStoredSidebarPreference()) {
       setCollapsed(getStoredSidebarCollapsed());
       return;
@@ -78,12 +92,45 @@ export function WorkspaceShell({
     setDrawerOpen(false);
   }, [pathname]);
 
-  /* Escape closes, body scroll locks, focus moves into the drawer. */
+  /* Growing past the mobile breakpoint hands over to the docked sidebar. */
   useEffect(() => {
     if (!drawerOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") closeDrawer();
+    const desktop = window.matchMedia("(min-width: 768px)");
+    const onChange = () => {
+      if (desktop.matches) setDrawerOpen(false);
     };
+    desktop.addEventListener("change", onChange);
+    return () => desktop.removeEventListener("change", onChange);
+  }, [drawerOpen]);
+
+  /* Escape closes, body scroll locks, focus moves into and stays in the drawer. */
+  useEffect(() => {
+    if (!drawerOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeDrawer();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const panel = drawerRef.current;
+      if (!panel) return;
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (node) => node.offsetParent !== null || node === document.activeElement
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === panel)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onKeyDown);
@@ -96,41 +143,41 @@ export function WorkspaceShell({
   }, [drawerOpen, closeDrawer]);
 
   return (
-    <div className="flex min-h-screen w-full overflow-x-hidden bg-navy">
-      {/* Docked sidebar — tablet and up. */}
-      <div className="hidden md:block">
-        <Sidebar collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
-      </div>
-
-      {/* Mobile slide-over drawer. */}
-      {drawerOpen && (
-        <div className="fixed inset-0 z-[60] md:hidden">
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label="Close navigation"
-            onClick={closeDrawer}
-            className="absolute inset-0 cursor-default bg-black/60 backdrop-blur-sm motion-safe:animate-[fade-in_160ms_ease-out]"
-          />
-          <div
-            ref={drawerRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Workspace navigation"
-            tabIndex={-1}
-            className="relative flex h-full w-[86%] max-w-[20rem] flex-col border-r border-white/[0.08] shadow-2xl shadow-black/60 outline-none motion-safe:animate-[slide-in-left_220ms_cubic-bezier(0.22,1,0.36,1)]"
-          >
-            <Sidebar variant="drawer" onNavigate={closeDrawer} />
-          </div>
+      <div className="flex min-h-screen w-full overflow-x-hidden bg-navy">
+        {/* Docked sidebar — tablet and up. */}
+        <div className="hidden md:flex">
+          <Sidebar collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
         </div>
-      )}
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <Header sessionTitle={title} onOpenNav={openDrawer} />
-        <main id="main" className="min-w-0 flex-1 overflow-x-hidden">
-          {children}
-        </main>
+        {/* Mobile slide-over drawer. */}
+        {drawerOpen && (
+          <div className="fixed inset-0 z-[60] md:hidden">
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="Close navigation"
+              onClick={closeDrawer}
+              className="absolute inset-0 cursor-default bg-black/60 backdrop-blur-sm motion-safe:animate-[fade-in_160ms_ease-out]"
+            />
+            <div
+              ref={drawerRef}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Workspace navigation"
+              tabIndex={-1}
+              className="relative flex h-full w-[86%] max-w-[20rem] flex-col border-r border-white/[0.08] shadow-2xl shadow-black/60 outline-none motion-safe:animate-[slide-in-left_200ms_cubic-bezier(0.22,1,0.36,1)]"
+            >
+              <Sidebar variant="drawer" onNavigate={closeDrawer} />
+            </div>
+          </div>
+        )}
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Header sessionTitle={title} onOpenNav={openDrawer} />
+          <main id="main" className="min-w-0 flex-1 overflow-x-hidden">
+            {children}
+          </main>
+        </div>
       </div>
-    </div>
   );
 }
