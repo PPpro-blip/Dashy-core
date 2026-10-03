@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { speechTextFromMarkdown, MAX_SPEECH_CHARS } from "../lib/voice-elevenlabs.ts";
+import { speechTextFromMarkdown, MAX_SPEECH_CHARS } from "../lib/voice-speech.ts";
 
 test("markdown becomes natural speech (no code, URLs or table pipes)", () => {
   const md = [
