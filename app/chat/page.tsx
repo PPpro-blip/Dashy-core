@@ -43,8 +43,10 @@ import { splitThinking } from "@/lib/thinking";
 import { getStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
 import { AttachmentButton } from "@/components/AttachmentButton";
 import { useToast } from "@/components/Toast";
+import { speechTextFromMarkdown } from "@/lib/voice-speech";
 import {
   ArrowUpRightIcon,
+  AudioLinesIcon,
   CheckIcon,
   CodeIcon,
   CopyIcon,
@@ -109,6 +111,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<HistoryMessage[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isDictating, setIsDictating] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>(() => getStoredModel());
   const [statuses, setStatuses] = useState<string[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
@@ -118,6 +121,7 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HistoryMessage[]>([]);
+  const dictationRef = useRef<SpeechRecognition | null>(null);
   /** Title / creation time of the active conversation (cloud-agnostic). */
   const activeTitleRef = useRef<string>("New Chat");
   const activeCreatedAtRef = useRef<number>(Date.now());
@@ -352,10 +356,119 @@ export default function ChatPage() {
     [persistConversation, toast, userId]
   );
 
+  /* -------------------------------- dictate -------------------------------
+     Chat Dictate = microphone → text in THIS composer. It never navigates,
+     never opens Voice Mode, and never makes Dashy speak — it is simply
+     another way to type. Voice Mode (/voice) is a separate, explicit
+     experience reached through its own button. */
+
+  /** Gracefully finish dictation — the final transcript stays in the composer. */
+  const stopDictation = useCallback(() => {
+    dictationRef.current?.stop();
+  }, []);
+
+  /** Hard-cancel dictation (e.g. when sending) without re-writing the input. */
+  const cancelDictation = useCallback(() => {
+    const recognition = dictationRef.current;
+    if (!recognition) return;
+    dictationRef.current = null; // detach first so onend won't touch the input
+    try {
+      recognition.abort();
+    } catch {
+      // Already stopped.
+    }
+    setIsDictating(false);
+  }, []);
+
+  const startDictation = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const SpeechRecognitionCtor =
+      window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      toast.error(
+        "Dictation isn't supported here",
+        "Your browser has no speech recognition. Try Chrome or Edge — or use Voice Mode."
+      );
+      return;
+    }
+    if (dictationRef.current) return;
+
+    // Dictated speech is appended after whatever is already typed.
+    const base = input.trim();
+    const compose = (speech: string) => {
+      const addition = speech.replace(/\s+/g, " ").trim();
+      if (!addition) return base;
+      return base ? `${base} ${addition}` : addition;
+    };
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    // Accumulated across onresult → onend so we never read stale state.
+    let finalTranscript = "";
+
+    recognition.onstart = () => setIsDictating(true);
+    recognition.onresult = (event) => {
+      let interimText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript ?? "";
+        if (result.isFinal) finalTranscript += transcript;
+        else interimText += transcript;
+      }
+      // Live preview: committed words + the in-flight interim guess.
+      setInput(compose(`${finalTranscript} ${interimText}`));
+    };
+    recognition.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        toast.error(
+          "Microphone blocked",
+          "Allow microphone access in your browser, then press Dictate again."
+        );
+      } else if (event.error === "no-speech") {
+        toast.info("No speech detected", "Press Dictate and try speaking again.");
+      } else if (event.error !== "aborted") {
+        toast.error("Dictation error", `Microphone error: ${event.error}.`);
+      }
+    };
+    recognition.onend = () => {
+      // Cancelled (sent / unmounted) — leave the composer alone.
+      if (dictationRef.current !== recognition) return;
+      dictationRef.current = null;
+      setIsDictating(false);
+      setInput(compose(finalTranscript));
+      textareaRef.current?.focus();
+    };
+
+    dictationRef.current = recognition;
+    try {
+      recognition.start();
+    } catch {
+      dictationRef.current = null;
+      setIsDictating(false);
+      toast.error("Could not start the microphone", "Please try again.");
+    }
+  }, [input, toast]);
+
+  /* Clean up a live dictation session on unmount. */
+  useEffect(() => {
+    return () => {
+      const recognition = dictationRef.current;
+      dictationRef.current = null;
+      recognition?.abort();
+    };
+  }, []);
+
   const handleSend = useCallback(
     async (textToSend?: string) => {
       const promptText = (textToSend ?? input).trim();
       if (!promptText || isStreaming) return;
+
+      // Sending while dictating commits what's in the composer as-is.
+      cancelDictation();
 
       setInput("");
       setStatuses([]);
@@ -424,6 +537,7 @@ export default function ChatPage() {
     },
     [
       activeConversationId,
+      cancelDictation,
       input,
       isStreaming,
       messages,
@@ -602,10 +716,14 @@ export default function ChatPage() {
   // browsers and does not require an API key.
   const playNeuralVoice = useCallback(async (text: string) => {
     try {
+      // Markdown → speakable prose, clamped under the proxy's 5000-char cap
+      // (raw markdown would read code/URLs aloud and long replies would 400).
+      const speech = speechTextFromMarkdown(text);
+      if (!speech) return;
       const response = await fetch("/api/voice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice: "Brian" }),
+        body: JSON.stringify({ text: speech, voice: "Brian" }),
       });
       if (!response.ok) throw new Error("Voice service unavailable");
       const blob = await response.blob();
@@ -710,20 +828,48 @@ export default function ChatPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message DashyCore…"
+              placeholder={isDictating ? "Listening… speak now" : "Message DashyCore…"}
               rows={1}
               disabled={isStreaming}
               className="max-h-[200px] flex-1 resize-none bg-transparent py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
             />
+            {/* Dictate — speech-to-text into THIS composer. Never opens Voice Mode. */}
+            <button
+              type="button"
+              onClick={isDictating ? stopDictation : startDictation}
+              disabled={isStreaming}
+              aria-label={isDictating ? "Stop dictating" : "Dictate a message"}
+              aria-pressed={isDictating}
+              title={
+                isDictating
+                  ? "Stop dictating"
+                  : "Dictate — turn your speech into text here"
+              }
+              className={`relative flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 disabled:cursor-not-allowed disabled:opacity-30 ${
+                isDictating
+                  ? "border-red-400/50 bg-red-500/15 text-red-300"
+                  : "border-white/[0.08] bg-white/[0.03] text-zinc-400 hover:border-cyan-400/40 hover:text-cyan-300"
+              }`}
+            >
+              {isDictating && (
+                <span
+                  aria-hidden="true"
+                  className="absolute inset-0 animate-pulse rounded-xl border border-red-400/40"
+                />
+              )}
+              <MicIcon className="h-4 w-4" />
+              {isDictating && <span className="sr-only">Listening…</span>}
+            </button>
+            {/* Voice Mode — the explicit entry to the spoken conversation at /voice. */}
             <button
               type="button"
               onClick={() => router.push("/voice")}
               disabled={isStreaming}
-              aria-label="Open voice mode"
-              title="Voice mode — talk to Dashy"
-              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:cursor-not-allowed disabled:opacity-30"
+              aria-label="Open Voice Mode — a spoken conversation with Dashy"
+              title="Voice Mode — talk with Dashy out loud"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:border-violet-400/40 hover:text-violet-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60 disabled:cursor-not-allowed disabled:opacity-30"
             >
-              <MicIcon className="h-4 w-4" />
+              <AudioLinesIcon className="h-4 w-4" />
             </button>
             <button
               type="button"

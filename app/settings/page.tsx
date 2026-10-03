@@ -17,7 +17,6 @@ import { createClient } from "@/lib/supabase/client";
 import { SignOutButton } from "@/components/SignOutButton";
 import { useToast } from "@/components/Toast";
 import { DocumentsList } from "@/components/DocumentsList";
-import { ElevenLabsSettings } from "@/components/voice/ElevenLabsSettings";
 import { MetaTokenSettings } from "@/components/share/MetaTokenSettings";
 import { MODELS, getModelById } from "@/lib/models";
 import { getStoredModel, setStoredModel, MODEL_CHANGED_EVENT } from "@/lib/preferences";
@@ -240,13 +239,11 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* ----------------------------- Voice upgrade ---------------------------
-          The designed ElevenLabs panel (lib/voice-elevenlabs storage keys) —
-          the previous inline field wrote to a key nothing else read. */}
-      <section className="mt-6 rounded-2xl border border-white/[0.06] bg-white/[0.02] p-6">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">Voice</h2>
-        <ElevenLabsSettings />
-      </section>
+      {/* No ElevenLabs / voice API-key settings: Dashy's voices run keylessly
+          (browser speech in Voice Mode, keyless neural proxy for read-aloud),
+          and persona audio will ship as pre-generated assets — users never
+          configure a runtime voice API key here. The Voice Mode voice picker
+          lives on /voice itself. */}
 
       {/* ------------------------------ Meta Share -----------------------------
           Stores the user's own Meta Graph token for the Share Hub's

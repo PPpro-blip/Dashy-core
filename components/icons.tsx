@@ -285,6 +285,18 @@ export const MicIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** Audio waveform (lucide "audio-lines") — the Voice Mode glyph. */
+export const AudioLinesIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M2 10v3" />
+    <path d="M6 6v11" />
+    <path d="M10 3v18" />
+    <path d="M14 8v7" />
+    <path d="M18 5v13" />
+    <path d="M22 10v3" />
+  </Svg>
+);
+
 export const ArrowUpRightIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M7 7h10v10" />
