@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { supabaseSessionTokens } from "@/lib/supabase/oauth-session";
 
 /**
  * Session refresh middleware (per @supabase/ssr docs).
@@ -53,9 +54,21 @@ export async function updateSession(request: NextRequest) {
 
   // IMPORTANT: do not run code between createServerClient and getSession —
   // otherwise the session may not be refreshed in time.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data: { user: verifiedUser } } = await supabase.auth.getUser();
+  let user = verifiedUser;
+
+  // Older Supabase OAuth cookies may contain a provider_token. Replace such
+  // sessions with the Supabase access/refresh-token-only form before any page
+  // or browser JavaScript can observe the cookie. No provider token is read or
+  // forwarded to an upstream service.
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.provider_token || session?.provider_refresh_token) {
+    const { data: safe, error } = await supabase.auth.setSession(supabaseSessionTokens(session));
+    if (error || safe.session?.provider_token || safe.session?.provider_refresh_token) {
+      await supabase.auth.signOut({ scope: "local" });
+      user = null;
+    }
+  }
 
   const pathname = request.nextUrl.pathname;
   const isPublicRoute = PUBLIC_PREFIXES.some(

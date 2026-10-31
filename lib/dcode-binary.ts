@@ -28,7 +28,7 @@ export const BINARY_EXTS = [
   ".eot",
 ] as const;
 
-/** Subset of BINARY_EXTS (plus .svg, which is text) rendered as an <img>. */
+/** Image-like file extensions for labels/icons; SVG is never rendered as an image. */
 export const IMAGE_EXTS = [
   ".png",
   ".jpg",
@@ -96,13 +96,12 @@ export function isImageDataUrl(content: unknown): boolean {
 }
 
 /**
- * Whether the editor should render the image preview pane instead of
- * Monaco: a raster asset stored as a data URL, or an SVG (stored as text).
+ * Whether the editor should render an image preview instead of Monaco.
+ * Untrusted SVG is intentionally excluded: it remains editable as text and
+ * is never loaded as an image document by the application.
  */
-export function isPreviewableImage(name: string, content: string): boolean {
-  if (isImageDataUrl(content)) return true;
-  // SVGs are imported as text (they are XML) but render as images.
-  return extensionWithDot(name) === ".svg" && !isDataUrl(content);
+export function isPreviewableImage(_name: string, content: string): boolean {
+  return /^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(content);
 }
 
 /** MIME for a binary extension, falling back to octet-stream. */

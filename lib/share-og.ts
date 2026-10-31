@@ -202,15 +202,17 @@ function summarizeProject(row: ProjectRow): ShareOgProject {
 export const lookupShareProject = cache(
   async (rawKey: string): Promise<ShareOgProject | null> => {
     const key = rawKey.trim();
-    if (!key || key.length > 64) return null;
-    const byId = UUID_RE.test(key);
+    if (!/^[a-z0-9]{12}$/i.test(key)) return null;
 
-    // Lane 1 — cookie-bound client: RLS applies (owners see their own rows).
+    // Lane 1 — cookie-bound read, still restricted to public share slugs.
     try {
       const supabase = await createClient();
-      let query = supabase.from("dcode_projects").select(SELECT_COLUMNS);
-      query = byId ? query.eq("id", key) : query.eq("share_slug", key.toLowerCase());
-      const { data, error } = await query.maybeSingle();
+      const { data, error } = await supabase
+        .from("dcode_projects")
+        .select(SELECT_COLUMNS)
+        .eq("is_public", true)
+        .eq("share_slug", key.toLowerCase())
+        .maybeSingle();
       if (!error && data) return summarizeProject(data as ProjectRow);
     } catch {
       // A dead session or missing policy must not break a public link.
@@ -220,12 +222,12 @@ export const lookupShareProject = cache(
     const service = createServiceClient();
     if (service) {
       try {
-        let query = service
+        const { data, error } = await service
           .from("dcode_projects")
           .select(SELECT_COLUMNS)
-          .eq("is_public", true);
-        query = byId ? query.eq("id", key) : query.eq("share_slug", key.toLowerCase());
-        const { data, error } = await query.maybeSingle();
+          .eq("is_public", true)
+          .eq("share_slug", key.toLowerCase())
+          .maybeSingle();
         if (!error && data) return summarizeProject(data as ProjectRow);
       } catch {
         // Treated as not found.

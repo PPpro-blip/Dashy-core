@@ -47,7 +47,6 @@ import {
   formatBytes,
   isBinaryPath,
   isDataUrl,
-  isImagePath,
   isPreviewableImage,
   mimeForBinaryExt,
   readBlobAsDataUrl,
@@ -98,12 +97,6 @@ const AUTOSAVE_DEBOUNCE_MS = 1200;
 /** Allowed D-Code file names: alphanumeric, underscore, hyphen, dot. */
 const VALID_FILENAME = /^[a-zA-Z0-9_\-\.]+$/;
 
-interface GithubRepo {
-  full_name: string;
-  clone_url: string;
-  html_url?: string;
-  description?: string | null;
-}
 
 /** File-tree icon + accent based on the file type. */
 function fileIconFor(
@@ -139,64 +132,28 @@ const MAX_BINARY_BYTES = 350 * 1024; // ~350 KB raw → ~467 KB data URL
 function parseGithubRepo(input: string): { owner: string; repo: string } | null {
   const value = input.trim().replace(/\/$/, "").replace(/\.git$/, "");
   const urlMatch = value.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)$/);
-  if (urlMatch) return { owner: urlMatch[1], repo: urlMatch[2] };
   const shortMatch = value.match(/^([^/]+)\/([^/]+)$/);
-  if (shortMatch) return { owner: shortMatch[1], repo: shortMatch[2] };
+  const parts = urlMatch ? [urlMatch[1], urlMatch[2]] : shortMatch ? [shortMatch[1], shortMatch[2]] : null;
+  if (!parts || parts.some((part) => part === "." || part === ".." || !/^[A-Za-z0-9_.-]+$/.test(part))) return null;
+  return { owner: parts[0], repo: parts[1] };
   return null;
 }
 
-/**
- * Resolves the GitHub OAuth provider token for the current Supabase session,
- * when present. Used to raise the GitHub API rate limit (60/hr anonymous)
- * and to authorize `/user/repos`.
- */
-async function githubProviderToken(): Promise<string | null> {
-  const supabase = createClient();
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  const token = (session as { provider_token?: string | null } | null)
-    ?.provider_token;
-  return typeof token === "string" && token ? token : null;
-}
-
-function githubHeaders(providerToken: string | null): Record<string, string> {
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-  if (providerToken) headers.Authorization = `Bearer ${providerToken}`;
-  return headers;
-}
-
-/**
- * Lists the signed-in user's GitHub repositories. When authenticated via
- * GitHub OAuth the provider token authorizes `/user/repos`; otherwise the
- * anonymous call 401s and the modal falls back to a public-repo URL input.
- */
-async function listGitHubRepos(): Promise<GithubRepo[]> {
-  const providerToken = await githubProviderToken();
-  const res = await fetch(
-    "https://api.github.com/user/repos?sort=updated&per_page=30&affiliation=owner,collaborator",
-    { headers: githubHeaders(providerToken), cache: "no-store" }
-  );
-  if (res.status === 401 || res.status === 403) {
-    throw new Error(
-      providerToken
-        ? "GitHub token was rejected — re-connect GitHub or paste a repo URL to import."
-        : "GitHub repo listing needs a GitHub sign-in — paste any public repo URL to import instead."
-    );
+/** Same-origin, narrow GitHub proxy for public, read-only repository requests. */
+async function githubApiJson<T>(path: string, query?: Record<string, string>): Promise<T> {
+  const safePath = path.split("/").map(encodeURIComponent).join("/");
+  const url = new URL(`/api/github/${safePath}`, window.location.origin);
+  for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    let message = `GitHub request failed (HTTP ${response.status}).`;
+    try {
+      const body = await response.json() as { message?: unknown };
+      if (typeof body.message === "string") message = body.message;
+    } catch { /* preserve safe generic failure */ }
+    throw new Error(message);
   }
-  if (res.status === 429) {
-    throw new Error(
-      "GitHub rate limit reached. Wait a moment or paste a repo URL to import."
-    );
-  }
-  if (!res.ok) {
-    throw new Error(`GitHub API returned HTTP ${res.status}.`);
-  }
-  const data = (await res.json()) as unknown;
-  return Array.isArray(data) ? (data as GithubRepo[]) : [];
+  return response.json() as Promise<T>;
 }
 
 /** Result of a repo import: kept files + how many were skipped. */
@@ -220,130 +177,78 @@ interface GithubImportResult {
  * preview pane. Archives, executables, audio/video, lockfiles and generated
  * output are skipped (`isBlockedPath`).
  */
-async function importGitHubRepository(
-  url: string
-): Promise<GithubImportResult> {
+async function importGitHubRepository(url: string): Promise<GithubImportResult> {
   const parsed = parseGithubRepo(url);
-  if (!parsed) {
-    throw new Error(
-      "Enter a valid GitHub repo URL (e.g. https://github.com/owner/repo)."
-    );
-  }
+  if (!parsed) throw new Error("Enter a valid GitHub repo URL (e.g. https://github.com/owner/repo).");
   const { owner, repo } = parsed;
-  const providerToken = await githubProviderToken();
-
-  const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-    headers: githubHeaders(providerToken),
-  });
-  if (!repoRes.ok) {
-    throw new Error(
-      repoRes.status === 404
-        ? `GitHub repo "${owner}/${repo}" not found. Check the URL.`
-        : `GitHub repo not accessible (HTTP ${repoRes.status}).`
-    );
-  }
-  const repoInfo = (await repoRes.json()) as { default_branch?: string };
+  const prefix = `repos/${owner}/${repo}`;
+  const repoInfo = await githubApiJson<{ default_branch?: string }>(prefix);
   const branch = repoInfo.default_branch ?? "main";
-
-  const treeRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
-    { headers: githubHeaders(providerToken) }
+  const head = await githubApiJson<{ sha?: string }>(`${prefix}/commits`, { sha: branch });
+  if (!head.sha || !/^[a-f0-9]{40}$/i.test(head.sha)) throw new Error("Could not resolve the repository's default branch.");
+  const tree = await githubApiJson<{ tree?: Array<{ path?: string; type?: string; size?: number; sha?: string }> }>(
+    `${prefix}/git/trees/${head.sha}`, { recursive: "1" }
   );
-  if (!treeRes.ok) {
-    throw new Error(
-      `Could not list GitHub repository contents (HTTP ${treeRes.status}).`
-    );
-  }
-  const tree = (await treeRes.json()) as {
-    tree?: Array<{ path?: string; type?: string; size?: number }>;
-  };
 
   const blobs = (tree.tree ?? [])
-    .filter((entry) => entry.type === "blob" && entry.path)
-    .map((entry) => ({
-      path: entry.path as string,
-      size: typeof entry.size === "number" ? entry.size : 0,
-    }))
-    // Sanitize path characters and collapse to the file basename — D-Code
-    // files are a flat list (project has no nested folders).
-    .filter(({ path }) => /^[a-zA-Z0-9_@\-\.\(\)\[\]\/]+$/.test(path))
+    .filter((entry) => entry.type === "blob" && entry.path && entry.sha)
+    .map((entry) => ({ path: entry.path as string, sha: entry.sha as string, size: typeof entry.size === "number" ? entry.size : 0 }))
+    .filter(({ path }) => /^[a-zA-Z0-9_@\-\.()\[\]\/]+$/.test(path))
     .slice(0, MAX_IMPORT_FILES * 2);
 
   let skipped = 0;
   let binaries = 0;
   const seenNames = new Set<string>();
   const files: DCodeFile[] = [];
-
-  for (const { path, size } of blobs) {
+  for (const { path, sha, size } of blobs) {
     if (files.length >= MAX_IMPORT_FILES) break;
     const name = path.split("/").pop() ?? path;
     const lower = name.toLowerCase();
-    // Generated output / VCS / archives / lockfiles never enter files[].
-    if (isBlockedPath(path)) {
+    if (isBlockedPath(path) || seenNames.has(lower) || !/^[a-f0-9]{40}$/i.test(sha)) {
       skipped += 1;
       continue;
     }
-    if (seenNames.has(lower)) {
+    if (isBinaryPath(name) && size > MAX_BINARY_BYTES) {
       skipped += 1;
       continue;
     }
 
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
-
+    let blob: { content?: string; encoding?: string };
+    try {
+      blob = await githubApiJson(`${prefix}/git/blobs/${sha}`);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (blob.encoding !== "base64" || typeof blob.content !== "string") {
+      skipped += 1;
+      continue;
+    }
+    const base64 = blob.content.replace(/\s/g, "");
+    let bytes: Uint8Array;
+    try {
+      const binary = atob(base64);
+      bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    } catch {
+      skipped += 1;
+      continue;
+    }
     if (isBinaryPath(name)) {
-      // Skip oversized binaries before downloading — Base64 inflates ~33%.
-      if (size && size > MAX_BINARY_BYTES) {
-        skipped += 1;
-        continue;
-      }
-      const blobRes = await fetch(rawUrl);
-      if (!blobRes.ok) continue;
-      const bytes = new Uint8Array(await blobRes.arrayBuffer());
-      if (bytes.length > MAX_BINARY_BYTES) {
-        skipped += 1;
-        continue;
-      }
-      seenNames.add(lower);
+      if (bytes.length > MAX_BINARY_BYTES) { skipped += 1; continue; }
       binaries += 1;
-      files.push({
-        id: newId(),
-        name,
-        language: languageFromFilename(name),
-        content: bytesToDataUrl(
-          bytes,
-          mimeForBinaryExt(extensionWithDot(name))
-        ),
-      });
-      continue;
-    }
-
-    const rawRes = await fetch(rawUrl);
-    if (!rawRes.ok) continue;
-    const content = await rawRes.text();
-    // Content sniff catches mislabeled / renamed binaries (NUL bytes).
-    if (containsBinaryMarkers(content)) {
-      skipped += 1;
-      continue;
-    }
-    if (content.length > MAX_FILE_CONTENT_CHARS) {
-      skipped += 1;
-      continue;
+      files.push({ id: newId(), name, language: languageFromFilename(name), content: bytesToDataUrl(bytes, mimeForBinaryExt(extensionWithDot(name))) });
+    } else {
+      const content = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      if (containsBinaryMarkers(content) || content.length > MAX_FILE_CONTENT_CHARS) { skipped += 1; continue; }
+      files.push({ id: newId(), name, language: languageFromFilename(name), content: cleanTextContent(content) });
     }
     seenNames.add(lower);
-    files.push({
-      id: newId(),
-      name,
-      language: languageFromFilename(name),
-      content: cleanTextContent(content),
-    });
   }
 
   if (files.length === 0) {
-    throw new Error(
-      skipped > 0
-        ? "No importable files found — this repository only contains archives, generated output or oversized media."
-        : "No importable source files found in this repository."
-    );
+    throw new Error(skipped > 0
+      ? "No importable files found — repository files were unsupported, generated, or oversized."
+      : "No importable source files found in this repository.");
   }
   return { files, skipped, binaries, repoName: repo };
 }
@@ -359,27 +264,10 @@ function BinaryAssetPreview({ file }: { file: DCodeFile }) {
   const size = file.content.startsWith("data:")
     ? dataUrlByteSize(file.content)
     : file.content.length;
-  const isImage = isImagePath(file.name) || file.content.startsWith("data:image/");
-  const svgBlobSrc = useMemo(() => {
-    if (!file.name.toLowerCase().endsWith(".svg") || file.content.startsWith("data:")) {
-      return null;
-    }
-    try {
-      return URL.createObjectURL(
-        new Blob([file.content], { type: "image/svg+xml" })
-      );
-    } catch {
-      return null;
-    }
-  }, [file.name, file.content]);
-  useEffect(() => {
-    if (!svgBlobSrc) return;
-    return () => URL.revokeObjectURL(svgBlobSrc);
-  }, [svgBlobSrc]);
-
-  const imgSrc = file.content.startsWith("data:image/")
+  const imgSrc = /^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(file.content)
     ? file.content
-    : svgBlobSrc;
+    : null;
+  const isImage = Boolean(imgSrc);
 
   return (
     <div
@@ -481,8 +369,6 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubModalOpen, setGithubModalOpen] = useState(false);
   const [githubRepoUrl, setGithubRepoUrl] = useState("");
-  const [githubRepos, setGithubRepos] = useState<GithubRepo[]>([]);
-  const [listingRepos, setListingRepos] = useState(false);
   const [importingRepo, setImportingRepo] = useState(false);
   const [githubError, setGithubError] = useState<string | null>(null);
 
@@ -1163,45 +1049,13 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
   const openGitHubModal = useCallback(() => {
     setGithubError(null);
     setGithubRepoUrl("");
-    setGithubRepos([]);
     setGithubModalOpen(true);
-    // Signed in via GitHub? Fetch the repo browser immediately so the modal
-    // opens on a populated list instead of a bare URL field.
-    void (async () => {
-      setListingRepos(true);
-      try {
-        const repos = await listGitHubRepos();
-        setGithubRepos(repos);
-      } catch {
-        // Listing is optional — the public-URL import path always works.
-      } finally {
-        setListingRepos(false);
-      }
-    })();
   }, []);
 
   const closeGitHubModal = useCallback(() => {
     setGithubModalOpen(false);
     setGithubError(null);
     setGithubRepoUrl("");
-    setGithubRepos([]);
-  }, []);
-
-  const handleListRepos = useCallback(async () => {
-    setListingRepos(true);
-    setGithubError(null);
-    try {
-      const repos = await listGitHubRepos();
-      setGithubRepos(repos);
-    } catch (error) {
-      setGithubError(
-        error instanceof Error
-          ? error.message
-          : "Could not list GitHub repositories."
-      );
-    } finally {
-      setListingRepos(false);
-    }
   }, []);
 
   const handleImportRepo = useCallback(
@@ -1773,9 +1627,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 <GithubIcon className="h-5 w-5" />
               </span>
               <div className="min-w-0 flex-1">
-                <h2 className="text-sm font-semibold text-white">Connect GitHub</h2>
+                <h2 className="text-sm font-semibold text-white">Import a public GitHub repository</h2>
                 <p className="mt-0.5 text-xs text-zinc-500">
-                  Import a repository or fetch raw files into this project.
+                  Only public repository reads are enabled in this deployment.
                 </p>
               </div>
               <button
@@ -1832,65 +1686,9 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
-                <div className="h-px flex-1 bg-white/[0.06]" />
-                <span className="text-[10px] uppercase tracking-widest text-zinc-600">
-                  or
-                </span>
-                <div className="h-px flex-1 bg-white/[0.06]" />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-medium text-zinc-400">
-                    Your repositories
-                    {githubConnected ? "" : " — sign in with GitHub to list"}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => void handleListRepos()}
-                    disabled={listingRepos || importingRepo}
-                    className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-cyan-400/40 hover:text-cyan-300 disabled:opacity-50"
-                  >
-                    {listingRepos ? "Loading…" : "List repos"}
-                  </button>
-                </div>
-
-                {listingRepos && githubRepos.length === 0 && (
-                  <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-black/20 px-4 py-3 text-xs text-zinc-500">
-                    <LoaderIcon className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-                    Fetching your repositories from GitHub…
-                  </div>
-                )}
-
-                {githubRepos.length > 0 && (
-                  <ul className="mt-3 max-h-52 overflow-y-auto rounded-xl border border-white/[0.06] bg-black/20">
-                    {githubRepos.map((repo) => (
-                      <li key={repo.full_name}>
-                        <button
-                          type="button"
-                          onClick={() => void handleImportRepo(repo.clone_url)}
-                          disabled={importingRepo}
-                          className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-white/[0.04] disabled:opacity-50"
-                        >
-                          <GithubIcon className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate font-mono text-xs text-zinc-200">
-                              {repo.full_name}
-                            </span>
-                            {repo.description && (
-                              <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
-                                {repo.description}
-                              </span>
-                            )}
-                          </span>
-                          <PlusIcon className="h-3.5 w-3.5 flex-shrink-0 text-cyan-400" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              <p className="rounded-lg border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-[11px] leading-relaxed text-amber-200/80">
+                Private repository listing, token-authenticated imports, and GitHub pushes are disabled because provider tokens cannot be stored server-side by the current auth architecture. A public repository URL can still be imported without a token.
+              </p>
 
               {githubError && (
                 <p
@@ -1901,12 +1699,6 @@ export function DCodeWorkspace({ project, draft, readOnly = false }: DCodeWorksp
                 </p>
               )}
 
-              {githubConnected && (
-                <p className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  Signed in with GitHub — repo listing uses your provider token.
-                </p>
-              )}
             </div>
           </div>
         </>

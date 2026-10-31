@@ -1,97 +1,51 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createRouteHandlerClient, createServiceClient } from "@/lib/supabase/server";
-
-/**
- * DashyCore v7 — /api/share/[key] — public share resolver (server-side).
- *
- * The Share viewer resolves links through the browser client, which depends
- * on the `dcode_projects_select_public` RLS policy existing in the LIVE
- * database. When that migration has not been applied, every anonymous read
- * returns zero rows and visitors see "This link is private or no longer
- * exists" even for published projects. This route is the server-side
- * recovery lane:
- *
- *   1. FIRST read through the cookie-bound (anon/auth) client — RLS fully
- *      applies, so the OWNER of a private project still resolves their own
- *      row and nothing private can ever be served to a visitor.
- *   2. If that yields nothing AND a service role key is configured, retry
- *      with the service client HARD-FILTERED to is_public = true. Published
- *      links therefore keep working even on a database where the public
- *      SELECT policy is missing; private rows can never leak (the filter is
- *      in the query itself, not in discretionary policy logic).
- *
- * Response: the raw project row JSON (same shape lib/dcode expects) or 404.
- * `key` is either the project uuid or its 12-char share slug.
- */
+import { publicSharePayload } from "@/lib/dcode/share-response";
 
 interface RouteContext {
   params: Promise<{ key: string }>;
 }
 
-/** True for canonical uuid text (8-4-4-4-12 hex). */
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    value
-  );
+const NO_STORE = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+const PUBLIC_FIELDS = "title, description, language, files, is_public, share_slug";
+
+function unavailable() {
+  return NextResponse.json({ error: "Not found or private" }, { status: 404, headers: NO_STORE });
 }
 
-const SELECT_COLUMNS = "*";
+/** Resolves only a valid public share slug and emits a strict render-only DTO. */
+export async function GET(_request: NextRequest, context: RouteContext) {
+  const { key } = await context.params;
+  if (!/^[a-z0-9]{12}$/i.test(key ?? "")) return unavailable();
 
-export async function GET(
-  _request: NextRequest,
-  context: RouteContext
-): Promise<NextResponse> {
-  const { key: rawKey } = await context.params;
-  const key = (rawKey ?? "").trim();
-  if (!key || key.length > 64) {
-    return NextResponse.json({ error: "Invalid share key" }, { status: 400 });
-  }
-
-  // Lane 1 — session/RLS-respecting read (owner sees own private rows).
+  // RLS-bound path still requires is_public, so an owner's private link does
+  // not become visible through this public endpoint.
   try {
     const supabase = await createRouteHandlerClient();
-    let query = supabase.from("dcode_projects").select(SELECT_COLUMNS);
-    query = isUuid(key)
-      ? query.eq("id", key)
-      : query.eq("share_slug", key.toLowerCase());
-    const { data, error } = await query.maybeSingle();
-    if (!error && data) {
-      return NextResponse.json(data, {
-        status: 200,
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
+    const { data } = await supabase
+      .from("dcode_projects")
+      .select(PUBLIC_FIELDS)
+      .eq("share_slug", key.toLowerCase())
+      .eq("is_public", true)
+      .maybeSingle();
+    if (data) return NextResponse.json(publicSharePayload(data), { headers: NO_STORE });
   } catch {
-    // Fall through to lane 2 — a dead/invalid session must not break a
-    // public link.
+    // Continue with service role, always hard-filtered to public rows.
   }
 
-  // Lane 2 — service-role recovery, public rows ONLY.
   const service = createServiceClient();
   if (service) {
     try {
-      let query = service
+      const { data } = await service
         .from("dcode_projects")
-        .select(SELECT_COLUMNS)
-        // Hard privacy gate: only rows the owner explicitly published.
-        .eq("is_public", true);
-      query = isUuid(key)
-        ? query.eq("id", key)
-        : query.eq("share_slug", key.toLowerCase());
-      const { data, error } = await query.maybeSingle();
-      if (!error && data) {
-        return NextResponse.json(data, {
-          status: 200,
-          headers: { "Cache-Control": "no-store" },
-        });
-      }
+        .select(PUBLIC_FIELDS)
+        .eq("share_slug", key.toLowerCase())
+        .eq("is_public", true)
+        .maybeSingle();
+      if (data) return NextResponse.json(publicSharePayload(data), { headers: NO_STORE });
     } catch {
-      // Treated as not-found below.
+      // Return a uniform not-found response.
     }
   }
-
-  return NextResponse.json(
-    { error: "Not found or private" },
-    { status: 404, headers: { "Cache-Control": "no-store" } }
-  );
+  return unavailable();
 }
