@@ -3,10 +3,10 @@
 /**
  * DashyCore v7 — /d-code/share/[share_slug] (public read-only viewer).
  *
- * Serves shared D-Code projects to ANYONE (no session): the browser client
- * fetches by share_slug and Supabase RLS allows the read because the row
- * is is_public = true. Deliberately outside the authenticated route group
- * — no sidebar, no auth guard — with its own minimal public chrome.
+ * Serves only public D-Code shares to anyone. The browser calls the
+ * server-side slug resolver, which returns a minimal render DTO and filters
+ * is_public = true. Deliberately outside the authenticated route group —
+ * no sidebar, no auth guard — with its own minimal public chrome.
  */
 
 import { useEffect, useState } from "react";

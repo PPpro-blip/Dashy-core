@@ -246,13 +246,9 @@ export function renderTags(tags: string[]): string {
 /* Project image picker                                                    */
 /* ---------------------------------------------------------------------- */
 
-const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
 
-/**
- * Lists previewable image files from the project (read-only use of the D-Code
- * file payload — we never mutate Monaco state). SVG files are stored as plain
- * text, so they are wrapped into a data URL for <img> previews.
- */
+/** Lists supported raster image files; SVG stays text and is never embedded in an <img>. */
 export function collectProjectImages(
   files: Array<Pick<DCodeFile, "name" | "content">>
 ): ProjectImage[] {
@@ -260,21 +256,7 @@ export function collectProjectImages(
   for (const file of files) {
     if (!IMAGE_EXT.test(file.name)) continue;
     const content = file.content ?? "";
-    if (/\.svg$/i.test(file.name) && !content.startsWith("data:")) {
-      // SVG is text in D-Code; encode it so the picker can render it.
-      try {
-        out.push({
-          name: file.name,
-          dataUrl: `data:image/svg+xml;base64,${btoa(
-            unescape(encodeURIComponent(content))
-          )}`,
-        });
-      } catch {
-        // Skip un-encodable SVGs — they can't preview anyway.
-      }
-      continue;
-    }
-    if (content.startsWith("data:image/")) {
+    if (/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(content)) {
       out.push({ name: file.name, dataUrl: content });
     }
   }

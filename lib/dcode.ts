@@ -4,8 +4,8 @@
  * Browser-side CRUD for the D-Code multi-file Monaco IDE. Every call goes
  * through the Supabase browser client; Row Level Security (see
  * supabase/migrations/20260829100000_create_dcode_projects.sql) enforces:
- *   - owner: full CRUD on their own projects
- *   - everyone (incl. anonymous): SELECT when is_public = true
+ *   - owner: full CRUD on their own projects (database RLS and explicit owner filters)
+ *   - public viewers: share-slug resolution through a server-only minimal DTO
  *
  * A project's files are stored as one jsonb array so loading a workspace
  * is a single round-trip:
@@ -411,96 +411,74 @@ function safeText(value: string | null | undefined, max = 200): string | null {
 /** Lists the signed-in user's projects, most recently touched first. */
 export async function listProjects(): Promise<DCodeProject[]> {
   const supabase = createClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  if (authError || !user) throw classError(authError ?? { message: "Sign in to list projects." });
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
+    .eq("user_id", user.id)
     .order("updated_at", { ascending: false })
     .limit(100);
   if (error) throw classError(error);
   return (data as DCodeProjectRow[]).map(rowToProject);
 }
 
-/** Fetches one owned project (RLS hides other users' rows → null). */
+/** Fetches one owned project, enforcing owner identity even if public-row RLS allows reads. */
 export async function getProject(id: string): Promise<DCodeProject | null> {
   const supabase = createClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  if (authError || !user) return null;
   const { data, error } = await supabase
     .from("dcode_projects")
     .select("*")
     .eq("id", id)
+    .eq("user_id", user.id)
     .maybeSingle();
   if (error) throw classError(error);
   return data ? rowToProject(data as DCodeProjectRow) : null;
 }
 
-/** True for canonical UUID text, so slugs never hit the UUID column. */
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    value
-  );
-}
-
 /**
- * Fetches a project by share slug. RLS admits public rows for visitors and
- * the owner's own private row, which lets the owner configure Share Hub.
+ * Fetches a public project through the server-side share resolver. Owner
+ * controls use getProject(id), which always verifies the authenticated owner.
  */
 export async function getProjectByShareSlug(
   shareSlug: string
 ): Promise<DCodeProject | null> {
-  const supabase = createClient();
-  const { data, error } = await supabase
-    .from("dcode_projects")
-    .select("*")
-    .eq("share_slug", shareSlug.trim().toLowerCase())
-    .maybeSingle();
-  if (error) throw classError(error);
-  return data ? rowToProject(data as DCodeProjectRow) : null;
+  const key = shareSlug.trim().toLowerCase();
+  if (!/^[a-z0-9]{12}$/.test(key)) return null;
+  const response = await fetch(`/api/share/${encodeURIComponent(key)}`, { cache: "no-store" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("Could not load this public share.");
+  const row = (await response.json()) as {
+    title: string;
+    description: string | null;
+    language: string;
+    files: unknown;
+    is_public: true;
+    share_slug: string;
+  };
+  const { files, skipped } = coerceFiles(row.files);
+  return {
+    // The public DTO deliberately does not disclose the project's database UUID.
+    id: key,
+    userId: "",
+    title: row.title || "Untitled project",
+    description: row.description ?? null,
+    language: row.language || "typescript",
+    files,
+    isPublic: true,
+    shareSlug: row.share_slug,
+    createdAt: "",
+    updatedAt: "",
+    ...(skipped.length > 0 ? { skippedFiles: skipped } : {}),
+  };
 }
 
-/**
- * Resolves either a project UUID or a share slug. If a browser/RLS read is
- * unavailable, retry through the server route, whose service-role lane is
- * hard-filtered to public rows.
- */
-export async function getPublicProject(
-  ref: string
-): Promise<DCodeProject | null> {
-  const key = ref.trim();
-  if (!key) return null;
-
-  let firstError: Error | null = null;
-  if (isUuid(key)) {
-    const supabase = createClient();
-    const { data, error } = await supabase
-      .from("dcode_projects")
-      .select("*")
-      .eq("id", key)
-      .maybeSingle();
-    if (data) return rowToProject(data as DCodeProjectRow);
-    if (error) firstError = classError(error);
-  }
-
-  try {
-    const bySlug = await getProjectByShareSlug(key);
-    if (bySlug) return bySlug;
-  } catch (error) {
-    firstError = error instanceof Error ? error : firstError;
-  }
-
-  try {
-    const response = await fetch(`/api/share/${encodeURIComponent(key)}`, {
-      cache: "no-store",
-    });
-    if (response.ok) {
-      const row = (await response.json()) as DCodeProjectRow;
-      if (row?.id) return rowToProject(row);
-    }
-    if (response.status === 404 && !firstError) return null;
-  } catch {
-    // Network failure falls through to the original query result.
-  }
-
-  if (firstError) throw firstError;
-  return null;
+/** Resolves a public share slug only; project UUIDs are never public-viewer keys. */
+export async function getPublicProject(ref: string): Promise<DCodeProject | null> {
+  // Public viewers resolve only unguessable share slugs, never project UUIDs.
+  return getProjectByShareSlug(ref);
 }
 
 /** Creates a project for the signed-in user and returns the stored row. */
@@ -547,14 +525,13 @@ export async function updateProject(
   // Explicitly resolve the authenticated user and pass user_id through so the
   // RLS `with check (auth.uid() = user_id)` always matches the session, even
   // when a stale browser row is being patched.
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  if (authError || !user) throw classError(authError ?? { message: "Sign in to edit this project." });
 
-  const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  // Only include user_id when we actually have it; never override ownership
-  // with an unauthenticated/empty id.
-  if (user?.id) payload.user_id = user.id;
+  const payload: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+    user_id: user.id,
+  };
   if (patch.title !== undefined)
     payload.title = safeText(patch.title.trim(), 200) || "Untitled project";
   if (patch.description !== undefined) payload.description = safeText(patch.description, 2000);
@@ -566,6 +543,7 @@ export async function updateProject(
     .from("dcode_projects")
     .update(payload)
     .eq("id", id)
+    .eq("user_id", user.id)
     .select("*")
     .single();
   if (error) throw classError(error);
@@ -582,6 +560,8 @@ export async function toggleProjectPublic(
   isPublic: boolean
 ): Promise<DCodeProject> {
   const supabase = createClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  if (authError || !user) throw classError(authError ?? { message: "Sign in to change sharing." });
 
   if (!isPublic) {
     return updateProject(id, { isPublic: false });
@@ -601,6 +581,7 @@ export async function toggleProjectPublic(
         updated_at: new Date().toISOString(),
       })
       .eq("id", id)
+      .eq("user_id", user.id)
       .select("*")
       .single();
     if (!error) return rowToProject(data as DCodeProjectRow);
@@ -616,9 +597,15 @@ export async function toggleProjectPublic(
 /** Deletes a project (files live inline, so this is one call). */
 export async function deleteProject(id: string): Promise<void> {
   const supabase = createClient();
-  const { error } = await supabase
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  if (authError || !user) throw classError(authError ?? { message: "Sign in to delete this project." });
+  const { data, error } = await supabase
     .from("dcode_projects")
     .delete()
-    .eq("id", id);
+    .eq("id", id)
+    .eq("user_id", user.id)
+    .select("id")
+    .maybeSingle();
   if (error) throw classError(error);
+  if (!data) throw new Error("Project not found or you are not its owner.");
 }
