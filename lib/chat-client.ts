@@ -127,30 +127,26 @@ export class ChatClientError extends Error {
   }
 }
 
-/** Supabase stores browser sessions under `sb-*` keys in localStorage. */
-export function getSessionToken(): string {
+/**
+ * Resolve the current Supabase access token through the @supabase/ssr
+ * browser client — the session lives in COOKIES (that is what the Next.js
+ * middleware/server read), so the token must be read the same way, via
+ * `auth.getSession()`. The old localStorage `sb-*` scan was removed: with
+ * cookie storage it always returned "" and left worker calls unauthenticated.
+ * Returns "" when signed out or outside the browser; never throws.
+ */
+export async function getSessionToken(): Promise<string> {
   if (typeof window === "undefined") return "";
   try {
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const key = window.localStorage.key(i);
-      if (!key || !key.startsWith("sb-")) continue;
-      const raw = window.localStorage.getItem(key);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        const token =
-          (parsed?.access_token as string | undefined) ??
-          ((parsed?.[key] as Record<string, unknown> | undefined)
-            ?.access_token as string | undefined);
-        if (token) return token;
-      } catch {
-        // Skip unparsable entries.
-      }
-    }
+    const { createClient } = await import("@/lib/supabase/client");
+    const supabase = createClient();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    return session?.access_token ?? "";
   } catch {
-    // localStorage unavailable (privacy mode, SSR).
+    return "";
   }
-  return "";
 }
 
 type UnknownRecord = Record<string, unknown>;

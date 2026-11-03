@@ -1,6 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
+import { getSupabaseEnv, SUPABASE_ENV_MISSING_MESSAGE } from "./env";
 
 /**
  * Supabase client for Server Components.
@@ -14,47 +15,47 @@ import { cookies } from "next/headers";
  * Route Handlers use `createRouteHandlerClient` instead.
  */
 export async function createClient() {
+  const env = getSupabaseEnv();
+  if (!env) {
+    throw new Error(SUPABASE_ENV_MISSING_MESSAGE);
+  }
   const cookieStore = await cookies();
 
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll() {
-          // No-op in Server Components — see note above.
-        },
+  return createServerClient(env.url, env.anonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll();
       },
-    }
-  );
+      setAll() {
+        // No-op in Server Components — see note above.
+      },
+    },
+  });
 }
 
 /**
  * Supabase client for Route Handlers, where cookies ARE writable.
- * Used by the OAuth callback to persist the exchanged session.
+ * Used by the OAuth/OTP callback to persist the exchanged session.
  */
 export async function createRouteHandlerClient() {
+  const env = getSupabaseEnv();
+  if (!env) {
+    throw new Error(SUPABASE_ENV_MISSING_MESSAGE);
+  }
   const cookieStore = await cookies();
 
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options)
-          );
-        },
+  return createServerClient(env.url, env.anonKey, {
+    cookies: {
+      getAll() {
+        return cookieStore.getAll();
       },
-    }
-  );
+      setAll(cookiesToSet) {
+        cookiesToSet.forEach(({ name, value, options }) =>
+          cookieStore.set(name, value, options)
+        );
+      },
+    },
+  });
 }
 
 /**

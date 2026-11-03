@@ -3,13 +3,21 @@ import { createClient } from "@/lib/supabase/server";
 
 /**
  * Root route — server-side session check.
- * Unauthenticated → /login · Authenticated → /chat
+ * Unauthenticated (or unconfigured Supabase env) → /login · Authenticated → /chat
  */
 export default async function HomePage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  let user = null;
+  try {
+    const supabase = await createClient();
+    const {
+      data: { user: authUser },
+    } = await supabase.auth.getUser();
+    user = authUser;
+  } catch {
+    // Missing/invalid Supabase env or session-read failure: treat as signed
+    // out. The login screen shows a clear configuration error on submit.
+    user = null;
+  }
 
   if (!user) {
     redirect("/login");
